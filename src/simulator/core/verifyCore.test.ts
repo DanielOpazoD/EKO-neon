@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { listCases, loadCaseById } from '@/cases';
+import { CASE_INPUTS, listCases, loadCaseById } from '@/cases';
+import { validateCase } from '@/cases/schema';
 import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
 import { buildBeatTables, cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { caseOutflow } from '@/simulator/cardiac-cycle/outflow';
@@ -26,18 +27,21 @@ import { allocPolarFrame, DEFAULT_ACQUISITION } from '@/simulator/renderer/types
 import { DEFAULT_SPECTRAL } from '@/simulator/doppler/spectral/spectrum';
 
 describe('EchoTwin TTE core physiology and clinical cases', () => {
-  it('loads and validates all 12 clinical cases with finite ground-truth hemodynamics', () => {
+  it('loads and validates all 12 clinical cases with finite ground-truth hemodynamics and Zod schema parity', () => {
     const catalog = listCases();
     assert.equal(catalog.length, 12, 'Expected 12 clinical cases');
 
-    for (const entry of catalog) {
-      const def = loadCaseById(entry.id);
+    for (const raw of CASE_INPUTS) {
+      const validated = validateCase(raw);
+      assert.equal(validated.ok, true, `Zod validation failed for ${raw.id}: ${validated.errors.join('; ')}`);
+      const def = loadCaseById(raw.id);
+      assert.deepEqual(def, validated.case, `normalizeCase drifted from Zod CaseDefinitionSchema for ${raw.id}`);
       const truth = computeGroundTruth(def);
-      assert.ok(Number.isFinite(truth.lv.efPct) && truth.lv.efPct > 5 && truth.lv.efPct < 90, `${entry.id} EF out of range`);
-      assert.ok(Number.isFinite(truth.lv.edvMl) && truth.lv.edvMl > truth.lv.esvMl, `${entry.id} EDV <= ESV`);
-      assert.ok(Number.isFinite(truth.lv.eddCm) && truth.lv.eddCm > 2 && truth.lv.eddCm < 10, `${entry.id} EDD out of range`);
-      assert.ok(Number.isFinite(truth.aorticValve.vmaxMps) && truth.aorticValve.vmaxMps > 0.4, `${entry.id} AV Vmax invalid`);
-      assert.ok(Number.isFinite(truth.wallMotion.wmsi) && truth.wallMotion.wmsi >= 1, `${entry.id} WMSI invalid`);
+      assert.ok(Number.isFinite(truth.lv.efPct) && truth.lv.efPct > 5 && truth.lv.efPct < 90, `${raw.id} EF out of range`);
+      assert.ok(Number.isFinite(truth.lv.edvMl) && truth.lv.edvMl > truth.lv.esvMl, `${raw.id} EDV <= ESV`);
+      assert.ok(Number.isFinite(truth.lv.eddCm) && truth.lv.eddCm > 2 && truth.lv.eddCm < 10, `${raw.id} EDD out of range`);
+      assert.ok(Number.isFinite(truth.aorticValve.vmaxMps) && truth.aorticValve.vmaxMps > 0.4, `${raw.id} AV Vmax invalid`);
+      assert.ok(Number.isFinite(truth.wallMotion.wmsi) && truth.wallMotion.wmsi >= 1, `${raw.id} WMSI invalid`);
     }
   });
 

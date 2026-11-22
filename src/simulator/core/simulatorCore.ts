@@ -1,34 +1,55 @@
-import { BeatHistory } from './beatHistory';
-import { CineBuffer, type CineFrame } from './cineBuffer';
-import { constrainAcquisition } from './acquisitionInput';
 import type { CaseDefinition } from '@/cases/schema';
-import { caseOutflow } from '@/simulator/cardiac-cycle/outflow';
+import { buildCaseModels } from '@/simulator/anatomy/caseModels';
 import {
   computeHeartPose,
   heartLandmarks,
   type HeartModel,
   type HeartPose,
 } from '@/simulator/anatomy/heartModel';
+import type { AssetFetcher } from '@/simulator/anatomy/roderoAsset';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
-import { buildCaseModels } from '@/simulator/anatomy/caseModels';
-import {
-  buildBeatTables,
-  cycleStateAt,
-  type BeatTables,
-} from '@/simulator/cardiac-cycle/cycleModel';
-import {
-  inflowRespiratoryVariation,
-  respiratoryDepth,
-} from '@/simulator/cardiac-cycle/respiration';
-import { ejectionTimeS, preEjectionPeriodS } from '@/simulator/cardiac-cycle/timing';
 import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
-import { EcgRing } from './ecgRing';
-import { ColorFieldDriver } from './colorFieldDriver';
-import { ExperimentalLoaders } from './experimentalLoaders';
-import { isSpectralModality, isStripModality } from '@/simulator/renderer/modality';
-import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
+import { cycleStateAt, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
+import { overlayColorField, type ColorField } from '@/simulator/doppler/color/colorDoppler';
+import {
+  buildFlowParams,
+  type FlowFieldParams,
+} from '@/simulator/doppler/flow-primitives/flowField';
+import { spectralRange } from '@/simulator/doppler/spectral/spectrum';
+import { computeGroundTruth, type StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import {
+  beamFrameFromPose,
+  contactQuality,
+  poseFromControl,
+  type BeamFrame,
+} from '@/simulator/probe/pose';
+import { AtlasRenderer, AtlasRenderer as AtlasBackend } from '@/simulator/renderer/atlas/atlasRenderer';
+import { acquisitionFrameRate, cadenceHz } from '@/simulator/renderer/frameRate';
 import { createWebgl2Renderer, type Webgl2Renderer } from '@/simulator/renderer/gpu/webgl2Renderer';
-import { AtlasRenderer } from '@/simulator/renderer/atlas/atlasRenderer';
+import { isSpectralModality, isStripModality } from '@/simulator/renderer/modality';
+import {
+  applyConsole,
+  createConsoleState,
+  NO_ARTIFACTS,
+  persistenceOverTime,
+  type ArtifactSettings,
+  type ConsoleState,
+} from '@/simulator/renderer/postprocess/consolePipeline';
+import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
+import {
+  buildScanLut,
+  computeSectorMapping,
+  lutKey,
+  scanConvertLut,
+  type ScanLut,
+  type SectorMapping,
+} from '@/simulator/renderer/scanConvert';
+import {
+  caseArtifactLevels,
+  consoleArtifacts,
+  scenePhysicsFor,
+  type ArtifactLevels,
+} from '@/simulator/renderer/scenePhysics';
 import {
   allocPolarFrame,
   polarSpecFor,
@@ -40,49 +61,15 @@ import {
   type Scene,
   type ScenePhysics,
 } from '@/simulator/renderer/types';
-import { AtlasRenderer as AtlasBackend } from '@/simulator/renderer/atlas/atlasRenderer';
-import {
-  applyConsole,
-  createConsoleState,
-  NO_ARTIFACTS,
-  persistenceOverTime,
-  type ArtifactSettings,
-  type ConsoleState,
-} from '@/simulator/renderer/postprocess/consolePipeline';
-import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
-import {
-  caseArtifactLevels,
-  consoleArtifacts,
-  scenePhysicsFor,
-  type ArtifactLevels,
-} from '@/simulator/renderer/scenePhysics';
-import {
-  buildScanLut,
-  computeSectorMapping,
-  lutKey,
-  scanConvertLut,
-  type ScanLut,
-  type SectorMapping,
-} from '@/simulator/renderer/scanConvert';
-import { acquisitionFrameRate, cadenceHz } from '@/simulator/renderer/frameRate';
-import {
-  beamFrameFromPose,
-  contactQuality,
-  poseFromControl,
-  type BeamFrame,
-} from '@/simulator/probe/pose';
-import { v3 } from '@/core/vec3';
-import { controlThroughCrux, getViewTarget } from '@/simulator/windows/viewTargets';
-import { probePointAt, probeTorsoPointAt } from './probePoint';
-import { explainPointAt } from './explainPoint';
 import { analyzeView, type ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
-import {
-  buildFlowParams,
-  type FlowFieldParams,
-} from '@/simulator/doppler/flow-primitives/flowField';
-import { overlayColorField, type ColorField } from '@/simulator/doppler/color/colorDoppler';
-import { spectralRange } from '@/simulator/doppler/spectral/spectrum';
-import { computeGroundTruth, type StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import { constrainAcquisition } from './acquisitionInput';
+import { buildChainedBeatTables, computePhaseMarks } from './beatChaining';
+import { BeatHistory } from './beatHistory';
+import { CineBuffer, type CineFrame } from './cineBuffer';
+import { ColorFieldDriver } from './colorFieldDriver';
+import { EcgRing } from './ecgRing';
+import { ExperimentalLoaders } from './experimentalLoaders';
+import { MMODE_TRACE_SHARE } from './mmodeStrip';
 import type {
   PhaseMarks,
   QualityTier,
@@ -93,8 +80,7 @@ import type {
   StripInfo,
 } from './protocol';
 import { resolveQualityTier } from './quality';
-import type { AssetFetcher } from '@/simulator/anatomy/roderoAsset';
-import { MMODE_TRACE_SHARE } from './mmodeStrip';
+import { routeSimRequest } from './requestRouter';
 import { StripEngine, type StripCtx } from './stripEngine';
 
 /**
@@ -102,7 +88,6 @@ import { StripEngine, type StripCtx } from './stripEngine';
  * Owns: case models, cardiac clock, renderer backend, console state, cine ring, Doppler strips,
  * ECG ring and view analysis. The UI only sends inputs and draws outputs + overlays.
  */
-
 export class SimulatorCore {
   readonly caseDef: CaseDefinition;
   readonly truth: StructuredEchoTruth;
@@ -111,7 +96,6 @@ export class SimulatorCore {
   private tables: BeatTables;
   /** Tables at the case's heart rate: the ground truth and, in atrial fibrillation, the orifice every beat fills through. */
   private nominalTables: BeatTables;
-  /** Beat the tables belong to, and a counter of table changes (it keys the traced M-mode lines). */
   private tablesBeat = -1;
   private tablesVersion = 0;
   private clock: CardiacClock;
@@ -133,45 +117,32 @@ export class SimulatorCore {
   /** WebGL2 port of the procedural renderer; null when unavailable (reason in `gpuReason`). */
   private gpu: Webgl2Renderer | null;
   private gpuReason: string;
-  /** Tier the last step rendered with (the quality choice resolved against the GPU, decision 154). */
   private tier: QualityTier = 'medium';
   private consoleState: ConsoleState;
-  /** The artifact levels in force: the case's, or the artifact lab's while it is open. */
   private artifactLevels: ArtifactLevels = { sideLobe: 0, mirror: 0, beamWidth: 0, clutter: 0 };
   private artifacts: ArtifactSettings = NO_ARTIFACTS;
   private caseArtifacts: ArtifactLevels = this.artifactLevels;
-
-  private applyArtifactOverrides(o: SimInput['artifactOverrides']): void {
-    this.artifactLevels = o ?? this.caseArtifacts;
-    this.artifacts = consoleArtifacts(this.artifactLevels);
-  }
   private input: SimInput;
   private acquisitionModality: SimInput['modality'];
-  /** Phase of the last frame handed out (live or cine): what a review marker refers to. */
   private displayedFrame: CineFrame | undefined;
   private frame: PolarFrame | null = null;
   private display: Uint8ClampedArray | null = null;
-  /** Double-buffered Color Doppler polar field & packet cadence driver (decision 56). */
   private colorDriver = new ColorFieldDriver();
   private colorFps = 0;
-  /** The display of the last rendered frame was formed on the GPU and is still there (decision 54). */
   private displayOnGpu = false;
   private cine = new CineBuffer();
   private frameId = 0;
   private timeS = 0;
   private frameAccumulator = 0;
-  /** Simulated frame interval of the current step, and the simulation time of the last B-mode frame (decision 94). */
   private frameIntervalS = 1 / 30;
   private lastFrameTimeS = NaN;
   private lastPersistence = 0;
   private lastAnalysis: ViewAnalysis | null = null;
   private analysisCounter = 0;
   private ecgRing = new EcgRing();
-  /** Spectral and M-mode strips: columns, displayed image, gate/auto-trace read-outs (decisions 84, 115). */
   private strips = new StripEngine();
   private patientKey = '';
   private rgbaPool: ArrayBuffer[] = [];
-  /** Bumped when the patient models are rebuilt: traced lines and gate flow of the old models are stale. */
   private modelVersion = 0;
   private lastOutputBeam: BeamFrame | null = null;
   private lastSector: (SectorMapping & { x: number; y: number }) | null = null;
@@ -187,8 +158,8 @@ export class SimulatorCore {
   private lut: ScanLut | null = null;
   private prevBeam: BeamFrame | null = null;
   private stationaryFrames = 0;
-  /** Render budget of the current frame (ms): 0.6 of the simulated frame interval. */
   private frameBudgetMs = 25;
+  private disposed = false;
 
   constructor(caseDef: CaseDefinition, input: SimInput, options: SimulatorCoreOptions = {}) {
     this.caseDef = caseDef;
@@ -207,11 +178,8 @@ export class SimulatorCore {
     this.truth = computeGroundTruth(caseDef, this.tables);
     this.syncBeatTables(false);
     this.consoleState = createConsoleState(caseDef.seed);
-    // case-configurable artifacts (spec 12): geometric ones (rib/lung/calcium shadow) come from the anatomy
     this.caseArtifacts = caseArtifactLevels(caseDef);
     this.applyArtifactOverrides(input.artifactOverrides);
-    // the GPU port (same frames, ~10× faster) feeds the atlas when available; the CPU renderer stays the
-    // reference and the fallback (Node tests, browsers without WebGL2 float targets)
     const g = createWebgl2Renderer();
     this.gpu = g.renderer;
     this.gpuReason = g.reason;
@@ -219,6 +187,11 @@ export class SimulatorCore {
     this.backend = this.pickBackend(input.rendererBackend);
     this.flow = this.buildFlow();
     this.rememberBeat();
+  }
+
+  private applyArtifactOverrides(o: SimInput['artifactOverrides']): void {
+    this.artifactLevels = o ?? this.caseArtifacts;
+    this.artifacts = consoleArtifacts(this.artifactLevels);
   }
 
   private pickBackend(
@@ -230,12 +203,6 @@ export class SimulatorCore {
     return this.atlas;
   }
 
-  /**
-   * Atrial fibrillation (decision 107): every beat gets tables of its own RR instead of the case tables stretched to it. It
-   * ejects what the diastole before it filled — through the case's orifice with the case's E wave, cut by its QRS — with
-   * the ejection time of the RR before it, and starts where that beat left the volume and the annuli. Stretched, the
-   * deceleration time went from 123 to 276 ms with the RR and the LVOT VTI followed the current RR instead of the one before.
-   */
   private syncBeatTables(rebuildFlow = true): void {
     const c = this.clock.current;
     const breathing = this.input.patient.respiration === 'free-breathing';
@@ -244,52 +211,14 @@ export class SimulatorCore {
       c.beatIndex === this.tablesBeat
     )
       return;
-    const prev = this.tables;
-    const first = prev === this.nominalTables;
-    const phys = this.caseDef.physiology;
-    const svNominal = phys.edvMl - phys.esvMl;
-    const clampSv = (ml: number): number =>
-      Math.min(1.2 * svNominal, Math.max(0.2 * svNominal, ml));
-    const ejectMl = first ? svNominal : clampSv(prev.endVolumeMl - phys.esvMl);
-    // Free breathing (decision 108): the early inflow waves of the beat follow the depth of inspiration when its mitral
-    // valve opens; each ventricle ejects what its inflow filled in the beat before, so the stroke volumes follow too.
-    let mitralEFactor = 1,
-      tricuspidEFactor = 1;
-    let ivcCollapse: [number, number] | undefined;
-    if (breathing) {
-      // the inferior vena cava narrows with inspiration by the case's inspiratory collapse (decision 113), linearly across
-      // the beat from where the breath has it when the beat starts to where it has it when it ends
-      const start = this.timeS - c.timeInBeatS;
-      const k = this.caseDef.anatomy.ivc.collapsePct / 100;
-      ivcCollapse = [k * respiratoryDepth(start), k * respiratoryDepth(start + c.rrS)];
-      const opening =
-        this.timeS -
-        c.timeInBeatS +
-        preEjectionPeriodS(60 / c.rrS) +
-        ejectionTimeS(60 / c.previousRrS, phys.contractility) +
-        phys.ivrtMs / 1000;
-      const depth = respiratoryDepth(opening);
-      const variation = inflowRespiratoryVariation(this.caseDef.anatomy.pericardium.tamponade);
-      mitralEFactor = 1 - variation.mitral * depth;
-      tricuspidEFactor = 1 + variation.tricuspid * depth;
-    }
-    this.tables = buildBeatTables(c.rrS, phys, this.caseDef.rhythm, this.caseDef.hemodynamics, {
-      outflow: caseOutflow(this.caseDef),
-      chain: {
-        ejectMl,
-        rvEjectMl: first
-          ? this.nominalTables.pulmonaryStrokeVolumeMl
-          : clampSv(prev.tricuspidFillMl - prev.regurgitation.trVolumeMl),
-        mvAreaCm2: this.nominalTables.mvEffectiveAreaCm2,
-        tvAreaCm2: this.nominalTables.tvEffectiveAreaCm2,
-        previousRrS: c.previousRrS,
-        startLongitudinal: first ? 0 : prev.endLongitudinal,
-        startRvLongitudinal: first ? 0 : prev.endRvLongitudinal,
-        mitralEFactor,
-        tricuspidEFactor,
-        ivcCollapse,
-      },
-    });
+    this.tables = buildChainedBeatTables(
+      this.caseDef,
+      c,
+      this.timeS,
+      breathing,
+      this.tables,
+      this.nominalTables,
+    );
     this.tablesBeat = c.beatIndex;
     this.tablesVersion++;
     if (rebuildFlow)
@@ -298,7 +227,7 @@ export class SimulatorCore {
 
   private buildFlow(): FlowFieldParams {
     heartLandmarks(this.heart);
-    computeHeartPose(this.heart, cycleStateAt(this.tables, 0)); // initialises anchors
+    computeHeartPose(this.heart, cycleStateAt(this.tables, 0));
     return buildFlowParams(this.caseDef, this.heart, this.tables, this.thorax);
   }
 
@@ -312,7 +241,6 @@ export class SimulatorCore {
     });
   }
 
-  /** Services the strip engine reads per call; its mutable state stays on the engine. */
   private stripCtx(): StripCtx {
     const c = this.clock.current;
     return {
@@ -329,19 +257,19 @@ export class SimulatorCore {
       procedural: this.procedural,
       moment: (timeS) => {
         const beat = this.beatHistory.at(timeS),
-          c = beat.context;
+          bc = beat.context;
         return {
           phase: beat.phase,
           beatIndex: beat.beatIndex,
-          tablesVersion: c.tablesVersion,
-          tables: c.tables,
-          flow: c.flow,
+          tablesVersion: bc.tablesVersion,
+          tables: bc.tables,
+          flow: bc.flow,
           scene: {
-            heart: c.heart,
-            thorax: c.thorax,
+            heart: bc.heart,
+            thorax: bc.thorax,
             heartPose: computeHeartPose(
-              c.heart,
-              cycleStateAt(c.tables, beat.phase, c.flow.flowPeaks),
+              bc.heart,
+              cycleStateAt(bc.tables, beat.phase, bc.flow.flowPeaks),
             ),
             physics: this.physics(),
           },
@@ -355,11 +283,9 @@ export class SimulatorCore {
   setInput(input: SimInput): void {
     const key = JSON.stringify(input.patient);
     if (key !== this.patientKey) {
-      // the beat tables of the running case are kept (chained beats continue); only the anatomy follows the patient
       const models = buildCaseModels(this.caseDef, input.patient);
       this.thorax = models.thorax;
       this.heart = models.heart;
-      // chained beats start again from the case tables with the new breathing (decision 108)
       if (
         input.patient.respiration !== this.input.patient.respiration &&
         this.caseDef.rhythm.type !== 'atrial-fibrillation'
@@ -375,11 +301,9 @@ export class SimulatorCore {
     }
     const anatomyChanged = (input.anatomy ?? 'analytic') !== (this.input.anatomy ?? 'analytic');
     if (input.rendererBackend !== this.input.rendererBackend || anatomyChanged) {
-      // an input without the field is the analytic heart: passing undefined would fall back to the current choice
       this.backend = this.pickBackend(input.rendererBackend, input.anatomy ?? 'analytic');
       if (anatomyChanged) this.atlas.invalidate();
     }
-    // the atlas' frames were formed with the other image formation (decision 354)
     if ((input.imageFormation ?? 'lattice') !== (this.input.imageFormation ?? 'lattice'))
       this.atlas.invalidate();
     if (JSON.stringify(input.artifactOverrides) !== JSON.stringify(this.input.artifactOverrides))
@@ -393,17 +317,9 @@ export class SimulatorCore {
   }
 
   recycle(buffer: ArrayBuffer): void {
-    // frames drawn on the GPU travel with an empty buffer: nothing to reuse
     if (buffer.byteLength > 0 && this.rgbaPool.length < 3) this.rgbaPool.push(buffer);
   }
 
-  private disposed = false;
-
-  /**
-   * Release what the core holds outside the JavaScript heap (decision 172): its WebGL2 context, which every core creates
-   * and a browser keeps only a handful of (the oldest are lost past the limit), and the atlas' cached frames. A disposed
-   * core produces no more frames; disposing twice is harmless.
-   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -423,7 +339,6 @@ export class SimulatorCore {
     const inp = this.input;
     const dt = Math.min(0.1, Math.max(0, dtS));
     if (inp.frozen) return this.frozenOutput();
-    // «auto» follows who forms the image: the procedural backend of the Dev panel is the CPU tracer even with a GPU
     const tier = resolveQualityTier(
       inp.quality,
       this.gpu !== null && this.backend !== this.procedural,
@@ -437,8 +352,6 @@ export class SimulatorCore {
             ((inp.color.boxThetaMaxRad - inp.color.boxThetaMinRad) / spec.sectorRad) * spec.lines,
           )
         : 0;
-    // the scanner's frame rate depends on the console and on the transmit time a spectral strip takes (decision 212); the
-    // cadence also on the work of the tier (decision 178)
     const acquisitionFps = this.acquisitionFps();
     const fps = cadenceHz(spec, acquisitionFps, colorLines);
     this.colorFps = inp.modality === 'color' ? acquisitionFps : 0;
@@ -464,7 +377,6 @@ export class SimulatorCore {
       this.clock.current.beatIndex,
       this.caseDef.seed,
     );
-    // the trace budget of the M-mode lines follows the frame interval, not the step: a late step must not buy a longer one
     if (isStrip)
       this.strips.advance(dt, beam, spec, (MMODE_TRACE_SHARE * 1000) / fps, this.stripCtx());
     this.frameAccumulator += dt;
@@ -472,11 +384,7 @@ export class SimulatorCore {
     this.frameIntervalS = frameInterval;
     this.frameBudgetMs = 600 * frameInterval;
     let produced = false;
-    // the worker paces itself at the simulated frame interval; tolerate timer jitter so the cadence
-    // stays even instead of skipping every few frames
     if (this.frameAccumulator >= frameInterval * 0.85 || !this.frame) {
-      // keep the remainder (at most one interval): a late tick followed by an early one still yields two frames,
-      // so the long-run rate is the simulated rate
       this.frameAccumulator = Math.min(
         frameInterval,
         Math.max(0, this.frameAccumulator - frameInterval),
@@ -494,7 +402,6 @@ export class SimulatorCore {
     return out;
   }
 
-  /** The scanner's 2D frame rate for the current console and modality (decisions 178 and 212). */
   private acquisitionFps(): number {
     const inp = this.input;
     return acquisitionFrameRate(
@@ -504,7 +411,6 @@ export class SimulatorCore {
     );
   }
 
-  /** Continue without the GPU port (context lost): the atlas feeds from the CPU tracer again. */
   private dropGpu(reason: string): void {
     this.gpu = null;
     this.gpuReason = reason;
@@ -516,7 +422,6 @@ export class SimulatorCore {
   private physics(): ScenePhysics {
     return scenePhysicsFor(this.caseDef, this.input.settings, {
       artifacts: this.artifactLevels,
-      // the frame the console is about to form: the flowing blood's speckle changes with it (decision 163)
       bloodFrame: this.consoleState.frameIndex,
     });
   }
@@ -544,12 +449,10 @@ export class SimulatorCore {
     };
   }
 
-  /** Resolves when the experimental image formation has arrived or failed (tests and tools). */
   async coleReady(): Promise<void> {
     await this.experimental.coleReady(this.input.imageFormation);
   }
 
-  /** Resolves when the experimental anatomy's volume has arrived or failed (tests and tools). */
   async roderoReady(): Promise<void> {
     await this.experimental.roderoReady(this.input.anatomy, this.heart, this.tables);
   }
@@ -570,7 +473,6 @@ export class SimulatorCore {
       this.lastFrameTimeS = NaN;
     }
     this.frame.spec = spec;
-    // persistence decays with simulated time, not per frame the renderer managed to produce (decision 94)
     const elapsed = Number.isFinite(this.lastFrameTimeS)
       ? this.timeS - this.lastFrameTimeS
       : this.frameIntervalS;
@@ -583,7 +485,6 @@ export class SimulatorCore {
     const settings = { ...inp.settings, persistence: this.lastPersistence };
     const phase = this.clock.current.phase;
     const scene = this.scene(phase);
-    // stationary detection: a render cache (atlas) may keep frames only while the probe rests
     const moved = this.prevBeam ? AtlasBackend.poseDistance(this.prevBeam, beam) : Infinity;
     this.stationaryFrames = moved < 0.03 ? this.stationaryFrames + 1 : 0;
     this.prevBeam = beam;
@@ -596,7 +497,6 @@ export class SimulatorCore {
     if (this.gpu?.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
     let onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     if (this.gpu?.contextLost) {
-      // lost while forming this frame: nothing valid was read back, so form it again with the CPU tracer
       this.dropGpu('WebGL context lost: CPU tracer');
       onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     }
@@ -684,11 +584,6 @@ export class SimulatorCore {
     this.frameId++;
   }
 
-  /**
-   * Render the frame and form its display. On the GPU when the backend can (decision 54): every console step
-   * except the mirror and side-lobe artifacts, and the atlas declines while it serves a cache. Otherwise render
-   * and the CPU console. Persistence continues across a switch in either direction. True when formed on the GPU.
-   */
   private formDisplay(
     scene: Scene,
     beam: BeamFrame,
@@ -701,7 +596,6 @@ export class SimulatorCore {
     const frame = this.frame!;
     const display = this.display!;
     if (
-      // the side lobes are in the PSF both renderers share (decision 155); the mirror artifact stays on the CPU console
       this.artifacts.mirror <= 0 &&
       this.backend.renderDisplay?.(
         scene,
@@ -719,7 +613,6 @@ export class SimulatorCore {
     }
     this.backend.render(scene, beam, spec, phase, frame, hints);
     const tc = performance.now();
-    // the previous output of this console state was formed on the GPU: carry its persistence over
     if (this.consoleState.gpuHistory) this.gpu?.restoreCpuHistory(this.consoleState, spec);
     applyConsole(frame, settings, this.consoleState, display, this.artifacts);
     this.timing.consoleMs = performance.now() - tc;
@@ -728,18 +621,7 @@ export class SimulatorCore {
 
   /** Cardiac phase landmarks as fractions of RR (for phase checks in the technique engine). */
   phaseMarks(): PhaseMarks {
-    const t = this.tables.timings;
-    const rr = this.tables.rrS;
-    return {
-      ejectionStart: t.ejectionStartS / rr,
-      ejectionEnd: t.ejectionEndS / rr,
-      endSystole: this.tables.endSystoleS / rr,
-      mitralOpen: t.mitralOpenS / rr,
-      eEnd: (t.mitralOpenS + t.eAccelS + t.eDecelS) / rr,
-      aStart: t.hasAWave ? t.aStartS / rr : 1,
-      aEnd: t.hasAWave ? t.aEndS / rr : 1,
-      hasAWave: t.hasAWave,
-    };
+    return computePhaseMarks(this.tables);
   }
 
   /** LV length at end-diastole (cm), the reference for Simpson foreshortening checks. */
@@ -749,79 +631,28 @@ export class SimulatorCore {
 
   /** Answer an on-demand request (auto-trace, canonical control, or the model at a point of the image). */
   request(req: SimRequest): SimResponse | null {
-    if (req.kind === 'probePoint') {
-      const frame = this.displayedFrame;
-      if (!frame) return null;
-      const { scene, beam, phase } = frame;
-      return {
-        kind: 'probePoint',
-        point: req.torso
-          ? probeTorsoPointAt(scene.heart, scene.thorax, scene.heartPose, beam, req.torso, phase)
-          : probePointAt(
-              scene.heart,
-              scene.thorax,
-              scene.heartPose,
-              beam,
-              req.rCm ?? 0,
-              req.thetaRad ?? 0,
-              phase,
-            ),
-      };
-    }
-    if (req.kind === 'explainPoint') {
-      const frame = this.displayedFrame;
-      if (!frame) return null;
-      // a tracer of its own: the wedge would resize the frame tracer's buffers (decision 340)
-      this.explainTracer ??= new ProceduralSliceRenderer();
-      return {
-        kind: 'explainPoint',
-        explain: explainPointAt(
-          this.explainTracer,
-          frame.scene,
-          frame.beam,
-          frame.spec,
-          req.rCm,
-          req.thetaRad,
-          this.artifactLevels.mirror,
-        ),
-      };
-    }
-    if (req.kind === 'canonicalControl') {
-      const view = getViewTarget(req.viewId);
-      // the Rodero heart's four-chamber plane passes through its own crux (decision 360)
-      const rodero =
-        this.input.anatomy === 'rodero'
-          ? this.experimental.roderoHeart(this.input.anatomy, this.heart, this.tables)
-          : null;
-      const c = rodero?.vh.crux();
-      return {
-        kind: 'canonicalControl',
-        control: controlThroughCrux(view, this.heart, this.thorax, c ? v3(c[0], c[1], c[2]) : null),
-      };
-    }
-    if (req.kind === 'autoOpt') {
-      if (!this.display || !this.frame) return null;
-      const opt = computeAutoOpt(this.display, this.frame.tissue, this.frame.spec, this.input.settings);
-      return { kind: 'autoOpt', gainDb: opt.gainDb, tgcDb: opt.tgcDb };
-    }
-    if (req.kind === 'cinePhaseJump') {
-      const targetPhase = req.target === 'es' ? this.phaseMarks().endSystole : 0;
-      const found = this.cine.findNearestPhaseOffset(targetPhase);
-      if (!found) return null;
-      return { kind: 'cinePhaseJump', offset: found.offset, phase: found.phase };
-    }
-    if (
-      this.input.frozen &&
-      this.displayedFrame &&
-      this.displayedFrame.acquisition.stripAcquisitionId !== this.strips.historyId
-    )
-      return null;
-    return this.strips.request(req);
+    return routeSimRequest(req, {
+      input: this.input,
+      displayedFrame: this.displayedFrame,
+      display: this.display,
+      frame: this.frame,
+      heart: this.heart,
+      thorax: this.thorax,
+      tables: this.tables,
+      experimental: this.experimental,
+      mirrorLevel: this.artifactLevels.mirror,
+      cine: this.cine,
+      strips: this.strips,
+      phaseMarks: () => this.phaseMarks(),
+      getExplainTracer: () => {
+        this.explainTracer ??= new ProceduralSliceRenderer();
+        return this.explainTracer;
+      },
+    });
   }
 
   private frozenOutput(): SimOutput | null {
-    const inp = this.input;
-    const cf = this.cine.select(inp.cineOffset);
+    const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
     return this.composite(cf.beam, cf.spec, true, cf);
   }
@@ -870,8 +701,6 @@ export class SimulatorCore {
         ? colorCur.variance
         : null;
     const tintMap = inp.settings.tintMap;
-    // a live 2D or colour frame whose display was formed on the GPU is scan-converted there as well and travels
-    // as an ImageBitmap (decision 54); strips, cine review and the CPU console keep the CPU composite
     let bitmap: ImageBitmap | null = null;
     const tp = performance.now();
     if (!frozen && !isStrip && this.displayOnGpu && this.gpu) {
@@ -890,14 +719,12 @@ export class SimulatorCore {
     const buffer = bitmap ? new ArrayBuffer(0) : this.takeBuffer(W * H * 4);
     const rgba = new Uint8ClampedArray(buffer);
     if (!bitmap) {
-      // the sector occupies the top rows of the composite: scan-convert straight into the buffer
       const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
       scanConvertLut(display, this.lut, sectorRgba, tintMap);
       if (colorVel && colorVar)
         overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings);
     }
     if (isStrip) {
-      // clear strip area
       rgba.fill(0, W * sectorH * 4);
       for (let i = W * sectorH * 4 + 3; i < rgba.length; i += 4) rgba[i] = 255;
     }
@@ -945,8 +772,8 @@ export class SimulatorCore {
         sectorRad: fspec.sectorRad,
         depthCm: fspec.depthCm,
       },
-      structure: new Uint8Array(structure),
-      segment: new Uint8Array(segment),
+      structure: frozen || inp.needStructure !== false ? new Uint8Array(structure) : new Uint8Array(0),
+      segment: frozen || inp.needSegments !== false ? new Uint8Array(segment) : new Uint8Array(0),
       gate,
       timeS: cf ? cf.timeS : this.timeS,
       phase: cf ? cf.phase : c.phase,
@@ -1005,21 +832,7 @@ export class SimulatorCore {
   get models(): { heart: HeartModel; thorax: ThoraxModel; tables: BeatTables } {
     return { heart: this.heart, thorax: this.thorax, tables: this.tables };
   }
-  /**
-   * The M-mode strip as stored (decision 84): grey levels indexed [sample × columns + column] over `samples` line samples,
-   * the cycle phase of each column, the phase bins between the two traced lines it was formed from (1 at full time
-   * resolution) and the head (next column to write). Null outside M-mode.
-   */
-  get mmodeStrip(): {
-    samples: number;
-    cols: number;
-    head: number;
-    grey: Uint8ClampedArray;
-    phase: Float32Array;
-    span: Uint16Array;
-    bins: number;
-    traced: number;
-  } | null {
+  get mmodeStrip(): StripEngine['mmodeStrip'] {
     return this.strips.mmodeStrip;
   }
   get lastView(): ViewAnalysis | null {
@@ -1031,7 +844,6 @@ export class SimulatorCore {
   get lastFrame(): PolarFrame | null {
     return this.frame;
   }
-  /** Colour field of the latest update (null before the first) and its version, which keys the GPU present upload. */
   get lastColorField(): { field: ColorField | null; version: number } {
     return { field: this.colorDriver.current, version: this.colorDriver.version };
   }
@@ -1044,7 +856,6 @@ export class SimulatorCore {
   get lastStripInfo(): StripInfo | null {
     return this.lastStrip;
   }
-  /** The spectral strip (SPECTRAL_BINS values per column), the cycle phase each column was sampled at, and the head. */
   get spectralStrip(): StripEngine['spectralStrip'] {
     return this.strips.spectralStrip;
   }

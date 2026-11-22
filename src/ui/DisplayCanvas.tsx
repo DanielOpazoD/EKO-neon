@@ -16,7 +16,7 @@ import { ImageHud } from './ImageHud';
 import { ImageQuickBar } from './ImageQuickBar';
 import { SegmentImageToggle } from './SegmentImageToggle';
 import { sampleIndexAt, segmentCss, segmentIdOf, segmentNames } from './segmentMap';
-import { coverageText } from './SegmentPanel';
+import { coverageText } from './segmentCoverage';
 import { handleMeasurementToolClick, type PendingMeasurement } from './display/measurementTools';
 import { drawOverlay } from './display/overlayDraw';
 import {

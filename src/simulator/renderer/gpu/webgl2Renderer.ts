@@ -1,42 +1,41 @@
 import type { BeamFrame } from '@/simulator/probe/pose';
+import { COMPOUND_LOOKS } from '../acoustic/acoustics';
+import { buildPsfKernels, psfKey, sideLobeLevelDb } from '../acoustic/psf';
+import type { ConsoleState } from '../postprocess/consolePipeline';
+import { tintMapIndex } from '../postprocess/tintMap';
+import type { ScanLut } from '../scanConvert';
+import { TRANS_DECODE } from '../transmissionCode';
 import type {
   AcquisitionSettings,
   ColorPresentSettings,
   DisplayConsole,
   PolarFrame,
   PolarFrameSpec,
-  RenderHints,
   RendererBackend,
+  RenderHints,
   Scene,
   TintMapId,
 } from '../types';
-import { tintMapIndex } from '../postprocess/tintMap';
-import { TISSUE_PROPS } from '@/simulator/anatomy/tissue';
-import { noiseLattice } from '@/core/noise';
+import {
+  buildNoiseKernelsCached,
+  buildProgram,
+  CONSOLE_UNIFORMS,
+  initPassAUniforms,
+  LOG_UNIFORMS,
+  makeTexture2D,
+  NOISE_AXIAL_UNIFORMS,
+  NOISE_LATERAL_UNIFORMS,
+  PRESENT_UNIFORMS,
+  SOFTWARE_GL,
+  uniformLocations,
+  UPLOAD_UNIT,
+  uploadKernelTable,
+  uploadNoiseLattice3D,
+  webglRendererName,
+  type Locations,
+} from './glHelpers';
 import { GLSL_COMMON } from './glslCommon';
 import { GLSL_HEART } from './glslHeart';
-import { GLSL_THORAX } from './glslThorax';
-import {
-  GLSL_PASS_A_MAIN,
-  GLSL_PASS_A_SIDE_MAIN,
-  GLSL_PASS_B_MAIN,
-  GLSL_PASS_C_MAIN,
-  GLSL_PASS_L_MAIN,
-  GLSL_PASS_P_MAIN,
-  GLSL_PASS_D_MAIN,
-  GLSL_VERT,
-} from './glslPasses';
-import { allocPacked, packScene, PARAM_TEXELS, type PackedScene } from './paramLayout';
-import {
-  buildNoiseKernels,
-  buildPsfKernels,
-  LATERAL_TAPS,
-  MAX_LATERAL_RADIUS,
-  psfKey,
-  sideLobeLevelDb,
-  type PsfKernels,
-} from '../acoustic/psf';
-import { COMPOUND_LOOKS } from '../acoustic/acoustics';
 import {
   GLSL_CONSOLE_FRAG,
   GLSL_LOG_FRAG,
@@ -44,9 +43,22 @@ import {
   GLSL_NOISE_LATERAL_FRAG,
   GLSL_PRESENT_FRAG,
 } from './glslImage';
-import { consoleCompensation, type ConsoleState } from '../postprocess/consolePipeline';
-import { TRANS_DECODE } from '../transmissionCode';
-import { packScanLutTexels, type ScanLut } from '../scanConvert';
+import {
+  GLSL_PASS_A_MAIN,
+  GLSL_PASS_A_SIDE_MAIN,
+  GLSL_PASS_B_MAIN,
+  GLSL_PASS_C_MAIN,
+  GLSL_PASS_D_MAIN,
+  GLSL_PASS_L_MAIN,
+  GLSL_PASS_P_MAIN,
+  GLSL_VERT,
+} from './glslPasses';
+import { GLSL_THORAX } from './glslThorax';
+import { GlPresentUploads } from './glPresentUploads';
+import { GlRenderTargets } from './glTargets';
+import { allocPacked, packScene, PARAM_TEXELS, type PackedScene } from './paramLayout';
+
+export { webglRendererName };
 
 /** Colour field blended by the present pass: velocity per polar sample (NaN = no colour) and variance. */
 export interface PresentColor {
@@ -67,73 +79,20 @@ export interface PresentRequest {
   readback?: Uint8Array;
 }
 
-const LOG_UNIFORMS = ['uEnv', 'uComp', 'uNoise', 'uDynRange'] as const;
-const CONSOLE_UNIFORMS = [
-  'uLog',
-  'uEnv',
-  'uIds',
-  'uHist',
-  'uSamples',
-  'uLines',
-  'uSri',
-  'uEdge',
-  'uPersist',
-  'uGrayMap',
-] as const;
-const NOISE_AXIAL_UNIFORMS = ['uKernels', 'uSamples', 'uSeed', 'uFrameIndex'] as const;
-const NOISE_LATERAL_UNIFORMS = ['uNoiseAx', 'uKernels', 'uLines'] as const;
-const PRESENT_UNIFORMS = [
-  'uPacked',
-  'uLut',
-  'uColor',
-  'uPolar',
-  'uHeightPx',
-  'uLines',
-  'uSamples',
-  'uColorOn',
-  'uTintMap',
-  'uBox',
-  'uColorMap',
-] as const;
-type Locations<T extends readonly string[]> = Record<T[number], WebGLUniformLocation | null>;
-function uniformLocations<T extends readonly string[]>(
-  gl: WebGL2RenderingContext,
-  prog: WebGLProgram,
-  names: T,
-): Locations<T> {
-  const o: Record<string, WebGLUniformLocation | null> = {};
-  for (const n of names) o[n] = gl.getUniformLocation(prog, n);
-  return o as Locations<T>;
-}
-/** Texture unit used only to upload data, never sampled. */
-const UPLOAD_UNIT = 9;
-
-let noiseKernelMemo: PsfKernels | null = null;
-/** The noise response of a frame geometry, rebuilt only when the geometry or the probe settings change. */
-function buildNoiseKernelsCached(spec: PolarFrameSpec, settings: AcquisitionSettings): PsfKernels {
-  const key = `noise|${psfKey(spec, settings.frequencyMHz, settings.harmonics, 0, null)}`;
-  if (noiseKernelMemo?.key !== key)
-    noiseKernelMemo = buildNoiseKernels(spec, settings.frequencyMHz, settings.harmonics);
-  return noiseKernelMemo;
-}
-
 /**
  * WebGL2 procedural renderer: the same scanline model and image formation as ProceduralSliceRenderer,
  * evaluated in four fragment passes — classification and local acoustics in parallel (A), per-line
  * transmission march into a complex signal (B), axial PSF (C), lateral PSF and envelope (D) — and read back
  * into the CPU PolarFrame (`render`), or continued on the GPU through the console into a packed display, read back
  * with the ids of pass B for the LV segment map (decision 152), and a present pass that scan-converts it into the
- * canvas (`renderDisplay`, `present`, decision 54). Deterministic given the same lattices (a 3D texture), parameters and PSF kernel table.
- * Requires WebGL2 with EXT_color_buffer_float; `createWebgl2Renderer` returns null otherwise.
+ * canvas (`renderDisplay`, `present`, decision 54).
  */
 export class Webgl2Renderer implements RendererBackend {
   readonly id = 'webgl2-procedural' as const;
   private gl: WebGL2RenderingContext;
   private progA: WebGLProgram;
   private progASide: WebGLProgram;
-  /** Pass A over a volume heart or with point scatterers (decisions 353 and 354), by the scene's keys. */
   private passAVariants = new Map<string, WebGLProgram>();
-  /** Lightweight side-plane pass A variants (analytic or volume heart, no scatterers needed). */
   private passASideVariants = new Map<string, WebGLProgram>();
   private uLooksD: WebGLUniformLocation | null;
   private common = '';
@@ -145,90 +104,34 @@ export class Webgl2Renderer implements RendererBackend {
   private progLog: WebGLProgram;
   private progConsole: WebGLProgram;
   private progPresent: WebGLProgram;
-  /** Receiver noise passes (decision 91): white noise filtered along the beam, then across lines. */
   private progNoiseA: WebGLProgram;
   private progNoiseL: WebGLProgram;
   private una: Locations<typeof NOISE_AXIAL_UNIFORMS>;
   private unl: Locations<typeof NOISE_LATERAL_UNIFORMS>;
-  private noiseKernelTex: WebGLTexture;
-  private noiseKernelKey = '';
   private ul: Locations<typeof LOG_UNIFORMS>;
   private uc: Locations<typeof CONSOLE_UNIFORMS>;
   private up: Locations<typeof PRESENT_UNIFORMS>;
-  private compTex: WebGLTexture;
-  private compKey = '';
-  private compData = new Float32Array(0);
-  private lutTex: WebGLTexture;
-  private lutKeyUploaded = '';
-  private lutTexels = new Uint16Array(0);
-  private colorTex: WebGLTexture;
-  private colorKey = '';
-  /** Polar coordinates of every pixel (the LUT's r and theta) for the colour box test, uploaded when colour is shown. */
-  private polarTex: WebGLTexture;
-  private polarKeyUploaded = '';
-  private polarTexels = new Float32Array(0);
-  private colorTexels = new Float32Array(0);
-  /** Console: log-compressed intermediate (R16F), history ping-pong (RGBA16F), and packed RGBA8 output. */
-  private texLog: WebGLTexture | null = null;
-  private fbLog: WebGLFramebuffer | null = null;
-  private texHist: [WebGLTexture | null, WebGLTexture | null] = [null, null];
-  private fbConsole: [WebGLFramebuffer | null, WebGLFramebuffer | null] = [null, null];
-  private texPacked: WebGLTexture | null = null;
-  private histCurrent: 0 | 1 = 0;
-  private histUpload = new Float32Array(0);
-  private disposed = false;
-  private histValid = false;
-  /** True when texPacked holds the display of the last rendered frame (present shows nothing older). */
-  private packedFresh = false;
-  private readPacked = new Uint8Array(0);
-  private probe8 = new Uint8Array(4);
-  private lastPresentMs = 0;
-  private lastOutput: 'float' | 'display' = 'float';
-  private lastSegRead = true;
+  private noiseKernelTex: WebGLTexture;
+  private noiseKernelKey = '';
   private paramsTex: WebGLTexture;
   private noiseTex: WebGLTexture;
   private psfTex: WebGLTexture;
   private psfKeyUploaded = '';
   private noiseSeed = NaN;
-  /** Pass A on the central plane: σ/attenuation (0), ids (1), specular/phasor (2), look-2 phasor (3). */
-  private texA0: WebGLTexture | null = null;
-  private texA1: WebGLTexture | null = null;
-  private texA2: WebGLTexture | null = null;
-  private texA3: WebGLTexture | null = null;
-  /** Lightweight side elevation planes (single RGBA16F target each: sigma, specular, lung, inBody). */
-  private texS0: WebGLTexture | null = null;
-  private texS1: WebGLTexture | null = null;
-  /** Pass B complex signal and ids; pass C axial; pass D envelope. */
-  private texB0: WebGLTexture | null = null;
-  private texB1: WebGLTexture | null = null;
-  private texB2: WebGLTexture | null = null;
-  private texL0: WebGLTexture | null = null;
-  private texP0: WebGLTexture | null = null;
-  private texC0: WebGLTexture | null = null;
-  private texC1: WebGLTexture | null = null;
-  private texD0: WebGLTexture | null = null;
-  /** Receiver noise after the axial and after the lateral pass (re, 0, im). */
-  private texNA: WebGLTexture | null = null;
-  private texNL: WebGLTexture | null = null;
-  private fbA: WebGLFramebuffer | null = null;
-  private fbS0: WebGLFramebuffer | null = null;
-  private fbS1: WebGLFramebuffer | null = null;
-  private fbB: WebGLFramebuffer | null = null;
-  private fbL: WebGLFramebuffer | null = null;
-  private fbP: WebGLFramebuffer | null = null;
-  private fbC: WebGLFramebuffer | null = null;
-  private fbD: WebGLFramebuffer | null = null;
-  private fbNA: WebGLFramebuffer | null = null;
-  private fbNL: WebGLFramebuffer | null = null;
-  private fbW = 0;
-  private fbH = 0;
+  private targets: GlRenderTargets;
+  private uploads: GlPresentUploads;
+  private histCurrent: 0 | 1 = 0;
+  private histUpload = new Float32Array(0);
+  private disposed = false;
+  private histValid = false;
+  private packedFresh = false;
+  private lastPresentMs = 0;
+  private lastOutput: 'float' | 'display' = 'float';
+  private lastSegRead = true;
   private packed: PackedScene = allocPacked();
-  private readAmp = new Float32Array(0);
-  private readIds = new Uint8Array(0);
   private lastMs = 0;
   private lastGpuMs = 0;
   private lastReadMs = 0;
-  private probe = new Float32Array(4);
   private uElevK: WebGLUniformLocation | null;
   private uElevKSide: WebGLUniformLocation | null;
   private vao: WebGLVertexArrayObject;
@@ -261,14 +164,12 @@ export class Webgl2Renderer implements RendererBackend {
     this.progNoiseL = buildProgram(gl, GLSL_VERT, GLSL_NOISE_LATERAL_FRAG);
     this.una = uniformLocations(gl, this.progNoiseA, NOISE_AXIAL_UNIFORMS);
     this.unl = uniformLocations(gl, this.progNoiseL, NOISE_LATERAL_UNIFORMS);
-    this.noiseKernelTex = makeTexture2D(gl);
     this.ul = uniformLocations(gl, this.progLog, LOG_UNIFORMS);
     this.uc = uniformLocations(gl, this.progConsole, CONSOLE_UNIFORMS);
     this.up = uniformLocations(gl, this.progPresent, PRESENT_UNIFORMS);
-    this.compTex = makeTexture2D(gl);
-    this.lutTex = makeTexture2D(gl);
-    this.colorTex = makeTexture2D(gl);
-    this.polarTex = makeTexture2D(gl);
+    this.targets = new GlRenderTargets(gl);
+    this.uploads = new GlPresentUploads(gl);
+    this.noiseKernelTex = makeTexture2D(gl);
     this.vao = gl.createVertexArray()!;
     this.paramsTex = makeTexture2D(gl);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, PARAM_TEXELS, 1, 0, gl.RGBA, gl.FLOAT, null);
@@ -276,15 +177,15 @@ export class Webgl2Renderer implements RendererBackend {
     this.psfTex = makeTexture2D(gl);
     this.uElevK = gl.getUniformLocation(this.progA, 'uElevK');
     this.uElevKSide = gl.getUniformLocation(this.progASide, 'uElevK');
-    this.initPassA(this.progA);
-    this.initPassA(this.progASide);
+    initPassAUniforms(gl, this.progA);
+    initPassAUniforms(gl, this.progASide);
     for (const prog of [this.progL, this.progP, this.progB, this.progC, this.progD]) {
       gl.useProgram(prog);
       gl.uniform1i(gl.getUniformLocation(prog, 'uParams'), 0);
       gl.uniform1i(gl.getUniformLocation(prog, 'uNoise'), 1);
     }
     gl.useProgram(this.progB);
-    const unitsB: [string, number][] = [
+    for (const [name, unit] of [
       ['uPassA', 2],
       ['uPassB', 3],
       ['uSideA', 4],
@@ -292,8 +193,9 @@ export class Webgl2Renderer implements RendererBackend {
       ['uPassC', 6],
       ['uDead', 7],
       ['uPassD', 8],
-    ];
-    for (const [name, unit] of unitsB) gl.uniform1i(gl.getUniformLocation(this.progB, name), unit);
+    ] as const) {
+      gl.uniform1i(gl.getUniformLocation(this.progB, name), unit);
+    }
     gl.useProgram(this.progL);
     gl.uniform1i(gl.getUniformLocation(this.progL, 'uPassA'), 2);
     gl.useProgram(this.progP);
@@ -329,7 +231,6 @@ export class Webgl2Renderer implements RendererBackend {
     gl.uniform1i(this.up.uPolar, 5);
   }
 
-  /** True once the WebGL context is lost (GPU reset, driver update): the caller must fall back to the CPU. */
   get contextLost(): boolean {
     return this.disposed || this.gl.isContextLost();
   }
@@ -346,7 +247,6 @@ export class Webgl2Renderer implements RendererBackend {
     };
   }
 
-  /** Frees every GL object and the context itself; afterwards `render` throws and the other entry points decline. */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -368,129 +268,32 @@ export class Webgl2Renderer implements RendererBackend {
       this.progNoiseL,
     ])
       gl.deleteProgram(p);
-    for (const t of [this.compTex, this.lutTex, this.colorTex, this.polarTex]) gl.deleteTexture(t);
+    this.uploads.dispose();
     gl.deleteTexture(this.paramsTex);
     gl.deleteTexture(this.noiseTex);
     gl.deleteTexture(this.psfTex);
     gl.deleteTexture(this.noiseKernelTex);
-    this.disposeTargets();
-    this.compKey =
-      this.lutKeyUploaded =
-      this.colorKey =
-      this.polarKeyUploaded =
-      this.psfKeyUploaded =
-      this.noiseKernelKey =
-        '';
+    this.targets.dispose();
+    this.histValid = false;
+    this.packedFresh = false;
+    this.psfKeyUploaded = this.noiseKernelKey = '';
     this.noiseSeed = NaN;
     (gl.getExtension('WEBGL_lose_context') as { loseContext: () => void } | null)?.loseContext();
   }
 
-  private disposeTargets(): void {
-    const gl = this.gl;
-    for (const t of [
-      this.texA0,
-      this.texA1,
-      this.texA2,
-      this.texA3,
-      this.texS0,
-      this.texS1,
-      this.texB0,
-      this.texL0,
-      this.texP0,
-      this.texB1,
-      this.texB2,
-      this.texC0,
-      this.texC1,
-      this.texD0,
-      this.texNA,
-      this.texNL,
-      this.texLog,
-      ...this.texHist,
-      this.texPacked,
-    ])
-      if (t) gl.deleteTexture(t);
-    for (const f of [
-      this.fbA,
-      this.fbS0,
-      this.fbS1,
-      this.fbL,
-      this.fbP,
-      this.fbB,
-      this.fbC,
-      this.fbD,
-      this.fbNA,
-      this.fbNL,
-      this.fbLog,
-      ...this.fbConsole,
-    ])
-      if (f) gl.deleteFramebuffer(f);
-    this.texLog = null;
-    this.fbLog = null;
-    this.texHist = [null, null];
-    this.fbConsole = [null, null];
-    this.texPacked = null;
-    this.histValid = false;
-    this.packedFresh = false;
-    this.texA0 = this.texA1 = this.texA2 = this.texA3 = this.texS0 = this.texS1 = null;
-    this.texL0 =
-      this.texP0 =
-      this.texB0 =
-      this.texB1 =
-      this.texB2 =
-      this.texC0 =
-      this.texC1 =
-      this.texD0 =
-      this.texNA =
-      this.texNL =
-        null;
-    this.fbA =
-      this.fbS0 =
-      this.fbS1 =
-      this.fbL =
-      this.fbP =
-      this.fbB =
-      this.fbC =
-      this.fbD =
-      this.fbNA =
-      this.fbNL =
-        null;
-  }
-
   private ensureNoise(seed: number): void {
     if (this.noiseSeed === seed) return;
-    const gl = this.gl;
-    const a = noiseLattice(seed),
-      b = noiseLattice(seed ^ 0x2545f491),
-      c = noiseLattice(seed ^ 0x51),
-      w = noiseLattice(seed ^ 0x5157);
-    const n = 128 * 128 * 128;
-    const data = new Uint8Array(n * 4);
-    for (let i = 0; i < n; i++) {
-      data[i * 4] = a[i]!;
-      data[i * 4 + 1] = b[i]!;
-      data[i * 4 + 2] = c[i]!;
-      data[i * 4 + 3] = w[i]!;
-    }
-    gl.bindTexture(gl.TEXTURE_3D, this.noiseTex);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.REPEAT);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 128, 128, 128, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    uploadNoiseLattice3D(this.gl, this.noiseTex, seed);
     this.noiseSeed = seed;
   }
 
-  /** Upload the PSF kernel table: row 0 axial taps, row 1 + sample lateral taps, centred on MAX_LATERAL_RADIUS; radius in .g of the centre. */
   private ensurePsf(scene: Scene, spec: PolarFrameSpec): void {
     const { frequencyMHz, harmonics } = scene.physics;
-    // an image formation's own kernels (decision 354)
     const sg = scene.scatterGpu;
     if (sg) {
       const k = sg.kernels(spec, frequencyMHz, harmonics);
       if (this.psfKeyUploaded === k.key) return;
-      this.uploadKernels(this.psfTex, k, spec);
+      uploadKernelTable(this.gl, this.psfTex, k, spec);
       this.psfKeyUploaded = k.key;
       return;
     }
@@ -498,7 +301,8 @@ export class Webgl2Renderer implements RendererBackend {
     const lobes = sideLobeLevelDb(scene.physics.sideLobe);
     const key = psfKey(spec, frequencyMHz, harmonics, bw, lobes);
     if (this.psfKeyUploaded === key) return;
-    this.uploadKernels(
+    uploadKernelTable(
+      this.gl,
       this.psfTex,
       buildPsfKernels(spec, frequencyMHz, harmonics, bw, lobes),
       spec,
@@ -506,121 +310,13 @@ export class Webgl2Renderer implements RendererBackend {
     this.psfKeyUploaded = key;
   }
 
-  /** Upload the receive response of the receiver noise (decision 91) in the PSF table layout. */
   private ensureNoiseKernels(spec: PolarFrameSpec, settings: AcquisitionSettings): void {
     const k = buildNoiseKernelsCached(spec, settings);
     if (this.noiseKernelKey === k.key) return;
-    this.uploadKernels(this.noiseKernelTex, k, spec);
+    uploadKernelTable(this.gl, this.noiseKernelTex, k, spec);
     this.noiseKernelKey = k.key;
   }
 
-  private uploadKernels(tex: WebGLTexture, k: PsfKernels, spec: PolarFrameSpec): void {
-    const rows = spec.samples + 1;
-    const data = new Float32Array(LATERAL_TAPS * rows * 4);
-    const c = MAX_LATERAL_RADIUS;
-    for (let j = -k.axialRadius; j <= k.axialRadius; j++)
-      data[(c + j) * 4] = k.axial[j + k.axialRadius]!;
-    data[c * 4 + 1] = k.axialRadius;
-    for (let si = 0; si < spec.samples; si++) {
-      const row = (si + 1) * LATERAL_TAPS;
-      for (let t = 0; t < LATERAL_TAPS; t++)
-        data[(row + t) * 4] = k.lateral[si * LATERAL_TAPS + t]!;
-      data[(row + c) * 4 + 1] = k.lateralRadius[si]!;
-    }
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, LATERAL_TAPS, rows, 0, gl.RGBA, gl.FLOAT, data);
-  }
-
-  private ensureTargets(w: number, h: number): void {
-    if (this.fbW === w && this.fbH === h && this.fbA) return;
-    this.disposeTargets();
-    const gl = this.gl;
-    const mk = (internal: number, format: number, type: number): WebGLTexture => {
-      const t = makeTexture2D(gl);
-      gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
-      return t;
-    };
-    const mkFb = (...targets: WebGLTexture[]): WebGLFramebuffer => {
-      const fb = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      const attachments = targets.map((t, i) => {
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0);
-        return gl.COLOR_ATTACHMENT0 + i;
-      });
-      gl.drawBuffers(attachments);
-      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-      if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`framebuffer incomplete: ${status}`);
-      return fb;
-    };
-    const f32 = (): WebGLTexture => mk(gl.RGBA32F, gl.RGBA, gl.FLOAT);
-    const f16 = (): WebGLTexture => mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
-    // Half-float (RGBA16F) cuts memory bandwidth in half on bounded-range targets; full float32
-    // stays on the complex signal/envelope/march targets to preserve dynamic range down to 1e-6.
-    this.texA0 = f16();
-    this.texA1 = mk(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
-    this.texA2 = f16();
-    this.texA3 = f16();
-    this.texS0 = f16();
-    this.texS1 = f16();
-    this.texB0 = f32();
-    this.texB1 = mk(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
-    this.texB2 = f32();
-    this.texL0 = f32();
-    this.texP0 = f16();
-    this.texC0 = f32();
-    this.texC1 = f32();
-    this.texD0 = f32();
-    this.texNA = f32();
-    this.texNL = f32();
-    this.texLog = mk(gl.R16F, gl.RED, gl.HALF_FLOAT);
-    this.fbA = mkFb(this.texA0, this.texA1, this.texA2, this.texA3);
-    this.fbS0 = mkFb(this.texS0);
-    this.fbS1 = mkFb(this.texS1);
-    this.fbB = mkFb(this.texB0, this.texB1, this.texB2);
-    this.fbL = mkFb(this.texL0);
-    this.fbP = mkFb(this.texP0);
-    this.fbC = mkFb(this.texC0, this.texC1);
-    this.fbD = mkFb(this.texD0);
-    this.fbNA = mkFb(this.texNA);
-    this.fbNL = mkFb(this.texNL);
-    this.fbLog = mkFb(this.texLog);
-    const hist0 = f16(),
-      hist1 = f16();
-    const packed = mk(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
-    this.texHist = [hist0, hist1];
-    this.texPacked = packed;
-    this.fbConsole = [mkFb(hist0, packed), mkFb(hist1, packed)];
-    this.readPacked = new Uint8Array(w * h * 4);
-    this.fbW = w;
-    this.fbH = h;
-    this.readAmp = new Float32Array(w * h * 4);
-    this.readIds = new Uint8Array(w * h * 4);
-  }
-
-  /** Passes A–D: envelope amplitude and transmission in texD0, ids in texB1; fbD stays bound. */
-  /** Pass A's constant uniforms: the tissue table, the parameter and noise units. */
-  private initPassA(prog: WebGLProgram): void {
-    const gl = this.gl;
-    gl.useProgram(prog);
-    const tp = new Float32Array(20 * 4);
-    for (let t = 0; t < 20; t++) {
-      const p = TISSUE_PROPS[t];
-      if (!p) continue;
-      tp[t * 4] = p.reflect;
-      tp[t * 4 + 1] = p.specular;
-      tp[t * 4 + 2] = p.attenuation;
-      tp[t * 4 + 3] = p.grain;
-    }
-    gl.uniform4fv(gl.getUniformLocation(prog, 'uTissue'), tp);
-    gl.uniform1i(gl.getUniformLocation(prog, 'uParams'), 0);
-    gl.uniform1i(gl.getUniformLocation(prog, 'uNoise'), 1);
-  }
-
-  /**
-   * The pass A program of a scene: the analytic heart's with the lattice phasor, or the variant over the scene's volume
-   * heart (decision 353), with its point scatterers (decision 354), or both.
-   */
   private passAFor(scene: Scene): WebGLProgram {
     const hv = scene.heartVolumeGpu;
     const sg = scene.scatterGpu;
@@ -635,14 +331,13 @@ export class Webgl2Renderer implements RendererBackend {
         GLSL_VERT,
         `${this.common}${defines}${GLSL_HEART}${GLSL_THORAX}${hv?.glsl ?? ''}${sg?.glsl ?? ''}${GLSL_PASS_A_MAIN}`,
       );
-      this.initPassA(prog);
+      initPassAUniforms(gl, prog);
       hv?.upload(gl);
       this.passAVariants.set(key, prog);
     }
     return prog;
   }
 
-  /** Lightweight pass A program for side elevation planes (no scatterer/grain/2nd-look work). */
   private passASideFor(scene: Scene): WebGLProgram {
     const hv = scene.heartVolumeGpu;
     if (!hv) return this.progASide;
@@ -654,19 +349,28 @@ export class Webgl2Renderer implements RendererBackend {
         GLSL_VERT,
         `${this.common}#define VOLUME_HEART\n${GLSL_HEART}${GLSL_THORAX}${hv.glsl}${GLSL_PASS_A_SIDE_MAIN}`,
       );
-      this.initPassA(prog);
+      initPassAUniforms(gl, prog);
       hv.upload(gl);
       this.passASideVariants.set(hv.key, prog);
     }
     return prog;
   }
 
+  private bindAt(unit: number, tex: WebGLTexture | null): void {
+    this.gl.activeTexture(this.gl.TEXTURE0 + unit);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, tex);
+  }
+
   private formEnvelope(scene: Scene, beam: BeamFrame, spec: PolarFrameSpec): void {
     const gl = this.gl;
+    const t = this.targets;
     const w = spec.samples,
       h = spec.lines;
     this.ensureNoise(scene.physics.seed);
-    this.ensureTargets(w, h);
+    if (t.ensure(w, h)) {
+      this.histValid = false;
+      this.packedFresh = false;
+    }
     this.ensurePsf(scene, spec);
     packScene(scene, beam, spec, this.packed);
     gl.activeTexture(gl.TEXTURE0);
@@ -678,7 +382,8 @@ export class Webgl2Renderer implements RendererBackend {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.vao);
-    // pass A side planes first using lightweight Pass A Side (single RGBA16F target, no phasors/grains)
+
+    // Pass A side planes (lightweight single RGBA16F target)
     if (spec.elevationSamples > 1) {
       const progSide = this.passASideFor(scene);
       gl.useProgram(progSide);
@@ -689,13 +394,14 @@ export class Webgl2Renderer implements RendererBackend {
         scene.heartVolumeGpu.frame(gl, progSide, scene.heartPose);
       }
       gl.uniform1f(uElevKSide, -1);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbS0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbS0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.uniform1f(uElevKSide, 1);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbS1);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbS1);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
-    // central plane (full Pass A: σ, attenuation, ids, specular, scatterer phasors & look 2)
+
+    // Pass A central plane
     const progA = this.passAFor(scene);
     gl.useProgram(progA);
     const uElevK = progA === this.progA ? this.uElevK : gl.getUniformLocation(progA, 'uElevK');
@@ -705,52 +411,51 @@ export class Webgl2Renderer implements RendererBackend {
     }
     scene.scatterGpu?.frame(gl, progA, scene.physics);
     gl.uniform1f(uElevK, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbA);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbA);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    const bindAt = (unit: number, tex: WebGLTexture | null): void => this.bindAt(unit, tex);
-    // pass L: pencil transmission, pleural entry index and body-sample count per sample
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbL);
+
+    // Pass L: pencil transmission, pleural entry index and body-sample count
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbL);
     gl.useProgram(this.progL);
-    bindAt(2, this.texA0);
+    this.bindAt(2, t.texA0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // pass P: the pencils of pass L averaged over the beam's width at each depth (decisions 144 and 299)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbP);
+
+    // Pass P: beam-width averaged transmission
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbP);
     gl.useProgram(this.progP);
-    bindAt(2, this.texA0);
-    bindAt(3, this.texL0);
+    this.bindAt(2, t.texA0);
+    this.bindAt(3, t.texL0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // pass B: complex signal using pass P transmission, single-target side planes, and pass L lung/body info
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
+
+    // Pass B: complex signal + structure/tissue/segment ids
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbB);
     gl.useProgram(this.progB);
-    bindAt(2, this.texP0);
-    bindAt(3, this.texA1);
-    bindAt(4, this.texS0);
-    bindAt(5, this.texS1);
-    bindAt(6, this.texA2);
-    bindAt(7, this.texL0);
-    bindAt(8, this.texA3);
+    this.bindAt(2, t.texP0);
+    this.bindAt(3, t.texA1);
+    this.bindAt(4, t.texS0);
+    this.bindAt(5, t.texS1);
+    this.bindAt(6, t.texA2);
+    this.bindAt(7, t.texL0);
+    this.bindAt(8, t.texA3);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // pass C: axial PSF, both compounding looks
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbC);
+
+    // Pass C: axial PSF
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbC);
     gl.useProgram(this.progC);
-    bindAt(2, this.texB0);
-    bindAt(3, this.psfTex);
-    bindAt(4, this.texB2);
+    this.bindAt(2, t.texB0);
+    this.bindAt(3, this.psfTex);
+    this.bindAt(4, t.texB2);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // pass D: lateral PSF and envelope, the looks averaged
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbD);
+
+    // Pass D: lateral PSF and compounded envelope
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbD);
     gl.useProgram(this.progD);
     gl.uniform1f(this.uLooksD, scene.scatterGpu?.looks ?? COMPOUND_LOOKS);
-    bindAt(2, this.texC0);
-    bindAt(3, this.psfTex);
-    bindAt(4, this.texC1);
+    this.bindAt(2, t.texC0);
+    this.bindAt(3, this.psfTex);
+    this.bindAt(4, t.texC1);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    for (let u = 2; u <= 8; u++) bindAt(u, null);
-  }
-
-  private bindAt(unit: number, tex: WebGLTexture | null): void {
-    this.gl.activeTexture(this.gl.TEXTURE0 + unit);
-    this.gl.bindTexture(this.gl.TEXTURE_2D, tex);
+    for (let u = 2; u <= 8; u++) this.bindAt(u, null);
   }
 
   render(
@@ -763,16 +468,16 @@ export class Webgl2Renderer implements RendererBackend {
     if (this.disposed) throw new Error('Webgl2Renderer used after dispose');
     const t0 = performance.now();
     const gl = this.gl;
+    const t = this.targets;
     const w = spec.samples,
       h = spec.lines;
     this.formEnvelope(scene, beam, spec);
-    // Read back amplitude + transmission from D and ids from B directly without a redundant 1×1 pipeline stall
     gl.readBuffer(gl.COLOR_ATTACHMENT0);
     const tRead = performance.now();
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, this.readAmp);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, t.readAmp);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbB);
     gl.readBuffer(gl.COLOR_ATTACHMENT1);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readIds);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, t.readIds);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     const tDone = performance.now();
     this.lastGpuMs = tRead - t0;
@@ -783,8 +488,8 @@ export class Webgl2Renderer implements RendererBackend {
       st = out.structure,
       ti = out.tissue,
       sg = out.segment;
-    const ra = this.readAmp,
-      ri = this.readIds;
+    const ra = t.readAmp,
+      ri = t.readIds;
     for (let i = 0; i < n; i++) {
       amp[i] = ra[i * 4]!;
       tr[i] = ra[i * 4 + 1]!;
@@ -797,11 +502,6 @@ export class Webgl2Renderer implements RendererBackend {
     this.lastMs = performance.now() - t0;
   }
 
-  /**
-   * Render and form the displayed polar image on the GPU (decision 54): passes A–D, then the console pass,
-   * whose packed RGBA8 output (grey, structure, tissue, transmission code) is read back, and the ids of pass B for the
-   * LV segment codes their fourth channel carries (decision 152). The envelope amplitude stays on the GPU. Advances the console state exactly like `applyConsole`.
-   */
   renderDisplay(
     scene: Scene,
     beam: BeamFrame,
@@ -815,44 +515,46 @@ export class Webgl2Renderer implements RendererBackend {
     const gl = this.gl;
     if (this.disposed || gl.isContextLost()) return false;
     const t0 = performance.now();
+    const t = this.targets;
     const w = spec.samples,
       h = spec.lines;
     this.formEnvelope(scene, beam, spec);
     const s = con.settings;
-    this.ensureCompensation(s, spec);
+    this.uploads.ensureCompensation(s, spec);
     let useHistory = con.state.gpuHistory && this.histValid && s.persistence > 0;
     if (!con.state.gpuHistory && s.persistence > 0 && con.state.prev?.length === w * h) {
-      // the previous output of this state came from the CPU console: continue its persistence here
       this.uploadHistory(con.state.prev, w, h);
       useHistory = true;
     }
-    // receiver noise (decision 91): white complex samples filtered along the beam, then across lines
+    // Receiver noise: axial + lateral passes
     this.ensureNoiseKernels(spec, s);
     gl.viewport(0, 0, w, h);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbNA);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbNA);
     gl.useProgram(this.progNoiseA);
     gl.uniform1i(this.una.uSamples, w);
     gl.uniform1ui(this.una.uSeed, con.state.seed >>> 0);
     gl.uniform1ui(this.una.uFrameIndex, con.state.frameIndex >>> 0);
     this.bindAt(2, this.noiseKernelTex);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbNL);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbNL);
     gl.useProgram(this.progNoiseL);
     gl.uniform1i(this.unl.uLines, h);
-    this.bindAt(2, this.texNA);
+    this.bindAt(2, t.texNA);
     this.bindAt(3, this.noiseKernelTex);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // console pass 1: detection + compensation + log compression once per sample into R16F
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbLog);
+
+    // Console pass 1: detection + compensation + log compression
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbLog);
     gl.useProgram(this.progLog);
     gl.uniform1f(this.ul.uDynRange, s.dynamicRangeDb);
-    this.bindAt(2, this.texD0);
-    this.bindAt(3, this.compTex);
-    this.bindAt(4, this.texNL);
+    this.bindAt(2, t.texD0);
+    this.bindAt(3, this.uploads.compTex);
+    this.bindAt(4, t.texNL);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // console pass 2: structure-oriented anisotropic SRI + axial edge enhancement + persistence + grey map
+
+    // Console pass 2: anisotropic SRI + edge enhancement + persistence + grey map
     const next = this.histCurrent === 0 ? 1 : 0;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbConsole[next]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbConsole[next]);
     gl.useProgram(this.progConsole);
     const u = this.uc;
     gl.uniform1i(u.uSamples, w);
@@ -870,27 +572,26 @@ export class Webgl2Renderer implements RendererBackend {
             ? 3
             : 0,
     );
-    this.bindAt(2, this.texLog);
-    this.bindAt(3, this.texD0);
-    this.bindAt(4, this.texB1);
-    this.bindAt(5, this.texHist[this.histCurrent]);
+    this.bindAt(2, t.texLog);
+    this.bindAt(3, t.texD0);
+    this.bindAt(4, t.texB1);
+    this.bindAt(5, t.texHist[this.histCurrent]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     for (let unit = 2; unit <= 5; unit++) this.bindAt(unit, null);
+
     const readSeg = con.needSegments !== false;
     gl.readBuffer(gl.COLOR_ATTACHMENT1);
     const tRead = performance.now();
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readPacked);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, t.readPacked);
     if (readSeg) {
-      // the LV segment map (decision 152): the ids of pass B, whose fourth channel the packed display has no room for
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbB);
       gl.readBuffer(gl.COLOR_ATTACHMENT1);
-      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readIds);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, t.readIds);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     const tDone = performance.now();
     this.lastGpuMs = tRead - t0;
     this.lastReadMs = tDone - tRead;
-    // a context lost during the frame reads nothing: decline before touching any state
     if (gl.isContextLost()) return false;
     this.histCurrent = next;
     this.histValid = true;
@@ -899,13 +600,13 @@ export class Webgl2Renderer implements RendererBackend {
     con.state.prev = null;
     con.state.frameIndex++;
     const n = w * h;
-    const rp = this.readPacked;
+    const rp = t.readPacked;
     const st = out.structure,
       ti = out.tissue,
       tr = out.transmission,
       sg = out.segment;
     if (readSeg) {
-      const ri = this.readIds;
+      const ri = t.readIds;
       for (let i = 0, o = 0; i < n; i++, o += 4) {
         display[i] = rp[o]!;
         st[i] = rp[o + 1]!;
@@ -928,14 +629,10 @@ export class Webgl2Renderer implements RendererBackend {
     return true;
   }
 
-  /**
-   * Scan-convert the display of the last `renderDisplay` (and the colour field) into the canvas at
-   * width × height and hand it over as an ImageBitmap (decision 54). Null when there is no fresh GPU display
-   * or the canvas cannot transfer bitmaps; with `readback` the pixels are copied there instead.
-   */
   present(req: PresentRequest): ImageBitmap | null {
     const gl = this.gl;
-    if (this.disposed || !this.packedFresh || !this.texPacked || gl.isContextLost()) return null;
+    const t = this.targets;
+    if (this.disposed || !this.packedFresh || !t.texPacked || gl.isContextLost()) return null;
     const t0 = performance.now();
     const { lut, width: W, height: H, color } = req;
     const canvas = gl.canvas;
@@ -943,10 +640,10 @@ export class Webgl2Renderer implements RendererBackend {
       canvas.width = W;
       canvas.height = H;
     }
-    this.ensureLut(lut, W, H);
+    this.uploads.ensureLut(lut, W, H);
     if (color) {
-      this.ensureColor(color, lut.lines, lut.samples);
-      this.ensurePolar(lut, W, H);
+      this.uploads.ensureColor(color, lut.lines, lut.samples);
+      this.uploads.ensurePolar(lut, W, H);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
@@ -963,10 +660,10 @@ export class Webgl2Renderer implements RendererBackend {
       gl.uniform4f(u.uBox, c.boxRMinCm, c.boxRMaxCm, c.boxThetaMinRad, c.boxThetaMaxRad);
       gl.uniform2f(u.uColorMap, c.scaleMps, c.showVariance ? 1 : 0);
     }
-    this.bindAt(2, this.texPacked);
-    this.bindAt(3, this.lutTex);
-    this.bindAt(4, this.colorTex);
-    this.bindAt(5, this.polarTex);
+    this.bindAt(2, t.texPacked);
+    this.bindAt(3, this.uploads.lutTex);
+    this.bindAt(4, this.uploads.colorTex);
+    this.bindAt(5, this.uploads.polarTex);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     for (let unit = 2; unit <= 5; unit++) this.bindAt(unit, null);
     if (req.readback) {
@@ -985,186 +682,45 @@ export class Webgl2Renderer implements RendererBackend {
     return bitmap;
   }
 
-  /**
-   * Hand persistence back to the CPU console: when the last output of `state` was formed here, read the history
-   * texture into `state.prev` (one float read of lines × samples, only when the console switches to the CPU).
-   */
   restoreCpuHistory(state: ConsoleState, spec: PolarFrameSpec): void {
     if (!state.gpuHistory) return;
     state.gpuHistory = false;
     const gl = this.gl;
+    const t = this.targets;
     const w = spec.samples,
       h = spec.lines;
-    if (this.disposed || gl.isContextLost() || !this.histValid || this.fbW !== w || this.fbH !== h)
-      return;
+    if (this.disposed || gl.isContextLost() || !this.histValid || t.w !== w || t.h !== h) return;
     const n = w * h;
     if (this.histUpload.length !== n * 4) this.histUpload = new Float32Array(n * 4);
-    const t = this.histUpload;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbConsole[this.histCurrent]);
+    const buf = this.histUpload;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbConsole[this.histCurrent]);
     gl.readBuffer(gl.COLOR_ATTACHMENT0);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, t);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, buf);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     if (gl.isContextLost()) return;
     const prev = new Float32Array(n);
-    for (let i = 0; i < n; i++) prev[i] = t[i * 4]!;
+    for (let i = 0; i < n; i++) prev[i] = buf[i * 4]!;
     state.prev = prev;
   }
 
-  /** Put a CPU persistence buffer (0..1 per sample) into the history texture the next console pass reads. */
   private uploadHistory(prev: Float32Array, w: number, h: number): void {
     const n = w * h;
     if (this.histUpload.length !== n * 4) this.histUpload = new Float32Array(n * 4);
-    const t = this.histUpload;
-    t.fill(0);
-    for (let i = 0; i < n; i++) t[i * 4] = prev[i] ?? 0;
+    const buf = this.histUpload;
+    buf.fill(0);
+    for (let i = 0; i < n; i++) buf[i * 4] = prev[i] ?? 0;
     const gl = this.gl;
-    this.bindAt(UPLOAD_UNIT, this.texHist[this.histCurrent]);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.FLOAT, t);
+    this.bindAt(UPLOAD_UNIT, this.targets.texHist[this.histCurrent]);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.FLOAT, buf);
     this.bindAt(UPLOAD_UNIT, null);
     this.histValid = true;
   }
-
-  private ensureCompensation(s: AcquisitionSettings, spec: PolarFrameSpec): void {
-    const key = `${spec.samples}|${spec.depthCm}|${spec.focusCm}|${s.frequencyMHz}|${s.gainDb}|${s.depthCompensationDbPerCmMHz ?? ''}|${s.tgcDb.join(',')}`;
-    if (key === this.compKey) return;
-    if (this.compData.length !== spec.samples) this.compData = new Float32Array(spec.samples);
-    consoleCompensation(s, spec, this.compData);
-    const gl = this.gl;
-    this.bindAt(UPLOAD_UNIT, this.compTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, spec.samples, 1, 0, gl.RED, gl.FLOAT, this.compData);
-    this.bindAt(UPLOAD_UNIT, null);
-    this.compKey = key;
-  }
-
-  private ensureLut(lut: ScanLut, W: number, H: number): void {
-    if (lut.key === this.lutKeyUploaded) return;
-    this.lutTexels = packScanLutTexels(lut, this.lutTexels);
-    const gl = this.gl;
-    this.bindAt(UPLOAD_UNIT, this.lutTex);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA16UI,
-      W,
-      H,
-      0,
-      gl.RGBA_INTEGER,
-      gl.UNSIGNED_SHORT,
-      this.lutTexels,
-    );
-    this.bindAt(UPLOAD_UNIT, null);
-    this.lutKeyUploaded = lut.key;
-  }
-
-  /**
-   * The colour box is tested against the LUT's own polar coordinates, not recomputed per pixel: GLSL `atan` is
-   * approximate on some GPUs (on SwiftShader ~0.1 % of the sector's pixels landed on the other side of a box edge).
-   */
-  private ensurePolar(lut: ScanLut, W: number, H: number): void {
-    if (lut.key === this.polarKeyUploaded) return;
-    const n = W * H;
-    if (this.polarTexels.length !== n * 2) this.polarTexels = new Float32Array(n * 2);
-    const t = this.polarTexels;
-    for (let p = 0; p < n; p++) {
-      t[p * 2] = lut.rCm[p] ?? 0;
-      t[p * 2 + 1] = lut.theta[p] ?? 0;
-    }
-    const gl = this.gl;
-    this.bindAt(UPLOAD_UNIT, this.polarTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, W, H, 0, gl.RG, gl.FLOAT, t);
-    this.bindAt(UPLOAD_UNIT, null);
-    this.polarKeyUploaded = lut.key;
-  }
-
-  private ensureColor(c: PresentColor, lines: number, samples: number): void {
-    const scale = Math.max(1e-3, c.settings.scaleMps);
-    const key = `${c.version}|${lines}x${samples}|${scale.toFixed(4)}`;
-    if (key === this.colorKey) return;
-    const n = lines * samples;
-    if (this.colorTexels.length !== n * 4) this.colorTexels = new Float32Array(n * 4);
-    const t = this.colorTexels;
-    const kPhi = Math.PI / scale;
-    for (let i = 0, o = 0; i < n; i++, o += 4) {
-      const v = c.vel[i] ?? NaN;
-      const valid = !Number.isNaN(v);
-      if (valid) {
-        const ph = v * kPhi;
-        t[o] = Math.cos(ph);
-        t[o + 1] = Math.sin(ph);
-        t[o + 2] = c.variance[i] ?? 0;
-        t[o + 3] = 1;
-      } else {
-        t[o] = 0;
-        t[o + 1] = 0;
-        t[o + 2] = 0;
-        t[o + 3] = 0;
-      }
-    }
-    const gl = this.gl;
-    this.bindAt(UPLOAD_UNIT, this.colorTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, samples, lines, 0, gl.RGBA, gl.FLOAT, t);
-    this.bindAt(UPLOAD_UNIT, null);
-    this.colorKey = key;
-  }
 }
-
-function makeTexture2D(gl: WebGL2RenderingContext): WebGLTexture {
-  const t = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return t;
-}
-
-function buildProgram(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
-  const compile = (type: number, src: string): WebGLShader => {
-    const sh = gl.createShader(type)!;
-    gl.shaderSource(sh, src);
-    gl.compileShader(sh);
-    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      const log = gl.getShaderInfoLog(sh) ?? '';
-      gl.deleteShader(sh);
-      throw new Error(`shader compile error: ${log}`);
-    }
-    return sh;
-  };
-  const v = compile(gl.VERTEX_SHADER, vs);
-  const f = compile(gl.FRAGMENT_SHADER, fs);
-  const prog = gl.createProgram();
-  gl.attachShader(prog, v);
-  gl.attachShader(prog, f);
-  gl.linkProgram(prog);
-  gl.deleteShader(v);
-  gl.deleteShader(f);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(prog) ?? '';
-    gl.deleteProgram(prog);
-    throw new Error(`program link error: ${log}`);
-  }
-  return prog;
-}
-
-/** Renderer string of a WebGL context, unmasked when the browser exposes it. */
-export function webglRendererName(gl: WebGL2RenderingContext): string {
-  const dbg = gl.getExtension('WEBGL_debug_renderer_info') as {
-    UNMASKED_RENDERER_WEBGL: number;
-  } | null;
-  const name: unknown = dbg
-    ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
-    : gl.getParameter(gl.RENDERER);
-  return typeof name === 'string' ? name : '';
-}
-
-/** Software rasterisers behind WebGL (Chromium without GPU, virtual machines, remote desktops, Playwright). */
-const SOFTWARE_GL = /swiftshader|llvmpipe|softpipe|software|basic render/i;
 
 /**
  * Create the GPU renderer on an OffscreenCanvas (worker) or a canvas element (main thread).
- * Returns null when WebGL2 or float render targets are unavailable, and also on software WebGL unless
- * `allowSoftware` is set: a software rasteriser compiles the classifier in 20–60 s and needs hundreds of
- * milliseconds per frame, so the CPU tracer is faster there (decision 53). The reason is reported.
+ * Returns null when WebGL2 or float render targets are unavailable, and also on software WebGL
+ * unless `allowSoftware` is set (decision 53).
  */
 export function createWebgl2Renderer(
   canvas?: OffscreenCanvas | HTMLCanvasElement,
@@ -1189,9 +745,6 @@ export function createWebgl2Renderer(
     if (!gl) return { renderer: null, reason: 'WebGL2 unavailable' };
     const name = webglRendererName(gl);
     if (!options.allowSoftware && SOFTWARE_GL.test(name)) {
-      // lib.dom types this extension and tsc accepts the call; the linter's program resolves the overload only
-      // on some runs and reports an unsafe call on the others, so the directive is kept and its «unused» warning
-      // is silenced for this file in eslint.config.js
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       gl.getExtension('WEBGL_lose_context')?.loseContext();
       return { renderer: null, reason: `software WebGL (${name.slice(0, 60)}): CPU tracer` };

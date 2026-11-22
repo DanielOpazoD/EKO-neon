@@ -1,16 +1,19 @@
 import { modePolicy } from '@/app/modePolicy';
 import { useSimStore, type ConsoleTab } from '@/app/store';
 import { MODALITIES } from '@/simulator/renderer/modality';
-import { type KeyboardEvent, type ReactNode, useEffect, useRef } from 'react';
+import { type KeyboardEvent, type ReactNode, lazy, Suspense, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { AcquireTab } from './console/AcquireTab';
 import { DopplerTab } from './console/DopplerTab';
 import { ImageTab } from './console/ImageTab';
-import { LabTab } from './console/LabTab';
 import { MeasureTab } from './console/MeasureTab';
 import { IconAcquire, IconDoppler, IconImage, IconLab, IconMeasure, IconReview } from './icons';
-import { ReviewPanel } from './ReviewPanel';
 import { useSlidingPill } from './useSlidingPill';
+
+const LabTab = lazy(() => import('./console/LabTab').then((m) => ({ default: m.LabTab })));
+const ReviewPanel = lazy(() =>
+  import('./ReviewPanel').then((m) => ({ default: m.ReviewPanel })),
+);
 
 /**
  * Right-hand console, organised as tabs so only one control family is visible at a time
@@ -138,8 +141,16 @@ export function ConsolePanel() {
           {active === 'imagen' && <ImageTab />}
           {active === 'doppler' && <DopplerTab />}
           {active === 'medir' && <MeasureTab />}
-          {active === 'lab' && <LabTab />}
-          {active === 'revisar' && <ReviewPanel />}
+          {active === 'lab' && (
+            <Suspense fallback={<div className="small">Cargando laboratorio…</div>}>
+              <LabTab />
+            </Suspense>
+          )}
+          {active === 'revisar' && (
+            <Suspense fallback={<div className="small">Cargando revisión…</div>}>
+              <ReviewPanel />
+            </Suspense>
+          )}
         </div>
       </div>
     </div>

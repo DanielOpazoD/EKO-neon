@@ -1,0 +1,320 @@
+import { createRng } from '@/core/random';
+import { computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
+import { Tissue, type TissueSample } from '@/simulator/anatomy/tissue';
+import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
+import { relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
+import {
+  sampleFlow,
+  sampleTissueVelocity,
+  type FlowSample,
+} from '@/simulator/doppler/flow-primitives/flowField';
+import { accumulatePulsedSpectrum } from '@/simulator/doppler/spectral/pulsedIq';
+import {
+  buildSpectralColumn,
+  presentSpectralColumn,
+  SPECTRAL_BINS,
+  type VelocitySample,
+} from '@/simulator/doppler/spectral/spectrum';
+import { valveClickWeight } from '@/simulator/doppler/spectral/valveClicks';
+import type { BeamFrame } from '@/simulator/probe/pose';
+import { MODALITIES } from '@/simulator/renderer/modality';
+import { DUPLEX_BMODE_SHARE } from '@/simulator/renderer/pulseTiming';
+import type { PolarFrameSpec } from '@/simulator/renderer/types';
+import type { GateInfo } from '../protocol';
+import type { StripCtx } from '../stripEngine';
+
+export interface GateFlowCache {
+  key: string;
+  best: number;
+  bx: number;
+  by: number;
+  bz: number;
+}
+
+/** Sample one spectral Doppler column (PW, CW or TDI) at a given cardiac phase and time instant. */
+export function sampleSpectralColumn(
+  beam: BeamFrame,
+  spec: PolarFrameSpec,
+  phase: number,
+  col: number,
+  stripHead: number,
+  timeS: number,
+  ctx: StripCtx,
+  flowSample: FlowSample,
+  tissueSample: TissueSample,
+): { column: Float32Array; display: Float32Array } {
+  const inp = ctx.input;
+  const hf = ctx.heart.frame;
+  const theta = Math.max(-spec.sectorRad / 2, Math.min(spec.sectorRad / 2, inp.cursorThetaRad));
+  const ct = Math.cos(theta),
+    sn = Math.sin(theta);
+  const dx = beam.forward.x * ct + beam.lateral.x * sn;
+  const dy = beam.forward.y * ct + beam.lateral.y * sn;
+  const dz = beam.forward.z * ct + beam.lateral.z * sn;
+  const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+  const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+  const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+  const scene = ctx.scene(phase);
+  const hp = scene.heartPose;
+  const classifyScene = sceneClassifier(scene);
+  const received = relativeEchoAmplitude(
+    scene,
+    beam.origin,
+    { x: dx, y: dy, z: dz },
+    beam.contact,
+  );
+  const samples: VelocitySample[] = [];
+  const lx = beam.lateral.x * ct - beam.forward.x * sn,
+    ly = beam.lateral.y * ct - beam.forward.y * sn,
+    lz = beam.lateral.z * ct - beam.forward.z * sn;
+
+  const classify = (r: number, du: number, dv: number): void => {
+    const px = beam.origin.x + dx * r + lx * du + beam.normal.x * dv;
+    const py = beam.origin.y + dy * r + ly * du + beam.normal.y * dv;
+    const pz = beam.origin.z + dz * r + lz * du + beam.normal.z * dv;
+    const hx =
+      (px - hf.origin.x) * hf.ex.x + (py - hf.origin.y) * hf.ex.y + (pz - hf.origin.z) * hf.ex.z;
+    const hy =
+      (px - hf.origin.x) * hf.ey.x + (py - hf.origin.y) * hf.ey.y + (pz - hf.origin.z) * hf.ey.z;
+    const hz =
+      (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z;
+    const inScene = classifyScene(px, py, pz, tissueSample) !== 0;
+    if (inp.modality === 'tdi') {
+      if (inScene && tissueSample.tissue === Tissue.Myocardium) {
+        const power = received(r) ** 2;
+        if (power === 0) return;
+        const tv = sampleTissueVelocity(
+          ctx.heart,
+          ctx.tables,
+          phase,
+          hx,
+          hy,
+          hz,
+          tissueSample.structure,
+        );
+        const axial = tv.vx * dhx + tv.vy * dhy + tv.vz * dhz;
+        const vPerp = Math.sqrt(
+          Math.max(0, tv.vx * tv.vx + tv.vy * tv.vy + tv.vz * tv.vz - axial * axial),
+        );
+        samples.push({ v: -axial, weight: power, dispersion: 0.05, vPerp, depthCm: r });
+      }
+      return;
+    }
+    if (!inScene || tissueSample.tissue !== Tissue.Blood) return;
+    const power = received(r) ** 2;
+    if (power === 0) return;
+    sampleFlow(ctx.flow, ctx.tables, hp, phase, hx, hy, hz, flowSample);
+    if (!flowSample.present) {
+      samples.push({ v: 0, weight: 0.3 * power, dispersion: 0.05 });
+      return;
+    }
+    const axial = flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz;
+    const vPerp = Math.sqrt(
+      Math.max(
+        0,
+        flowSample.vx * flowSample.vx +
+          flowSample.vy * flowSample.vy +
+          flowSample.vz * flowSample.vz -
+          axial * axial,
+      ),
+    );
+    samples.push({
+      v: -axial,
+      weight: power,
+      dispersion: flowSample.dispersion,
+      vPerp,
+      depthCm: r,
+    });
+  };
+
+  const aliasing = MODALITIES[inp.modality].aliasing;
+  // Heart-frame points where the sample volume can meet a valve's leaflets: along the CW line, or the PW gate
+  const clickPoints: number[] = [];
+  const clickPowers: number[] = [];
+  const clickPoint = (r: number): void => {
+    const px = beam.origin.x + dx * r,
+      py = beam.origin.y + dy * r,
+      pz = beam.origin.z + dz * r;
+    const point = [
+      (px - hf.origin.x) * hf.ex.x + (py - hf.origin.y) * hf.ex.y + (pz - hf.origin.z) * hf.ex.z,
+      (px - hf.origin.x) * hf.ey.x + (py - hf.origin.y) * hf.ey.y + (pz - hf.origin.z) * hf.ey.z,
+      (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z,
+    ];
+    if (
+      valveClickWeight(ctx.heart, hp, ctx.tables, phase * ctx.tables.rrS, point) === 0 ||
+      received(r) === 0
+    )
+      return;
+    clickPoints.push(...point);
+    clickPowers.push(received(r) ** 2);
+  };
+
+  if (inp.modality === 'cw') {
+    for (let r = 1.0; r < spec.depthCm; r += 0.25) {
+      if (received(r) === 0) break;
+      classify(r, 0, 0);
+      clickPoint(r);
+    }
+  } else {
+    const g = inp.spectral.gateLengthCm;
+    if (inp.modality === 'pw')
+      for (const k of [-0.5, 0, 0.5]) clickPoint(inp.gateDepthCm + k * g);
+    const rng = createRng(ctx.caseDef.seed ^ (col * 7919));
+    for (let i = 0; i < 20; i++) {
+      const r = inp.gateDepthCm + (rng.next() - 0.5) * g;
+      classify(r, (rng.next() - 0.5) * 0.35, (rng.next() - 0.5) * 0.35);
+    }
+  }
+
+  const column = new Float32Array(SPECTRAL_BINS);
+  const display = new Float32Array(SPECTRAL_BINS);
+  const click = clickPoints.length
+    ? valveClickWeight(
+        ctx.heart,
+        hp,
+        ctx.tables,
+        phase * ctx.tables.rrS,
+        clickPoints,
+        clickPowers,
+      )
+    : 0;
+  if (aliasing) {
+    accumulatePulsedSpectrum(
+      samples,
+      inp.spectral,
+      inp.settings.frequencyMHz,
+      ctx.caseDef.seed,
+      timeS,
+      column,
+    );
+    presentSpectralColumn(
+      column,
+      inp.spectral,
+      stripHead,
+      ctx.caseDef.seed,
+      inp.settings.frequencyMHz,
+      1 - DUPLEX_BMODE_SHARE,
+      click,
+      display,
+      timeS,
+      false,
+    );
+  } else {
+    buildSpectralColumn(
+      samples,
+      inp.spectral,
+      stripHead,
+      ctx.caseDef.seed,
+      aliasing,
+      column,
+      inp.settings.frequencyMHz,
+      1 - DUPLEX_BMODE_SHARE,
+      click,
+      display,
+      timeS,
+    );
+  }
+  return { column, display };
+}
+
+/** Structures at the Doppler/M-mode cursor and the beam-flow angle at the PW/TDI gate (technique checks). */
+export function computeGateInfo(
+  beam: BeamFrame,
+  spec: PolarFrameSpec,
+  phase: number,
+  structure: Uint8Array,
+  ctx: StripCtx,
+  gateFlow: GateFlowCache,
+  flowSample: FlowSample,
+  tissueSample: TissueSample,
+): GateInfo {
+  const inp = ctx.input;
+  const theta = Math.max(-spec.sectorRad / 2, Math.min(spec.sectorRad / 2, inp.cursorThetaRad));
+  const li = Math.min(
+    spec.lines - 1,
+    Math.max(0, Math.round(((theta + spec.sectorRad / 2) / spec.sectorRad) * spec.lines - 0.5)),
+  );
+  const lineStructures: number[] = [];
+  if (structure.length === spec.lines * spec.samples) {
+    for (let si = 0; si < spec.samples; si++) {
+      const st = structure[li * spec.samples + si]!;
+      if (st !== 0 && !lineStructures.includes(st)) lineStructures.push(st);
+    }
+  }
+  const ct = Math.cos(theta),
+    sn = Math.sin(theta);
+  const r = inp.gateDepthCm;
+  const dx = beam.forward.x * ct + beam.lateral.x * sn;
+  const dy = beam.forward.y * ct + beam.lateral.y * sn;
+  const dz = beam.forward.z * ct + beam.lateral.z * sn;
+  const px = beam.origin.x + dx * r,
+    py = beam.origin.y + dy * r,
+    pz = beam.origin.z + dz * r;
+  const hf = ctx.heart.frame;
+  const hx =
+    (px - hf.origin.x) * hf.ex.x + (py - hf.origin.y) * hf.ex.y + (pz - hf.origin.z) * hf.ex.z;
+  const hy =
+    (px - hf.origin.x) * hf.ey.x + (py - hf.origin.y) * hf.ey.y + (pz - hf.origin.z) * hf.ey.z;
+  const hz =
+    (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z;
+  const inScene = sceneClassifier(ctx.scene(phase))(px, py, pz, tissueSample) !== 0;
+  let flowPresent = false;
+  let flowAngleDeg: number | null = null;
+  if (inScene && tissueSample.tissue === Tissue.Blood) {
+    // Cache peak flow vector over the cycle for this heart-frame gate position.
+    const gateKey = `${hx.toFixed(5)},${hy.toFixed(5)},${hz.toFixed(5)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
+    if (gateFlow.key !== gateKey) {
+      let best = 0;
+      let bx = 0,
+        by = 0,
+        bz = 0;
+      for (let k = 0; k < 16; k++) {
+        const ph = k / 16;
+        sampleFlow(
+          ctx.flow,
+          ctx.tables,
+          computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph)),
+          ph,
+          hx,
+          hy,
+          hz,
+          flowSample,
+        );
+        const sp = Math.hypot(flowSample.vx, flowSample.vy, flowSample.vz);
+        if (flowSample.present && sp > best) {
+          best = sp;
+          bx = flowSample.vx;
+          by = flowSample.vy;
+          bz = flowSample.vz;
+        }
+      }
+      gateFlow.key = gateKey;
+      gateFlow.best = best;
+      gateFlow.bx = bx;
+      gateFlow.by = by;
+      gateFlow.bz = bz;
+    }
+    if (gateFlow.best > 0.05) {
+      flowPresent = true;
+      const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+      const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+      const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+      const cos = Math.abs((gateFlow.bx * dhx + gateFlow.by * dhy + gateFlow.bz * dhz) / gateFlow.best);
+      flowAngleDeg = (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
+    }
+  } else if (inScene && tissueSample.tissue === Tissue.Myocardium && inp.modality === 'tdi') {
+    flowPresent = true;
+    const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+    flowAngleDeg = (Math.acos(Math.min(1, Math.abs(dhz))) * 180) / Math.PI;
+  }
+  return {
+    thetaRad: theta,
+    depthCm: r,
+    structure: inScene ? tissueSample.structure : 0,
+    tissue: inScene ? tissueSample.tissue : 0,
+    flowPresent,
+    flowAngleDeg,
+    lineStructures,
+  };
+}

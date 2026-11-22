@@ -8,19 +8,14 @@ import { DisplayCanvas } from '@/ui/DisplayCanvas';
 import { ConsolePanel } from '@/ui/ConsolePanel';
 import { TopBar } from '@/ui/TopBar';
 import { ModeBar } from '@/ui/ModeBar';
-import { ExamNotice, GuidancePanel } from '@/ui/GuidancePanel';
 import { ErrorBoundary, firstLine } from '@/ui/ErrorBoundary';
-import { SegmentPanel } from '@/ui/SegmentPanel';
 import { evaluateTasks, type LearnerSnapshot } from '@/education/curriculum';
-import { DevPanel } from '@/ui/DevPanel';
 import { IconChevronRight } from '@/ui/icons';
-import { ShortcutsDialog } from '@/ui/ShortcutsDialog';
-import { Tutorial } from '@/ui/Tutorial';
 import { TooltipLayer } from '@/ui/Tooltip';
 import { Splash } from '@/ui/Splash';
 import { isReportSection, ReportSections, type ReportSectionId } from '@/ui/ReportSections';
 import type { SimOutput } from '@/simulator/core/protocol';
-import { DopplerAudio } from '@/simulator/doppler/audio/dopplerAudio';
+import type { DopplerAudio } from '@/simulator/doppler/audio/dopplerAudio';
 import { frameBus } from './frameBus';
 import { isSpectralModality } from '@/simulator/renderer/modality';
 
@@ -39,6 +34,20 @@ const CurriculumScreen = lazy(() =>
 const ProgressScreen = lazy(() =>
   import('@/ui/ProgressScreen').then((m) => ({ default: m.ProgressScreen })),
 );
+const SegmentPanel = lazy(() =>
+  import('@/ui/SegmentPanel').then((m) => ({ default: m.SegmentPanel })),
+);
+const GuidancePanel = lazy(() =>
+  import('@/ui/GuidancePanel').then((m) => ({ default: m.GuidancePanel })),
+);
+const ExamNotice = lazy(() =>
+  import('@/ui/GuidancePanel').then((m) => ({ default: m.ExamNotice })),
+);
+const DevPanel = lazy(() => import('@/ui/DevPanel').then((m) => ({ default: m.DevPanel })));
+const ShortcutsDialog = lazy(() =>
+  import('@/ui/ShortcutsDialog').then((m) => ({ default: m.ShortcutsDialog })),
+);
+const Tutorial = lazy(() => import('@/ui/Tutorial').then((m) => ({ default: m.Tutorial })));
 const screenFallback = <div className="screen small">Cargando…</div>;
 const SECTION_LABEL: Record<ReportSectionId, string> = {
   report: 'El informe',
@@ -114,9 +123,20 @@ export function App() {
 
   useEffect(() => {
     const wantAudio = spectral.audioOn && isSpectralModality(modality);
+    let cancelled = false;
     if (wantAudio && !audioRef.current) {
-      audioRef.current = new DopplerAudio();
-      audioRef.current.start();
+      import('@/simulator/doppler/audio/dopplerAudio').then(({ DopplerAudio }) => {
+        if (cancelled) return;
+        const st = useSimStore.getState();
+        if (!st.spectral.audioOn || !isSpectralModality(st.modality) || audioRef.current) return;
+        const instance = new DopplerAudio();
+        instance.start();
+        instance.setVolume(st.spectral.volume);
+        audioRef.current = instance;
+      });
+      return () => {
+        cancelled = true;
+      };
     }
     if (audioRef.current) {
       if (!wantAudio) {
@@ -124,6 +144,7 @@ export function App() {
         audioRef.current = null;
       } else audioRef.current.setVolume(spectral.volume);
     }
+    return undefined;
   }, [spectral.audioOn, spectral.volume, modality]);
 
   // Clean interface: the whole left rail hides. The exam keeps it, with a torso of skin and ribs and no guide
@@ -236,7 +257,9 @@ export function App() {
               )}
               {railVisible && ui.segmentsOpen && (
                 <div id="lv-segments">
-                  <SegmentPanel />
+                  <Suspense fallback={<div className="small">Cargando segmentos…</div>}>
+                    <SegmentPanel />
+                  </Suspense>
                 </div>
               )}
               {/* the view guide stays hidden until asked for: the learner reads the image first (decision 141); it
@@ -258,7 +281,9 @@ export function App() {
               )}
               {railVisible && hints && ui.guidanceOpen && (
                 <div id="view-guidance">
-                  <GuidancePanel />
+                  <Suspense fallback={<div className="guidance small">Cargando guía…</div>}>
+                    <GuidancePanel />
+                  </Suspense>
                 </div>
               )}
             </div>
@@ -267,7 +292,11 @@ export function App() {
           <div className="center">
             {/* the exam notice sits over the image, where it is never silently lost — the E2E flow caught it hidden
                 in the rail after commit 93d30b0; the rail keeps no guide in the exam (decision 256) */}
-            {mode === 'exam' && <ExamNotice />}
+            {mode === 'exam' && (
+              <Suspense fallback={null}>
+                <ExamNotice />
+              </Suspense>
+            )}
             {error && (
               <div className="error" role="alert">
                 {firstLine(error)}
@@ -277,8 +306,16 @@ export function App() {
               </div>
             )}
             <DisplayCanvas onSize={setSize} />
-            <DevPanel />
-            {ui.screen === 'simulator' && <Tutorial />}
+            {modePolicy(mode).devToolsAllowed && ui.devPanel && (
+              <Suspense fallback={null}>
+                <DevPanel />
+              </Suspense>
+            )}
+            {ui.screen === 'simulator' && !ui.tutorialDone && (
+              <Suspense fallback={null}>
+                <Tutorial />
+              </Suspense>
+            )}
           </div>
           <div id="console-panel" className="right">
             <ConsolePanel />
@@ -287,7 +324,11 @@ export function App() {
       )}
       <ModeBar />
       <TooltipLayer />
-      <ShortcutsDialog />
+      {ui.shortcutsOpen && (
+        <Suspense fallback={null}>
+          <ShortcutsDialog />
+        </Suspense>
+      )}
     </div>
   );
 }

@@ -10,7 +10,8 @@ import { pulmonaryHypertensionRvCase } from './pulmonary-hypertension-rv';
 import { pericardialEffusionTamponadeCase } from './pericardial-effusion-tamponade';
 import { afDiastolicCase } from './af-diastolic';
 import { artifactChallengeCase } from './artifact-challenge';
-import { validateCase, type CaseDefinition, type CaseDefinitionInput } from './schema';
+import type { CaseDefinition, CaseDefinitionInput } from './schema';
+import { normalizeCase } from './normalizeCase';
 
 /** The 12 mandatory initial cases (spec 56), in the order of the specification. */
 export const CASE_INPUTS: CaseDefinitionInput[] = [
@@ -32,9 +33,13 @@ export function listCases(): { id: string; title: string; difficulty: number }[]
   return CASE_INPUTS.map((c) => ({ id: c.id, title: c.title, difficulty: c.difficulty }));
 }
 
+const normalizedCache = new Map<string, CaseDefinition>();
+
 export function loadCaseById(id: string): CaseDefinition {
   const input = CASE_INPUTS.find((c) => c.id === id) ?? normalExcellentCase;
-  const res = validateCase(input);
-  if (!res.ok || !res.case) throw new Error(`Case ${id} invalid: ${res.errors.join('; ')}`);
-  return res.case;
+  const cached = normalizedCache.get(input.id);
+  if (cached) return cached;
+  const normalized = normalizeCase(input);
+  normalizedCache.set(input.id, normalized);
+  return normalized;
 }

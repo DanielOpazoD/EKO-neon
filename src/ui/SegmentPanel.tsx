@@ -9,6 +9,8 @@ import type { SegmentCoverage } from '@/simulator/view-recognition/segmentCovera
 import { getViewTarget } from '@/simulator/windows/viewDefinitions';
 import { Segmented, Toggle } from './controls';
 import { SEGMENT_RGB, segmentCss, segmentNames, type SegmentModelChoice } from './segmentMap';
+import { coverageText, REASON_ES } from './segmentCoverage';
+export { coverageText };
 
 /**
  * LV segment panel (decision 152): the polar map of the model the learner picks — anatomical AHA 17 with the apex cap
@@ -19,12 +21,6 @@ import { SEGMENT_RGB, segmentCss, segmentNames, type SegmentModelChoice } from '
  * Decision 242: the panel says it in fewer words and less room — the colour key carries the segments of each state,
  * the explanations live in the tips, the map is drawn smaller.
  */
-const REASON_ES: Record<string, string> = {
-  not_in_plane: 'fuera del plano',
-  shadowed: 'en el plano, en sombra acústica',
-  insufficient_extent: 'en el plano, corte demasiado pequeño o tangencial',
-  insufficient_border_visibility: 'en el plano, borde endocárdico poco visible',
-};
 const LEVEL_ES: Record<LvSegmentInfo['level'], string> = {
   basal: 'basal',
   mid: 'medio',
@@ -37,13 +33,6 @@ const TERRITORY_ES: Record<LvSegmentInfo['coronaryTerritoryHint'], string> = {
   LCx: 'circunfleja',
   'LAD/variable': 'descendente anterior, variable',
 };
-
-/** State of a segment in the current plane, in words (the colour never carries it alone). */
-export function coverageText(c: SegmentCoverage | undefined): string {
-  if (!c) return 'sin análisis del corte';
-  if (c.assessable) return 'evaluable en este corte';
-  return REASON_ES[c.reason ?? ''] ?? 'no evaluable';
-}
 
 const SIZE = 176;
 const C = SIZE / 2;

@@ -11,7 +11,7 @@ import type { HeartFrame } from '@/simulator/anatomy/heartFrame';
 import { skinZ, type ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import { poseFromControl } from '@/simulator/probe/pose';
 import { segmentCss, segmentIdOf, segmentNames } from '../segmentMap';
-import { coverageText } from '../SegmentPanel';
+import { coverageText } from '../segmentCoverage';
 import type { NavigatorCameraRig } from './navigatorCamera';
 import type { HeartMeshes } from './navigatorHeart';
 

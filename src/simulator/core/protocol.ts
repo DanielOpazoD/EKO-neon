@@ -68,6 +68,8 @@ export interface SimInput {
   } | null;
   /** True when the UI actively displays LV segment overlays/maps (otherwise GPU only reads segments on analysis frames). */
   needSegments?: boolean;
+  /** True when the main thread needs the per-sample polar structure map (cut map, review mode, measurement tools, frozen). */
+  needStructure?: boolean;
 }
 
 /** Acquisition controls and model versions that produced one image, independent of pending console changes. */
@@ -322,7 +324,11 @@ export type WorkerToMain =
  * two maps and the ECG cloned, 73 KiB were copied per frame at medium quality.
  */
 export function frameTransferList(out: SimOutput): Transferable[] {
-  const list: Transferable[] = [out.rgba, out.structure.buffer, out.segment.buffer, out.ecg.buffer];
+  const list: Transferable[] = [];
+  if (out.rgba.byteLength > 0) list.push(out.rgba);
+  if (out.structure.byteLength > 0) list.push(out.structure.buffer);
+  if (out.segment.byteLength > 0) list.push(out.segment.buffer);
+  if (out.ecg.byteLength > 0) list.push(out.ecg.buffer);
   if (out.bitmap) list.push(out.bitmap);
   return list;
 }

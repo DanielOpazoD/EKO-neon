@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 /**
  * Local learning analytics (spec 40, proposal 7): events and progress live only in the learner's
  * browser (localStorage) and can be exported as JSON by the learner for research use. No telemetry.
@@ -48,32 +46,75 @@ export interface ProgressStorage {
   setItem(key: string, value: string): void;
 }
 
-const num = z.number().finite();
-/** Every event kind with its fields' types: what storage hands back is checked event by event (`loadProgress`). */
-const EVENT_SCHEMA = z.discriminatedUnion('kind', [
-  z.object({ t: num, kind: z.literal('view'), caseId: z.string(), viewId: z.string(), score: num }),
-  z.object({
-    t: num,
-    kind: z.literal('measurement'),
-    caseId: z.string(),
-    measurementId: z.string(),
-    techniqueScore: num.nullable(),
-    value: num,
-  }),
-  z.object({ t: num, kind: z.literal('task'), taskId: z.string() }),
-  z.object({ t: num, kind: z.literal('case'), caseId: z.string() }),
-  z.object({ t: num, kind: z.literal('exam-start'), caseId: z.string() }),
-  z.object({
-    t: num,
-    kind: z.literal('exam'),
-    caseId: z.string(),
-    total: num,
-    acquisition: num,
-    measurements: num,
-    impression: num.nullable(),
-  }),
-  z.object({ t: num, kind: z.literal('impression'), caseId: z.string(), score: num }),
-]);
+const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isNullableNum = (v: unknown): v is number | null => v === null || isFiniteNum(v);
+const isStr = (v: unknown): v is string => typeof v === 'string';
+
+/** Parse a single stored ProgressEvent; returns null for malformed or unknown shapes. */
+function parseEvent(raw: unknown): ProgressEvent | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const e = raw as Record<string, unknown>;
+  if (!isFiniteNum(e.t) || !isStr(e.kind)) return null;
+  switch (e.kind) {
+    case 'view':
+      return isStr(e.caseId) && isStr(e.viewId) && isFiniteNum(e.score)
+        ? { t: e.t, kind: 'view', caseId: e.caseId, viewId: e.viewId, score: e.score }
+        : null;
+    case 'measurement':
+      return isStr(e.caseId) &&
+        isStr(e.measurementId) &&
+        isNullableNum(e.techniqueScore) &&
+        isFiniteNum(e.value)
+        ? {
+            t: e.t,
+            kind: 'measurement',
+            caseId: e.caseId,
+            measurementId: e.measurementId,
+            techniqueScore: e.techniqueScore,
+            value: e.value,
+          }
+        : null;
+    case 'task':
+      return isStr(e.taskId) ? { t: e.t, kind: 'task', taskId: e.taskId } : null;
+    case 'case':
+      return isStr(e.caseId) ? { t: e.t, kind: 'case', caseId: e.caseId } : null;
+    case 'exam-start':
+      return isStr(e.caseId) ? { t: e.t, kind: 'exam-start', caseId: e.caseId } : null;
+    case 'exam':
+      return isStr(e.caseId) &&
+        isFiniteNum(e.total) &&
+        isFiniteNum(e.acquisition) &&
+        isFiniteNum(e.measurements) &&
+        isNullableNum(e.impression)
+        ? {
+            t: e.t,
+            kind: 'exam',
+            caseId: e.caseId,
+            total: e.total,
+            acquisition: e.acquisition,
+            measurements: e.measurements,
+            impression: e.impression,
+          }
+        : null;
+    case 'impression':
+      return isStr(e.caseId) && isFiniteNum(e.score)
+        ? { t: e.t, kind: 'impression', caseId: e.caseId, score: e.score }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function parseCompletedTasks(raw: unknown): Record<string, number> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const entries = Object.entries(raw as Record<string, unknown>);
+  const out: Record<string, number> = {};
+  for (const [k, v] of entries) {
+    if (!isFiniteNum(v)) return {};
+    out[k] = v;
+  }
+  return out;
+}
 
 export function loadProgress(storage: ProgressStorage | null): ProgressState {
   if (!storage) return emptyProgress();
@@ -88,13 +129,12 @@ export function loadProgress(storage: ProgressStorage | null): ProgressState {
     // wrong shape; the rest of the history survives
     const valid: ProgressEvent[] = [];
     for (const e of events) {
-      const r = EVENT_SCHEMA.safeParse(e);
-      if (r.success) valid.push(r.data);
+      const ev = parseEvent(e);
+      if (ev) valid.push(ev);
     }
-    const tasks = z.record(z.string(), num).safeParse(completedTasks ?? {});
     return {
       version: 1,
-      completedTasks: tasks.success ? tasks.data : {},
+      completedTasks: parseCompletedTasks(completedTasks ?? {}),
       events: valid.slice(-MAX_EVENTS),
     };
   } catch {

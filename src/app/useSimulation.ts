@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { SimClient } from '@/simulator/core/client';
 import type { SimInput, SimOutput } from '@/simulator/core/protocol';
 import { useSimStore } from './store';
+import { modePolicy } from './modePolicy';
 import { loadCaseById } from '@/cases';
 import { frameBus } from './frameBus';
 
@@ -105,5 +106,11 @@ export function buildInput(display: { width: number; height: number }): SimInput
     imageFormation: s.imageFormation,
     artifactOverrides: s.artifactLab,
     needSegments: s.ui.imageSegments || s.ui.navSegments || s.ui.segmentsOpen || s.ui.reviewMode,
+    needStructure:
+      s.frozen ||
+      s.ui.reviewMode ||
+      s.activeTool !== 'none' ||
+      s.activeMeasurementId !== null ||
+      (!s.ui.minimal && s.ui.showTorso && !s.ui.railMini && modePolicy(s.mode).navigatorAnatomy),
   };
 }

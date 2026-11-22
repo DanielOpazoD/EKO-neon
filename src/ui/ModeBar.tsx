@@ -4,7 +4,6 @@ import { useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
 import { exportCaseTag, modePolicy } from '@/app/modePolicy';
 import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
-import { useRestartTutorial } from './Tutorial';
 import { IconPause, IconPlay, IconSliders, IconTorso } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
 import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
@@ -206,7 +205,10 @@ function OverflowMenu() {
     })),
   );
   const policy = modePolicy(s.mode);
-  const restartTutorial = useRestartTutorial();
+  const restartTutorial = () => {
+    s.setUi({ tutorialDone: false });
+    window.location.reload();
+  };
   const { open, setOpen, wrap } = usePopover();
   const [recording, setRecording] = useState(false);
 
