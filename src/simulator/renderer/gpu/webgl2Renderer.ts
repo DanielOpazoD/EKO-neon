@@ -123,6 +123,8 @@ export class Webgl2Renderer implements RendererBackend {
   private histCurrent: 0 | 1 = 0;
   private histUpload = new Float32Array(0);
   private disposed = false;
+  private lostByEvent = false;
+  private onContextLost: ((e: Event) => void) | null = null;
   private histValid = false;
   private packedFresh = false;
   private lastPresentMs = 0;
@@ -138,6 +140,14 @@ export class Webgl2Renderer implements RendererBackend {
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
+    const canvas = gl.canvas as EventTarget | undefined;
+    if (canvas && typeof canvas.addEventListener === 'function') {
+      this.onContextLost = (e: Event) => {
+        e.preventDefault();
+        this.lostByEvent = true;
+      };
+      canvas.addEventListener('webglcontextlost', this.onContextLost);
+    }
     const ext = gl.getExtension('EXT_color_buffer_float');
     if (!ext) throw new Error('EXT_color_buffer_float unavailable');
     const common = `#version 300 es\n${GLSL_COMMON}`;
@@ -232,7 +242,7 @@ export class Webgl2Renderer implements RendererBackend {
   }
 
   get contextLost(): boolean {
-    return this.disposed || this.gl.isContextLost();
+    return this.disposed || this.lostByEvent || this.gl.isContextLost();
   }
 
   stats(): Record<string, number | string> {
@@ -251,6 +261,11 @@ export class Webgl2Renderer implements RendererBackend {
     if (this.disposed) return;
     this.disposed = true;
     const gl = this.gl;
+    const canvas = gl.canvas as EventTarget | undefined;
+    if (canvas && this.onContextLost && typeof canvas.removeEventListener === 'function') {
+      canvas.removeEventListener('webglcontextlost', this.onContextLost);
+      this.onContextLost = null;
+    }
     for (const p of [
       ...this.passAVariants.values(),
       ...this.passASideVariants.values(),
@@ -466,6 +481,7 @@ export class Webgl2Renderer implements RendererBackend {
     out: PolarFrame,
   ): void {
     if (this.disposed) throw new Error('Webgl2Renderer used after dispose');
+    if (this.contextLost) return;
     const t0 = performance.now();
     const gl = this.gl;
     const t = this.targets;
@@ -482,6 +498,7 @@ export class Webgl2Renderer implements RendererBackend {
     const tDone = performance.now();
     this.lastGpuMs = tRead - t0;
     this.lastReadMs = tDone - tRead;
+    if (this.contextLost) return;
     const n = w * h;
     const amp = out.amplitude,
       tr = out.transmission,
@@ -513,7 +530,7 @@ export class Webgl2Renderer implements RendererBackend {
     display: Uint8ClampedArray,
   ): boolean {
     const gl = this.gl;
-    if (this.disposed || gl.isContextLost()) return false;
+    if (this.contextLost) return false;
     const t0 = performance.now();
     const t = this.targets;
     const w = spec.samples,
@@ -632,7 +649,7 @@ export class Webgl2Renderer implements RendererBackend {
   present(req: PresentRequest): ImageBitmap | null {
     const gl = this.gl;
     const t = this.targets;
-    if (this.disposed || !this.packedFresh || !t.texPacked || gl.isContextLost()) return null;
+    if (this.contextLost || !this.packedFresh || !t.texPacked) return null;
     const t0 = performance.now();
     const { lut, width: W, height: H, color } = req;
     const canvas = gl.canvas;

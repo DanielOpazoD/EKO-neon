@@ -5,6 +5,7 @@ import { segmentLayerOn, useSegmentHover, useSimStore, useStructureHover } from 
 import type { SimOutput } from '@/simulator/core/protocol';
 import { computeSectorMapping, type SectorMapping } from '@/simulator/renderer/scanConvert';
 import { nearestSampleLut, paintCutMap, placeLabels, withoutOverlaps } from './cutMap';
+import { cutMapStoreChanged } from './cutMapInvalidation';
 import { SegmentAnchors } from './segmentAnchors';
 import { paintSegmentMap, segmentIds, segmentNames } from './segmentMap';
 import { canvasFont } from './canvasFonts';
@@ -60,6 +61,7 @@ export function CutMapView() {
     let lut: Int32Array | null = null;
     let lutKey = '';
     let mapping: SectorMapping | null = null;
+    let backImg: ImageData | null = null;
     let raf = 0;
     let cssW = 0,
       cssH = 0;
@@ -110,10 +112,16 @@ export function CutMapView() {
         );
         lut = nearestSampleLut(p, mapping);
         lutKey = key;
-        back.width = cssW;
-        back.height = cssH;
+        if (back.width !== cssW || back.height !== cssH || !backImg) {
+          back.width = cssW;
+          back.height = cssH;
+          backImg = backCtx.createImageData(cssW, cssH);
+        } else {
+          // Clear previously active sector pixels so outside-sector alpha=0 pixels stay RGB=0 (no edge bleed).
+          backImg.data.fill(0);
+        }
       }
-      const img = backCtx.createImageData(cssW, cssH);
+      const img = backImg!;
       const segIds = segmentLayerOn(st) ? segmentIdsNow(out) : null;
       const stats = segIds
         ? paintSegmentMap(
@@ -208,7 +216,9 @@ export function CutMapView() {
         schedule();
       }
     });
-    const unsubStore = useSimStore.subscribe(schedule);
+    const unsubStore = useSimStore.subscribe((next, prev) => {
+      if (cutMapStoreChanged(prev, next)) schedule();
+    });
     const unsubHover = useSegmentHover.subscribe(schedule);
     const unsubStructHover = useStructureHover.subscribe(schedule);
     const resize = () => {

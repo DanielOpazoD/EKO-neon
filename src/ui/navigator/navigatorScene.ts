@@ -12,6 +12,11 @@ import type { PatientState, ThoraxModel } from '@/simulator/anatomy/thoraxModel'
 import type { HeartFrame } from '@/simulator/anatomy/heartFrame';
 import type { MeshError, MeshReply, MeshRequest, NavigatorModel } from '@/workers/heartMesh.worker';
 import { beamFrameFromPose, poseFromControl } from '@/simulator/probe/pose';
+import {
+  isSoftwareWebglContext,
+  navigatorStoreChanged,
+  shouldRenderNavigatorFrame,
+} from './navigatorBudget';
 import { buildHeartGhost, buildSkeleton, buildSkin, buildWindowMarks } from './navigatorBody';
 import {
   createCameraRig,
@@ -52,18 +57,27 @@ export function mountNavigatorScene(
   let heartFrame: HeartFrame | null = null;
   // transparent over the panel's own radial backdrop (decision 202): the scene reads as lit in a room, not on a card
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, stencil: true });
+  const softwareGl = isSoftwareWebglContext(renderer.getContext());
   renderer.localClippingEnabled = true; // the heart is cut by the imaging plane (decision 57)
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.setPixelRatio(softwareGl ? 1 : Math.min(2, window.devicePixelRatio || 1));
   renderer.setClearColor(0x0f1319, 0);
   el.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(35, 1, 1, 300);
   // render-on-change bookkeeping for the navigator (see tick)
   let dirty = true;
+  let contextLost = false;
   let lastRenderAt = 0;
   let lastCostMs = 0;
   let shownPhaseIdx = -1;
   let shownPhasesReady = -1;
+  // Hoisted scratch math objects so `tick()` allocates nothing per draw.
+  const basisMat = new THREE.Matrix4();
+  const basisLat = new THREE.Vector3();
+  const basisNorm = new THREE.Vector3();
+  const basisFwd = new THREE.Vector3();
+  const axisOrigin = new THREE.Vector3();
+  const axisTip = new THREE.Vector3();
   // Filmic tone mapping and a rim light: the anatomy is read by its volume, and flat linear output made
   // the myocardial shells look like cut-outs. The geometry itself stays the one the beam cuts — importing
   // a sculpted heart mesh would look better and stop matching the image, which is the whole point.
@@ -101,6 +115,7 @@ export function mountNavigatorScene(
     scene.add(ghost);
     windowMarks = buildWindowMarks(model.thorax, model.windows);
     scene.add(windowMarks);
+    dirty = true;
   };
   // 0.26 cm and ten phases: extraction costs 553 ms per phase at this step against 2171 ms at 0.20, so the
   // whole beat is ready in ~5.5 s of worker time with the first phase on screen in half a second. The
@@ -182,6 +197,22 @@ export function mountNavigatorScene(
   );
   zoomRef.current = rig.zoom;
   const dom = renderer.domElement;
+  const onContextLost = (e: Event) => {
+    e.preventDefault();
+    contextLost = true;
+  };
+  const onContextRestored = () => {
+    contextLost = false;
+    dirty = true;
+  };
+  dom.addEventListener('webglcontextlost', onContextLost, false);
+  dom.addEventListener('webglcontextrestored', onContextRestored, false);
+
+  const onVisibility = () => {
+    if (!document.hidden) dirty = true;
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+
   const detachInput = attachNavigatorInput({
     el,
     dom,
@@ -210,41 +241,75 @@ export function mountNavigatorScene(
   resize();
 
   let raf = 0;
-  // The navigator renders when something it shows has changed, and no faster than its own cost allows: the
-  // stencil caps are cheap on a GPU but not on a software renderer (the E2E browser), where a navigator
-  // drawn at 60 Hz starved the main thread of the simulator's frames.
+  // The navigator renders strictly when something it shows has changed, paced by render cost and
+  // software-WebGL budget so it never starves the simulator or main thread.
   const unsubHover = useSegmentHover.subscribe(() => {
     dirty = true;
   });
-  const unsubDirty = useSimStore.subscribe(() => {
-    dirty = true;
+  const unsubDirty = useSimStore.subscribe((next, prev) => {
+    if (navigatorStoreChanged(prev, next)) dirty = true;
   });
+  const setAxisEndpoints = (
+    line: THREE.Line,
+    dir: { x: number; y: number; z: number },
+    len: number,
+  ): void => {
+    axisTip.set(
+      axisOrigin.x + dir.x * len,
+      axisOrigin.y + dir.y * len,
+      axisOrigin.z + dir.z * len,
+    );
+    const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+    attr.setXYZ(0, axisOrigin.x, axisOrigin.y, axisOrigin.z);
+    attr.setXYZ(1, axisTip.x, axisTip.y, axisTip.z);
+    attr.needsUpdate = true;
+  };
+
   const tick = () => {
     raf = requestAnimationFrame(tick);
+    if (contextLost) return;
     const st = navigatorState();
-    if (!thorax) {
-      renderer.render(scene, camera);
-      return;
-    }
+    const anatomy = modePolicy(st.mode).navigatorAnatomy;
     const hudPhaseNow = useHudStore.getState().hud?.phase ?? 0;
     const phaseIdxNow = Math.round(hudPhaseNow * MESH_PHASES.length) % MESH_PHASES.length;
-    if (phaseIdxNow !== shownPhaseIdx || heart.phasesReady() !== shownPhasesReady) dirty = true;
+    const phasesReady = heart.phasesReady();
     const now = performance.now();
-    const minInterval = lastCostMs > 25 ? Math.min(500, lastCostMs * 4) : 0;
-    if ((!dirty && now - lastRenderAt < 1000) || now - lastRenderAt < minInterval) return;
-    dirty = false;
+    const decision = shouldRenderNavigatorFrame({
+      hidden: document.hidden,
+      width: el.clientWidth,
+      height: el.clientHeight,
+      hasThorax: thorax !== null,
+      anatomy,
+      dirty,
+      phaseIdx: phaseIdxNow,
+      shownPhaseIdx,
+      phasesReady,
+      shownPhasesReady,
+      totalPhases: MESH_PHASES.length,
+      nowMs: now,
+      lastRenderAtMs: lastRenderAt,
+      lastCostMs,
+      softwareGl,
+    });
+    dirty = decision.nextDirty;
+    if (!decision.shouldRender) return;
+
     lastRenderAt = now;
+    if (!thorax) {
+      renderer.render(scene, camera);
+      lastCostMs = performance.now() - now;
+      return;
+    }
     shownPhaseIdx = phaseIdxNow;
-    shownPhasesReady = heart.phasesReady();
+    shownPhasesReady = phasesReady;
     const pose = poseFromControl(thorax, st.probe);
     const beam = beamFrameFromPose(pose);
     probe.position.set(pose.position.x, pose.position.y, pose.position.z);
-    const m = new THREE.Matrix4().makeBasis(
-      new THREE.Vector3(beam.lateral.x, beam.lateral.y, beam.lateral.z),
-      new THREE.Vector3(beam.normal.x, beam.normal.y, beam.normal.z),
-      new THREE.Vector3(beam.forward.x, beam.forward.y, beam.forward.z),
-    );
-    probe.quaternion.setFromRotationMatrix(m);
+    basisLat.set(beam.lateral.x, beam.lateral.y, beam.lateral.z);
+    basisNorm.set(beam.normal.x, beam.normal.y, beam.normal.z);
+    basisFwd.set(beam.forward.x, beam.forward.y, beam.forward.z);
+    basisMat.makeBasis(basisLat, basisNorm, basisFwd);
+    probe.quaternion.setFromRotationMatrix(basisMat);
     updateFan(fan, fanEdges, beam, st.settings.depthCm, st.settings.sectorDeg);
     // clip the heart with the imaging plane, and point the axes along the probe
     cutPlane.normal.set(beam.normal.x, beam.normal.y, beam.normal.z);
@@ -255,7 +320,6 @@ export function mountNavigatorScene(
     );
     // the saved layers, or in exam mode the skin and the ribs alone (decision 256)
     const layers = navigatorLayers(st);
-    const anatomy = modePolicy(st.mode).navigatorAnatomy;
     heart.update({
       beam,
       layers,
@@ -269,23 +333,15 @@ export function mountNavigatorScene(
       },
     });
     // the schematic heart stands in until the surfaces arrive, and only where the heart may be seen
-    if (ghost) ghost.visible = anatomy && heart.phasesReady() === 0;
+    if (ghost) ghost.visible = anatomy && phasesReady === 0;
     axisGroup.visible = layers.axes;
     review.sync(st.reviewMarkers, st.reviewSelectedId);
     review.group.visible = st.ui.reviewMode;
     if (layers.axes) {
-      const o = new THREE.Vector3(beam.origin.x, beam.origin.y, beam.origin.z);
-      const set = (
-        line: THREE.Line,
-        dir: { x: number; y: number; z: number },
-        len: number,
-      ): void => {
-        const p = new THREE.Vector3(o.x + dir.x * len, o.y + dir.y * len, o.z + dir.z * len);
-        line.geometry.setFromPoints([o, p]);
-      };
-      set(beamAxis, beam.forward, st.settings.depthCm);
-      set(elevAxis, beam.normal, 4);
-      set(latAxis, beam.lateral, 4);
+      axisOrigin.set(beam.origin.x, beam.origin.y, beam.origin.z);
+      setAxisEndpoints(beamAxis, beam.forward, st.settings.depthCm);
+      setAxisEndpoints(elevAxis, beam.normal, 4);
+      setAxisEndpoints(latAxis, beam.lateral, 4);
     }
     if (skeleton) skeleton.visible = layers.skeleton;
     if (windowMarks) windowMarks.visible = layers.windows;
@@ -314,6 +370,9 @@ export function mountNavigatorScene(
   tick();
   return () => {
     cancelAnimationFrame(raf);
+    document.removeEventListener('visibilitychange', onVisibility);
+    dom.removeEventListener('webglcontextlost', onContextLost);
+    dom.removeEventListener('webglcontextrestored', onContextRestored);
     unsubDirty();
     unsubHover();
     detachInput();

@@ -15,7 +15,7 @@
  * the analytic heart's (decision 372).
  */
 import { atlasMarks } from './atlasFrame';
-import { anchorsCached, heartAnchors } from './anchors';
+import { anchorsCached } from './anchors';
 import { rootRadiusAt } from './aorticValve';
 import { ROOT_EXCURSION } from './heartFrame';
 import { hingeHeight } from './mitralValve';
@@ -25,68 +25,88 @@ import { classifyGreatVessels } from './greatVessels';
 import { classifyHeart, type HeartModel, type HeartPose } from './heartModel';
 import type { HeartClassifier } from './sceneClassifier';
 import { Structure, Tissue, type TissueSample } from './tissue';
+import {
+  AORTIC_VALVE_LABEL,
+  APPARATUS,
+  APPARATUS_HOSTS,
+  ATRIAL_TISSUE,
+  ATRIAL_WALL_MM,
+  ATRIAL_WALLS,
+  bakeApparatus,
+  cross,
+  CRUX_REACH_MM,
+  CURTAIN,
+  CURTAIN_MM,
+  dot,
+  edt,
+  EPI_CLOSING_MM,
+  FAT,
+  GROOVE_REACH_MM,
+  LABELS,
+  LEAFLETS,
+  LEFT_HOSTS,
+  meshFrame,
+  MITRAL_ANNULUS_MM,
+  PULMONARY_VALVE_LABEL,
+  ROOT_BLOOD,
+  SEPTUM_GAP_MM,
+  SEPTUM_MM,
+  SEPTUM_REACH_MM,
+  TRICUSPID_ANNULUS_MM,
+  TRUNK_BLOOD,
+  unit,
+  volumeFields,
+  type LabelVolume,
+  type LabelVolumeHeader,
+  type V3,
+} from './volume/volumeFields';
+import {
+  analyticAtrialVolumes,
+  AORTIC_CUSP_REACH_CM,
+  apicalStretchInverse,
+  ATRIAL_PHASE_BINS,
+  MITRAL_FADE_CM,
+  MITRAL_SECTORS,
+  mitralWarpPoint,
+  takeMitralRing,
+  takeValvePlane,
+  type AorticWarp,
+  type MitralWarp,
+} from './volume/volumeWarps';
 
-type V3 = [number, number, number];
-/** The header the voxeliser writes next to the labels: the grid (mm, mesh coordinates) and the frame's landmarks. */
-export interface LabelVolumeHeader {
-  voxelMm: number;
-  origin: V3;
-  dims: V3;
-  landmarks: Record<'mitral' | 'tricuspid' | 'aortic' | 'pulmonary' | 'apex', V3>;
-}
-/** A label volume: one byte per voxel, x fastest, the labels of rodero-voxelize.ts. */
-export interface LabelVolume {
-  header: LabelVolumeHeader;
-  labels: Uint8Array;
-}
-
-/** Radius (mm, mesh scale) of the ball that closes the silhouette: what it adds outside the walls is epicardial fat. */
-export const EPI_CLOSING_MM = 4;
-
-/** Tissue and structure of each label of the volume (rodero-voxelize.ts); 0 and unknown labels are outside. */
-export const LABELS: Record<number, [Tissue, Structure]> = {
-  1: [Tissue.Myocardium, Structure.LvWallLateral], // the wall is named by its sector at runtime
-  2: [Tissue.Myocardium, Structure.RvWall],
-  3: [Tissue.Myocardium, Structure.LaWall],
-  4: [Tissue.Myocardium, Structure.RaWall],
-  5: [Tissue.VesselWall, Structure.AorticRoot],
-  6: [Tissue.VesselWall, Structure.PulmonaryArtery],
-  7: [Tissue.Blood, Structure.LvCavity],
-  8: [Tissue.Blood, Structure.RvCavity],
-  9: [Tissue.Valve, Structure.AorticValve],
-  10: [Tissue.Valve, Structure.PulmonaryValve],
-  // the caps of the inlets (blood) and their rings (wall): appendage, four pulmonary veins, superior and inferior cava
-  11: [Tissue.Blood, Structure.LaAppendage],
-  12: [Tissue.Blood, Structure.PulmonaryVein],
-  13: [Tissue.Blood, Structure.PulmonaryVein],
-  14: [Tissue.Blood, Structure.PulmonaryVein],
-  15: [Tissue.Blood, Structure.PulmonaryVein],
-  16: [Tissue.Blood, Structure.Svc],
-  17: [Tissue.Blood, Structure.Ivc],
-  18: [Tissue.Myocardium, Structure.LaAppendage],
-  19: [Tissue.VesselWall, Structure.PulmonaryVein],
-  20: [Tissue.VesselWall, Structure.PulmonaryVein],
-  21: [Tissue.VesselWall, Structure.PulmonaryVein],
-  22: [Tissue.VesselWall, Structure.PulmonaryVein],
-  23: [Tissue.VesselWall, Structure.Svc],
-  24: [Tissue.VesselWall, Structure.Ivc],
-  // the analytic heart's papillary muscles and moderator band at end diastole, rasterised into the cavities when the
-  // volume is bound to a heart (decision 353): carried with the walls, and the same voxels on the CPU and the GPU
-  40: [Tissue.Myocardium, Structure.PapillaryMuscle],
-  41: [Tissue.Myocardium, Structure.RvPapillary],
-  42: [Tissue.Myocardium, Structure.ModeratorBand],
-  // the rims of the atrioventricular planes against the walls: the fibrous annuli (decision 350)
-  37: [Tissue.Fibrous, Structure.MitralAnnulus],
-  38: [Tissue.Fibrous, Structure.TricuspidAnnulus],
-  // the aortomitral curtain between the left atrium and the outflow above the mitral hinge (decision 371)
-  39: [Tissue.Fibrous, Structure.AortomitralCurtain],
-  31: [Tissue.Blood, Structure.LvCavity],
-  32: [Tissue.Blood, Structure.RvCavity],
-  33: [Tissue.Blood, Structure.LaCavity],
-  34: [Tissue.Blood, Structure.RaCavity],
-  35: [Tissue.Blood, Structure.AorticRoot],
-  36: [Tissue.Blood, Structure.PulmonaryArtery],
+export type { AorticWarp, LabelVolume, LabelVolumeHeader, MitralWarp };
+export {
+  analyticAtrialVolumes,
+  AORTIC_CUSP_REACH_CM,
+  AORTIC_VALVE_LABEL,
+  apicalStretchInverse,
+  APPARATUS,
+  APPARATUS_HOSTS,
+  ATRIAL_PHASE_BINS,
+  ATRIAL_TISSUE,
+  ATRIAL_WALL_MM,
+  CRUX_REACH_MM,
+  CURTAIN,
+  CURTAIN_MM,
+  edt,
+  EPI_CLOSING_MM,
+  FAT,
+  GROOVE_REACH_MM,
+  LABELS,
+  LEAFLETS,
+  LEFT_HOSTS,
+  MITRAL_ANNULUS_MM,
+  MITRAL_FADE_CM,
+  MITRAL_SECTORS,
+  mitralWarpPoint,
+  PULMONARY_VALVE_LABEL,
+  ROOT_BLOOD,
+  SEPTUM_GAP_MM,
+  SEPTUM_MM,
+  TRICUSPID_ANNULUS_MM,
+  TRUNK_BLOOD,
 };
+
 /** Reach (voxels) and width of the Gaussian that weighs the interface normal on the voxels that border an interface. */
 const NORMAL_REACH = 5;
 const NORMAL_SIGMA = 2.5;
@@ -119,304 +139,16 @@ export const LV_BAND_CM: readonly [number, number] = [-1, 0];
 export const ATRIAL_BAND_CM: readonly [number, number] = [0.5, -0.5];
 /** Distances (over the RV's slice radius) over which the RV free wall's inward motion fades out. */
 export const RV_REACH: readonly [number, number] = [1.6, 2.4];
-/**
- * The apical cap (decision 362): the cavity ends where its mean endocardial radius falls to CAVITY_TIP_CM. Beyond it, up
- * to the epicardial apex, the LV's longitudinal stretch grows linearly from the cavity's, so that the cap as a whole
- * thickens as the wall CAP_WALL_CM before the tip does; the cavity's walls keep shortening up to the tip.
- */
 export const CAVITY_TIP_CM = 0.1;
 export const CAP_WALL_CM = 1;
-/**
- * Where, along the LV (cm from the mitral centre at end diastole), lies the tissue that is now u cm apical of the
- * descended base (decision 362), when the longitudinal stretch is lc up to z0, grows linearly to la at z1 and stays la
- * beyond: the inverse of the stretch's integral. In the ramp it is the root of a quadratic, taken in the form that stays
- * exact as la and lc meet (the GPU, in single precision, lost half the digits of the other near end diastole).
- */
-export function apicalStretchInverse(
-  u: number,
-  lc: number,
-  la: number,
-  z0: number,
-  z1: number,
-): number {
-  const w = z1 - z0,
-    u1 = lc * z0,
-    u2 = u1 + ((lc + la) * w) / 2;
-  if (u <= u1) return u / lc;
-  if (u >= u2) return z1 + (u - u2) / la;
-  const a = (la - lc) / (2 * w),
-    c = u1 - u;
-  return z0 + (-2 * c) / (lc + Math.sqrt(lc * lc - 4 * a * c));
-}
 /** Share of the LV length beyond which the LV wall is the apex. */
 export const APEX_SHARE = 0.85;
 /** Septal → lateral coordinate (cm) over which the base's descent goes from MAPSE (LV side) to TAPSE (RV free wall). */
 export const RV_DESCENT_FROM_CM = -1.5;
 export const RV_DESCENT_TO_CM = -3.5;
-/**
- * Reach (mm, mesh scale) of the fibrous annuli from the walls into the atrioventricular planes: the radii of the analytic
- * heart's annular tori (mitral 0.11 cm, tricuspid 0.09 cm). Without them the plane is cavity up to the wall, and the
- * contour that measures longitudinal strain from the annulus (`endocardialContour`) ran on down the closed leaflets.
- */
-export const MITRAL_ANNULUS_MM = 1.1;
-export const TRICUSPID_ANNULUS_MM = 0.9;
-/** Walls an annulus may lie against: the four chambers' myocardium and the aortic wall (the aortomitral curtain). */
-const ANNULUS_WALLS = new Set([1, 2, 3, 4, 5]);
-/** Fat filling the grooves: a label of its own in the runtime volume. */
-export const FAT = 254;
-/**
- * The atrial walls keep ATRIAL_WALL_MM from their cavity, never less than two voxels so they stay closed (decision 358).
- * The CT segmentation draws them 2.2 mm thick (LA, median by Euclidean distance) and the 1 mm reduction 2.65; in CT the
- * LA wall measures a median 1.45 mm (septum 2.0, inferior posterior 1.1; IJC Heart Vasc 2021) and 1.6–1.8 by region in
- * photon-counting CT. Kept to 2 mm from the cavity they read 1.6 mm (0.5 mm volume) and 1.7 mm (1 mm), the septum
- * up to twice that from both cavities.
- */
-export const ATRIAL_WALL_MM = 2;
-/** The atrial walls that are thinned (LA, RA), and the blood they line: the cavities and the inlets' caps. */
-const ATRIAL_WALLS = new Set([3, 4]);
-const ATRIAL_BLOOD = new Set([33, 34, 11, 12, 13, 14, 15, 16, 17]);
-/**
- * Groove fat (decision 358): the closed silhouette's fill is fat only where it lies within GROOVE_REACH_MM of both an
- * atrium and a ventricle (the atrioventricular grooves, where the circumflex and the right coronary run) or of both
- * ventricles (the interventricular grooves). Elsewhere (between the atria and the veins, around the appendage, against
- * the great vessels) the closing filled every gap narrower than its ball and drew angular slabs of fat on the atria.
- */
-export const GROOVE_REACH_MM = 6;
-/**
- * The interatrial septum (decision 364). The mean mesh has none: the right and left atrial walls run side by side with an
- * empty gap between them, which the sampler drew as pericardium inside the heart; the two cavities lay a median 9 mm
- * apart (6–14) where a septum measures 3–5. Where the two atria face each other (each within SEPTUM_GAP_MM / 2 of the
- * point, their distance fields growing in opposite directions), the septum is SEPTUM_MM of atrial wall on the surface
- * midway between the cavities, two walls of SEPTUM_MM / 2 back to back, and the rest of what lay between them (their
- * walls and the gap) belongs to the nearer cavity.
- */
-export const SEPTUM_MM = 4;
-export const SEPTUM_GAP_MM = 16;
-/** How opposite (cosine) the directions to the two cavities must be for a point to lie between them, not beside both. */
-const SEPTUM_FACING_COS = -0.8;
-const LA_BLOOD = new Set([33, 11, 12, 13, 14, 15]);
-const RA_BLOOD = new Set([34, 16, 17]);
-/** Sectors around the LV's long axis over which the mitral hinge's height is taken, and the tolerance beyond it (mm). */
-const HINGE_SECTORS = 36;
-const HINGE_TOLERANCE_MM = 0.5;
-/** How far (mm) from the sheet of LV myocardium past the hinge the gap and the atrial wall beside it join the atrium. */
-const JUNCTION_REACH_MM = 5;
-/** Passes of the junction's take, each reaching SEPTUM_GAP_MM / 2 beyond the atrium's blood (three on the mean mesh). */
-const JUNCTION_PASSES = 6;
-/**
- * The aortomitral curtain (decision 371): the label of the fibrous sheet the junction's take leaves between the left
- * atrium and the LV's outflow above the mitral hinge, and its thickness (mm): fibrous tissue, as the analytic heart
- * draws it (`classify/aorticRoot.ts`, which names it by the septal wall), under its own name; a measured curtain is 1–2 mm.
- */
-export const CURTAIN = 39;
-export const CURTAIN_MM = 2;
-/**
- * The CT's aortic valve plane (decision 373): a closed disc of label 9, 3.8 mm thick, that never opened. Bound to a heart
- * it becomes the root's blood (label 35), and the analytic heart's cusps are drawn in the root over the CT's annulus:
- * each point of the root within AORTIC_CUSP_REACH_CM (cm, along the disc's axis toward the aorta) of the disc is carried
- * to the analytic valve, centred, turned onto its axis and scaled to its annulus (`aorticWarp`), and classified there.
- */
-export const AORTIC_VALVE_LABEL = 9;
-/** The root's blood, which the valve plane becomes and in which the cusps are drawn. */
-export const ROOT_BLOOD = 35;
-/**
- * The CT's pulmonary valve plane (decision 375), a closed disc of label 10 like the aortic one, and the trunk's blood
- * it becomes, in which the analytic pulmonary cusps are drawn over it the same way.
- */
-export const PULMONARY_VALVE_LABEL = 10;
-export const TRUNK_BLOOD = 36;
-export const AORTIC_CUSP_REACH_CM: readonly [number, number] = [-0.5, 2.5];
-
-/** The CT's aortic valve plane in the heart frame and the map of a root point to the analytic valve (decision 373). */
-export interface AorticWarp {
-  /** The disc's centre (cm) and unit axis toward the aorta, at end diastole. */
-  centre: V3;
-  axis: V3;
-  /** Row-major 3×3 and offset: analytic point = m · reference point + o. */
-  m: number[];
-  o: V3;
-}
-/** The walls that fill what is left of a gap inside the heart: the four chambers' myocardium and the aortic wall. */
-const INNER_WALLS = [1, 2, 3, 4, 5];
-/** How far (mm, mesh scale) from the atrioventricular planes the interatrial septum counts as the crux (decision 360). */
-export const CRUX_REACH_MM = 10;
-/** The interatrial septum: atrial wall within SEPTUM_REACH_MM of both atrial cavities. */
-const SEPTUM_REACH_MM = 5;
-const GROOVE_ATRIAL = new Set([3, 4, 18, 37, 38]);
-const GROOVE_VENTRICULAR = new Set([1, 2]);
-
-/** Squared Euclidean distance transform along one line (Felzenszwalb & Huttenlocher 2012). */
-function edtLine(
-  f: Float64Array,
-  n: number,
-  d: Float64Array,
-  v: Int32Array,
-  z: Float64Array,
-): void {
-  let k = 0;
-  v[0] = 0;
-  z[0] = -Infinity;
-  z[1] = Infinity;
-  for (let q = 1; q < n; q++) {
-    let s = (f[q]! + q * q - (f[v[k]!]! + v[k]! * v[k]!)) / (2 * q - 2 * v[k]!);
-    while (s <= z[k]!) {
-      k--;
-      s = (f[q]! + q * q - (f[v[k]!]! + v[k]! * v[k]!)) / (2 * q - 2 * v[k]!);
-    }
-    k++;
-    v[k] = q;
-    z[k] = s;
-    z[k + 1] = Infinity;
-  }
-  k = 0;
-  for (let q = 0; q < n; q++) {
-    while (z[k + 1]! < q) k++;
-    d[q] = (q - v[k]!) ** 2 + f[v[k]!]!;
-  }
-}
-
-/** Distance (voxels) from every voxel to the nearest voxel where `feature` holds. */
-export function edt(dims: V3, feature: (v: number) => boolean): Float32Array {
-  const [nx, ny, nz] = dims;
-  const out = new Float32Array(nx * ny * nz);
-  const BIG = 1e20;
-  for (let v = 0; v < out.length; v++) out[v] = feature(v) ? 0 : BIG;
-  const m = Math.max(nx, ny, nz);
-  const f = new Float64Array(m),
-    d = new Float64Array(m),
-    z = new Float64Array(m + 1);
-  const w = new Int32Array(m);
-  const pass = (n: number, count: number, at: (line: number, q: number) => number): void => {
-    for (let line = 0; line < count; line++) {
-      for (let q = 0; q < n; q++) f[q] = out[at(line, q)]!;
-      edtLine(f, n, d, w, z);
-      for (let q = 0; q < n; q++) out[at(line, q)] = d[q]!;
-    }
-  };
-  pass(nx, ny * nz, (l, q) => q + nx * l);
-  pass(ny, nx * nz, (l, q) => (l % nx) + nx * (q + ny * Math.floor(l / nx)));
-  pass(nz, nx * ny, (l, q) => l + nx * ny * q);
-  for (let v = 0; v < out.length; v++) out[v] = Math.sqrt(out[v]!);
-  return out;
-}
-
-const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const dot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const scale = (a: V3, k: number): V3 => [a[0] * k, a[1] * k, a[2] * k];
-const unit = (a: V3): V3 => scale(a, 1 / Math.hypot(...a));
-const cross = (a: V3, b: V3): V3 => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0],
-];
-
-/** The anatomical frame of the mesh (mm): origin, axes and LV length. */
-function meshFrame(h: LabelVolumeHeader): { o: V3; ex: V3; ey: V3; ez: V3; far: number } {
-  const L = h.landmarks;
-  const far = Math.hypot(...sub(L.apex, L.mitral));
-  const ez = unit(sub(L.apex, L.mitral));
-  let ex = sub(L.mitral, L.tricuspid);
-  ex = unit(sub(ex, scale(ez, dot(ex, ez))));
-  let ey = cross(ez, ex);
-  if (dot(sub(L.aortic, L.mitral), ey) < 0) ey = scale(ey, -1);
-  return { o: L.mitral, ex, ey, ez, far };
-}
-
-/**
- * Structures of the analytic heart's valve apparatus (decision 346) that the volume takes where its own label is cavity
- * blood: the atrioventricular leaflets, their chords, the papillary muscles and the moderator band. The CT segmentation
- * has none of them: its valve planes are flat discs and its cavities smooth.
- */
-export const APPARATUS = new Set<Structure>([
-  Structure.MitralAnterior,
-  Structure.MitralPosterior,
-  Structure.TricuspidValve,
-  Structure.Chordae,
-  Structure.PapillaryMuscle,
-  Structure.RvPapillary,
-  Structure.ModeratorBand,
-]);
-/** The parts of the apparatus that move with the analytic valves: leaflets and chords. */
-export const LEAFLETS = new Set<Structure>([
-  Structure.MitralAnterior,
-  Structure.MitralPosterior,
-  Structure.TricuspidValve,
-  Structure.Chordae,
-]);
-/** Labels of the volume that are cavity blood the apparatus may occupy: the AV valve planes and the four chambers. */
-export const APPARATUS_HOSTS = new Set([7, 8, 31, 32, 33, 34]);
-/** The hosts on the left, where the analytic mitral leaflets and their chords are carried onto the CT's annulus. */
-export const LEFT_HOSTS = new Set([7, 31, 33]);
-/**
- * The CT's mitral annulus against the analytic one (decision 374): sectors around the analytic valve's centre over which
- * each annulus's hinge (inner radius and height, cm) is taken, and the depth below the hinge (cm, toward the apex) over
- * which the map onto the analytic leaflets fades out, so the chords still reach the papillary muscles.
- */
-export const MITRAL_SECTORS = 36;
-export const MITRAL_FADE_CM: readonly [number, number] = [1, 2.5];
-
-/**
- * The map of the left heart's points onto the analytic mitral apparatus at a pose (decision 374): per sector of
- * MITRAL_SECTORS, the CT's hinge radius and height and the analytic ones (cm), and the two centres (x, y).
- */
-export interface MitralWarp {
-  /** Per sector: CT radius, CT height, analytic radius, analytic height. */
-  sectors: Float64Array;
-  /** The CT's centre (the analytic valve's at end diastole) and the analytic valve's now. */
-  centre: [number, number, number, number];
-}
-
-/** The labels of each atrium's tissue: left (cavity, wall, the pulmonary veins' and appendage's caps and rings), right. */
-export const ATRIAL_TISSUE = [
-  new Set([33, 3, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22]),
-  new Set([34, 4, 16, 17, 23, 24]),
-];
 /** Voxels of each atrium's cavity over which the radial scale that gives its volume is solved. */
 const ATRIAL_SAMPLES = 4000;
-/**
- * Grid (cm) on which the analytic atria are counted, and the bins of the cycle over which a count is kept. Counted anew
- * for every pose on a 2.5 mm grid, the curve took 200 ms of every frame of the app (decision 353): it depends only on the
- * phase, and the ratio of two volumes on a 5 mm grid moves by about 1 %.
- */
-const ATRIAL_GRID_CM = 0.5;
-export const ATRIAL_PHASE_BINS = 48;
-const atrialCache = new WeakMap<HeartModel, Map<number, { la: number; ra: number }>>();
-/**
- * Volumes (mL) of the analytic heart's left and right atrial cavities at `pose`, counted on a grid of ATRIAL_GRID_CM
- * around each atrium: the curves the volume's atria follow (decision 350). Kept per heart and per bin of the cycle's
- * phase: the first pose of a bin counts it.
- */
-export function analyticAtrialVolumes(
-  heart: HeartModel,
-  pose: HeartPose,
-): { la: number; ra: number } {
-  const bin = Math.round(pose.state.phase * ATRIAL_PHASE_BINS) % ATRIAL_PHASE_BINS;
-  let bins = atrialCache.get(heart);
-  if (!bins) atrialCache.set(heart, (bins = new Map<number, { la: number; ra: number }>()));
-  const kept = bins.get(bin);
-  if (kept) return kept;
-  const A = heartAnchors(heart);
-  const q = makeSample();
-  const count = (
-    c: { x: number; y: number; z: number },
-    r: { x: number; y: number; z: number },
-    want: Structure,
-  ) => {
-    let n = 0;
-    const h = ATRIAL_GRID_CM;
-    for (let x = c.x - r.x - 1.5; x <= c.x + r.x + 1.5; x += h)
-      for (let y = c.y - r.y - 1.5; y <= c.y + r.y + 1.5; y += h)
-        for (let z = c.z - r.z - 2; z <= c.z + r.z + 2; z += h)
-          if (classifyHeart(heart, pose, x + pose.swingX, y, z, q) && q.structure === want) n++;
-    return n * h ** 3;
-  };
-  const v = {
-    la: count(A.laCenter, A.laR, Structure.LaCavity),
-    ra: count(A.raCenter, A.raR, Structure.RaCavity),
-  };
-  bins.set(bin, v);
-  return v;
-}
+
 
 export interface VolumeHeartOptions {
   /**
@@ -521,348 +253,6 @@ export interface VolumeHeart {
   pulmonaryWarp(pose: HeartPose): AorticWarp | null;
   /** The map of the left heart onto the analytic mitral apparatus at `pose` (decision 374); null without an annulus. */
   mitralWarp(pose: HeartPose): MitralWarp | null;
-}
-
-interface Fields {
-  h: LabelVolumeHeader;
-  label: Uint8Array;
-  dEpi: Float32Array;
-  dIf: Float32Array;
-}
-
-/**
- * The volume's fields over labels the caller owns (the bound heart's copy): the fibrous annuli and the groove fat written
- * into them, the distance beyond the epicardium and to the nearest interface (mm).
- */
-function volumeFields(h: LabelVolumeHeader, label: Uint8Array): Fields {
-  const dims = h.dims;
-  const [nx, ny] = dims;
-  const vox = h.voxelMm;
-  const cls = (l: number): number => (l === FAT ? 1 : (LABELS[l]?.[0] ?? 0) + 2);
-  // the fibrous annuli: the voxels of the mitral (7) and tricuspid (8) planes within reach of a wall
-  {
-    const nz = dims[2];
-    const at = (i: number, j: number, k: number): number => i + nx * (j + ny * k);
-    const rim: [number, number][] = [];
-    for (let k = 0; k < nz; k++)
-      for (let j = 0; j < ny; j++)
-        for (let i = 0; i < nx; i++) {
-          const l = label[at(i, j, k)]!;
-          if (l !== 7 && l !== 8) continue;
-          // at least the face neighbours: a plane voxel beside a wall voxel touches it whatever the voxel size (the
-          // tricuspid rim, 0.9 mm, was empty on the 1 mm volume until decision 365)
-          const reach = Math.max((l === 7 ? MITRAL_ANNULUS_MM : TRICUSPID_ANNULUS_MM) / vox, 1);
-          const n = Math.ceil(reach);
-          let near = false;
-          for (let w = -n; w <= n && !near; w++)
-            for (let u = -n; u <= n && !near; u++)
-              for (let t = -n; t <= n && !near; t++) {
-                if (t * t + u * u + w * w > reach * reach) continue;
-                const a = i + t,
-                  b = j + u,
-                  c = k + w;
-                if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) continue;
-                if (ANNULUS_WALLS.has(label[at(a, b, c)]!)) near = true;
-              }
-          if (near) rim.push([at(i, j, k), l === 7 ? 37 : 38]);
-        }
-    for (const [v, l] of rim) label[v] = l;
-  }
-  // the atrial walls thinned from outside to ATRIAL_WALL_MM from their cavity (decision 358)
-  {
-    const dCav = edt(dims, (v) => ATRIAL_BLOOD.has(label[v]!));
-    const keep = Math.max(ATRIAL_WALL_MM / vox, 2);
-    for (let v = 0; v < label.length; v++)
-      if (ATRIAL_WALLS.has(label[v]!) && dCav[v]! > keep) label[v] = 0;
-  }
-  // the heart's inner walls (decision 364): no gap, fat or pericardium inside the heart. One septum midway between the two
-  // atrial cavities where they face each other; each atrium resting on the aortic root where it faces it; the cavities
-  // closed against the outside; what is left of the gap between both atria filled with the nearest wall
-  {
-    const [sx, sy, sz] = [1, nx, nx * ny];
-    const faces6 = [sx, -sx, sy, -sy, sz, -sz];
-    /** Whether two distance fields grow in opposite directions at v (central differences): v lies between their sets. */
-    const facing = (a: Float32Array, b: Float32Array, v: number): boolean => {
-      const ax = a[v + sx]! - a[v - sx]!,
-        ay = a[v + sy]! - a[v - sy]!,
-        az = a[v + sz]! - a[v - sz]!,
-        bx = b[v + sx]! - b[v - sx]!,
-        by = b[v + sy]! - b[v - sy]!,
-        bz = b[v + sz]! - b[v - sz]!;
-      const n = Math.hypot(ax, ay, az) * Math.hypot(bx, by, bz);
-      return n > 0 && (ax * bx + ay * by + az * bz) / n < SEPTUM_FACING_COS;
-    };
-    const reach = SEPTUM_GAP_MM / 2 / vox;
-    const apply = (changes: [number, number][]): void => {
-      for (const [v, l] of changes) label[v] = l;
-    };
-    // the atrioventricular junction on the left (decision 364): the LV wall ends at the mitral hinge of its azimuth, as the
-    // analytic heart's does since decision 327. The mean mesh carries the LV's basal septum 10–15 mm past the hinge on
-    // the atrial side, and a plane that grazes that junction drew a grey mass inside the left atrium. The left atrium
-    // takes that tissue down to the hinge plane: its cavity, and its own wall ATRIAL_WALL_MM against what is not its own
-    {
-      const Mf = meshFrame(h);
-      const toAnat = (v: number): V3 => {
-        const i = v % nx,
-          j = Math.floor(v / nx) % ny,
-          kk = Math.floor(v / (nx * ny));
-        const m: V3 = [
-          h.origin[0] + (i + 0.5) * vox - Mf.o[0],
-          h.origin[1] + (j + 0.5) * vox - Mf.o[1],
-          h.origin[2] + (kk + 0.5) * vox - Mf.o[2],
-        ];
-        return [dot(m, Mf.ex), dot(m, Mf.ey), dot(m, Mf.ez)];
-      };
-      const sector = (a: V3): number =>
-        Math.floor(((Math.atan2(a[1], a[0]) + Math.PI) / (2 * Math.PI)) * HINGE_SECTORS) %
-        HINGE_SECTORS;
-      // the hinge height per azimuth: the most atrial voxel of the mitral annulus
-      const hinge = new Array<number>(HINGE_SECTORS).fill(Infinity);
-      for (let v = 0; v < label.length; v++)
-        if (label[v] === 37) {
-          const a = toAnat(v);
-          const t = sector(a);
-          hinge[t] = Math.min(hinge[t]!, a[2]);
-        }
-      const aboveHinge = (v: number): boolean => {
-        const a = toAnat(v);
-        const hz = hinge[sector(a)]!;
-        return Number.isFinite(hz) && a[2] <= hz - HINGE_TOLERANCE_MM;
-      };
-      // the left atrium's own, and what it opens onto: its blood, wall and inlets, the annulus, the mitral plane and the
-      // LV cavity below the hinge (the orifice). Above the hinge the LV cavity is the outflow tract beside the aortic
-      // root, and the atrium meets it across the aortomitral curtain (decision 371): counted as its own there, the take
-      // left 4.5 cm² of the atrium's blood against the outflow's with no wall between them, and the anterior leaflet's
-      // insertion hung free of the aortic root in the long axis
-      const own = new Set([33, 3, 7, 31, 37, CURTAIN, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22]);
-      const outflow = (v: number): boolean => label[v] === 31 && aboveHinge(v);
-      // which atrium a voxel is nearer is settled by the mesh's cavities, before any take: on the right atrium's side the
-      // LV's basal septum faces the atrium above the tricuspid hinge (the atrioventricular septum), and it stays
-      const dL0 = edt(dims, (v) => LA_BLOOD.has(label[v]!));
-      const dR0 = edt(dims, (v) => RA_BLOOD.has(label[v]!));
-      const leftSide = (v: number): boolean => dL0[v]! <= dR0[v]!;
-      // pass after pass: the atrium that took a sheet reaches further, to the sheet's continuation
-      for (let pass = 0; pass < JUNCTION_PASSES; pass++) {
-        const dL = edt(dims, (v) => LA_BLOOD.has(label[v]!));
-        // the sheet of LV myocardium past the hinge on the left atrium's side
-        const sheet = new Uint8Array(label.length);
-        for (let v = sz; v < label.length - sz; v++)
-          if (label[v] === 1 && dL[v]! <= reach && leftSide(v) && aboveHinge(v)) sheet[v] = 1;
-        // with it, the gap and the left atrial wall beside it (the mesh's groove fat crept into the junction): one region
-        const dSheet = edt(dims, (v) => sheet[v] === 1);
-        const taken: number[] = [];
-        for (let v = sz; v < label.length - sz; v++) {
-          const l = label[v]!;
-          if (sheet[v]) taken.push(v);
-          else if (
-            (l === 0 || l === 3) &&
-            dSheet[v]! * vox <= JUNCTION_REACH_MM &&
-            dL[v]! <= reach &&
-            leftSide(v) &&
-            aboveHinge(v)
-          )
-            taken.push(v);
-        }
-        // the region becomes cavity except CURTAIN_MM of curtain against the outflow and ATRIAL_WALL_MM of atrial wall
-        // against anything else
-        const isTaken = new Uint8Array(label.length);
-        for (const v of taken) isTaken[v] = 1;
-        const dOutflow = edt(dims, outflow);
-        const dForeign = edt(dims, (v) => (!own.has(label[v]!) || outflow(v)) && !isTaken[v]);
-        for (const v of taken)
-          label[v] =
-            dOutflow[v]! * vox <= CURTAIN_MM
-              ? CURTAIN
-              : dForeign[v]! * vox <= ATRIAL_WALL_MM
-                ? 3
-                : 33;
-        if (!taken.some((v) => sheet[v])) break;
-      }
-    }
-    // the interatrial septum: SEPTUM_MM of atrial wall on the surface midway, the rest to the nearer cavity
-    {
-      const dL = edt(dims, (v) => LA_BLOOD.has(label[v]!));
-      const dR = edt(dims, (v) => RA_BLOOD.has(label[v]!));
-      const changes: [number, number][] = [];
-      for (let v = sz; v < label.length - sz; v++) {
-        const l = label[v]!;
-        if (l !== 0 && !ATRIAL_WALLS.has(l)) continue;
-        if (dL[v]! > reach || dR[v]! > reach || !facing(dL, dR, v)) continue;
-        const d = (dL[v]! - dR[v]!) * vox;
-        changes.push([v, Math.abs(d) <= SEPTUM_MM ? (d <= 0 ? 3 : 4) : d < 0 ? 33 : 34]);
-      }
-      apply(changes);
-    }
-    // each atrium against the aortic root: where it faces the aortic wall, its cavity takes the gap and leaves its own wall
-    // ATRIAL_WALL_MM thick resting on the aortic wall (the aortomitral continuity, the right atrium's torus aorticus)
-    {
-      const dL = edt(dims, (v) => LA_BLOOD.has(label[v]!));
-      const dR = edt(dims, (v) => RA_BLOOD.has(label[v]!));
-      const dAo = edt(dims, (v) => label[v] === 5);
-      const changes: [number, number][] = [];
-      for (let v = sz; v < label.length - sz; v++) {
-        const l = label[v]!;
-        if ((l !== 0 && !ATRIAL_WALLS.has(l)) || dAo[v]! > reach) continue;
-        const left = dL[v]! <= dR[v]!;
-        const dA = left ? dL : dR;
-        if (dA[v]! > reach || !facing(dA, dAo, v)) continue;
-        changes.push([v, dAo[v]! * vox <= ATRIAL_WALL_MM ? (left ? 3 : 4) : left ? 33 : 34]);
-      }
-      apply(changes);
-    }
-    // where a cavity that took a gap reaches the outside, its own wall closes it
-    {
-      const changes: [number, number][] = [];
-      for (let v = sz; v < label.length - sz; v++) {
-        const l = label[v]!;
-        if ((l === 33 || l === 34) && faces6.some((st) => label[v + st] === 0))
-          changes.push([v, l === 33 ? 3 : 4]);
-      }
-      apply(changes);
-    }
-    // what is left of the gap between both atria inside the heart (the septum's edges, the crux): the nearest wall
-    {
-      const dL = edt(dims, (v) => LA_BLOOD.has(label[v]!));
-      const dR = edt(dims, (v) => RA_BLOOD.has(label[v]!));
-      const r0 = EPI_CLOSING_MM / vox;
-      const out0 = edt(dims, (v) => label[v] !== 0);
-      const inside = edt(dims, (v) => out0[v]! > r0);
-      const walls = INNER_WALLS.map((w) => edt(dims, (v) => label[v] === w));
-      const changes: [number, number][] = [];
-      for (let v = sz; v < label.length - sz; v++) {
-        if (label[v] !== 0 || dL[v]! > reach || dR[v]! > reach || inside[v]! <= r0) continue;
-        let best = 0;
-        for (let w = 1; w < walls.length; w++) if (walls[w]![v]! < walls[best]![v]!) best = w;
-        changes.push([v, INNER_WALLS[best]!]);
-      }
-      apply(changes);
-    }
-  }
-  // epicardial fat: the silhouette closed with a ball (dilate, then erode), less the heart itself, kept in the grooves
-  const r = EPI_CLOSING_MM / vox;
-  const dOut = edt(dims, (v) => label[v] !== 0);
-  const dIn = edt(dims, (v) => dOut[v]! > r);
-  const reach = GROOVE_REACH_MM / vox;
-  const dAtrium = edt(dims, (v) => GROOVE_ATRIAL.has(label[v]!));
-  const dVentricle = edt(dims, (v) => GROOVE_VENTRICULAR.has(label[v]!));
-  const dLv = edt(dims, (v) => label[v] === 1);
-  const dRv = edt(dims, (v) => label[v] === 2);
-  const dLa = edt(dims, (v) => label[v] === 3);
-  const dRa = edt(dims, (v) => label[v] === 4);
-  for (let v = 0; v < label.length; v++)
-    if (
-      label[v] === 0 &&
-      dIn[v]! > r &&
-      ((dAtrium[v]! <= reach && dVentricle[v]! <= reach) ||
-        (dLv[v]! <= reach && dRv[v]! <= reach)) &&
-      // between both atria lies the septum, not a groove
-      !(dLa[v]! <= reach && dRa[v]! <= reach)
-    )
-      label[v] = FAT;
-  // beyond the epicardium (heart or groove fat), in mm, for the pericardium and the thorax
-  const dEpi = edt(dims, (v) => label[v] !== 0);
-  for (let v = 0; v < dEpi.length; v++) dEpi[v] = dEpi[v]! * vox;
-  // distance to the nearest interface between tissues, in mm, for the specular term and its normal
-  const step = [1, -1, nx, -nx, nx * ny, -nx * ny];
-  const dIf = edt(dims, (v) => {
-    const c = cls(label[v]!);
-    for (const s of step) {
-      const w = v + s;
-      if (w >= 0 && w < label.length && cls(label[w]!) !== c) return true;
-    }
-    return false;
-  });
-  // the interface lies half a voxel beyond the centre of the voxel that borders it
-  for (let v = 0; v < dIf.length; v++) dIf[v] = (dIf[v]! + 0.5) * vox;
-
-  return { h, label, dEpi, dIf };
-}
-
-/** Stride (voxels) of the coarse pass that finds where the baked apparatus lies. */
-const BAKE_STRIDE = 3;
-/** Structures of the analytic heart baked into the volume's cavities, with their labels. */
-const BAKED: Partial<Record<Structure, number>> = {
-  [Structure.PapillaryMuscle]: 40,
-  [Structure.RvPapillary]: 41,
-  [Structure.ModeratorBand]: 42,
-};
-
-/**
- * A copy of the volume's labels with the analytic heart's papillary muscles and moderator band at end diastole written
- * into its cavity voxels: each voxel centre taken to the heart frame and classified by the analytic heart.
- */
-function bakeApparatus(
-  vol: LabelVolume,
-  heart: HeartModel,
-  ed: HeartPose,
-  M: { o: V3; ex: V3; ey: V3; ez: V3 },
-  F: { origin: V3; ex: V3; ey: V3; ez: V3 },
-  k: number,
-): Uint8Array {
-  const h = vol.header;
-  const label = Uint8Array.from(vol.labels);
-  const [nx, ny, nz] = h.dims;
-  const q = makeSample();
-  /** The baked label of the analytic heart at voxel (i, j, kk), 0 for none. */
-  const bakedAt = (i: number, j: number, kk: number): number => {
-    const m: V3 = [
-      h.origin[0] + (i + 0.5) * h.voxelMm - M.o[0],
-      h.origin[1] + (j + 0.5) * h.voxelMm - M.o[1],
-      h.origin[2] + (kk + 0.5) * h.voxelMm - M.o[2],
-    ];
-    const ax = dot(m, M.ex) * k,
-      ay = dot(m, M.ey) * k,
-      az = dot(m, M.ez) * k;
-    const hx = F.origin[0] + ax * F.ex[0] + ay * F.ey[0] + az * F.ez[0];
-    const hy = F.origin[1] + ax * F.ex[1] + ay * F.ey[1] + az * F.ez[1];
-    const hz = F.origin[2] + ax * F.ex[2] + ay * F.ey[2] + az * F.ez[2];
-    if (!classifyHeart(heart, ed, hx + ed.swingX, hy, hz, q)) return 0;
-    return BAKED[q.structure] ?? 0;
-  };
-  // a coarse pass over every BAKE_STRIDE-th voxel finds the blocks the apparatus reaches; the voxels of those blocks and
-  // their neighbours are classified one by one (the papillary muscles and the band are some millimetres across)
-  const S = BAKE_STRIDE;
-  const bx = Math.ceil(nx / S),
-    by = Math.ceil(ny / S),
-    bz = Math.ceil(nz / S);
-  const hit = new Uint8Array(bx * by * bz);
-  for (let kk = 0; kk < nz; kk += S)
-    for (let j = 0; j < ny; j += S)
-      for (let i = 0; i < nx; i += S)
-        if (APPARATUS_HOSTS.has(label[i + nx * (j + ny * kk)]!) && bakedAt(i, j, kk))
-          hit[i / S + bx * (j / S + by * (kk / S))] = 1;
-  for (let c = 0; c < bz; c++)
-    for (let b = 0; b < by; b++)
-      for (let a = 0; a < bx; a++) {
-        let near = false;
-        for (let w = -1; w <= 1 && !near; w++)
-          for (let u = -1; u <= 1 && !near; u++)
-            for (let t = -1; t <= 1 && !near; t++) {
-              const A = a + t,
-                B = b + u,
-                C = c + w;
-              if (
-                A >= 0 &&
-                B >= 0 &&
-                C >= 0 &&
-                A < bx &&
-                B < by &&
-                C < bz &&
-                hit[A + bx * (B + by * C)]
-              )
-                near = true;
-            }
-        if (!near) continue;
-        for (let kk = c * S; kk < Math.min(nz, (c + 1) * S); kk++)
-          for (let j = b * S; j < Math.min(ny, (b + 1) * S); j++)
-            for (let i = a * S; i < Math.min(nx, (a + 1) * S); i++) {
-              const v = i + nx * (j + ny * kk);
-              if (!APPARATUS_HOSTS.has(label[v]!)) continue;
-              const l = bakedAt(i, j, kk);
-              if (l) label[v] = l;
-            }
-      }
-  return label;
 }
 
 /** A label volume in the frame of `heart`, aligned by its end-diastolic pose `endDiastole`. */
@@ -1762,179 +1152,4 @@ export function volumeHeart(
     pulmonaryWarp,
     mitralWarp,
   };
-}
-
-/**
- * The CT's mitral hinge (decision 374): per sector of MITRAL_SECTORS around the analytic valve's centre at end diastole,
- * the inner radius of the annulus (its 10th percentile, where the leaflets attach) and its most atrial height, in the
- * heart frame (cm). A sector without annulus takes its nearest neighbour's. Null when the volume has no annulus.
- */
-function takeMitralRing(
-  h: LabelVolumeHeader,
-  label: Uint8Array,
-  M: { o: V3; ex: V3; ey: V3; ez: V3 },
-  F: { origin: V3; ex: V3; ey: V3; ez: V3 },
-  k: number,
-  ed: HeartPose,
-): { cx: number; cy: number; radius: Float64Array; height: Float64Array } | null {
-  const [nx, ny] = h.dims;
-  const cx = ed.valves.mitral.cx,
-    cy = ed.valves.mitral.cy;
-  const rs: number[][] = Array.from({ length: MITRAL_SECTORS }, () => []);
-  const height = new Float64Array(MITRAL_SECTORS).fill(Infinity);
-  for (let v = 0; v < label.length; v++) {
-    if (label[v] !== 37) continue;
-    const i = v % nx,
-      j = Math.floor(v / nx) % ny,
-      kk = Math.floor(v / (nx * ny));
-    const m: V3 = [
-      h.origin[0] + (i + 0.5) * h.voxelMm - M.o[0],
-      h.origin[1] + (j + 0.5) * h.voxelMm - M.o[1],
-      h.origin[2] + (kk + 0.5) * h.voxelMm - M.o[2],
-    ];
-    const a: V3 = [dot(m, M.ex) * k, dot(m, M.ey) * k, dot(m, M.ez) * k];
-    const p = [0, 1, 2].map(
-      (c) => F.origin[c]! + a[0] * F.ex[c]! + a[1] * F.ey[c]! + a[2] * F.ez[c]!,
-    );
-    const t =
-      Math.floor(
-        ((Math.atan2(p[1]! - cy, p[0]! - cx) + Math.PI) / (2 * Math.PI)) * MITRAL_SECTORS,
-      ) % MITRAL_SECTORS;
-    rs[t]!.push(Math.hypot(p[0]! - cx, p[1]! - cy));
-    height[t] = Math.min(height[t]!, p[2]!);
-  }
-  if (rs.every((r) => r.length === 0)) return null;
-  const radius = new Float64Array(MITRAL_SECTORS);
-  rs.forEach((r, t) => {
-    r.sort((a, b) => a - b);
-    radius[t] = r.length ? r[Math.floor(0.1 * (r.length - 1))]! : NaN;
-  });
-  for (let t = 0; t < MITRAL_SECTORS; t++)
-    for (let d = 1; !Number.isFinite(radius[t]) && d < MITRAL_SECTORS; d++)
-      for (const u of [t + d, t - d]) {
-        const w = (u + MITRAL_SECTORS) % MITRAL_SECTORS;
-        if (!Number.isFinite(radius[t]) && rs[w]!.length) {
-          radius[t] = radius[w]!;
-          height[t] = height[w]!;
-        }
-      }
-  return { cx, cy, radius, height };
-}
-
-/**
- * Where a left-heart point is classified against the analytic mitral apparatus (decision 374), into `out`: its reference
- * point (the CT at end diastole) taken onto the analytic annulus now, by the radius and the hinge height of its sector
- * (interpolated between sectors), blended toward its current point below the hinge over MITRAL_FADE_CM.
- */
-export function mitralWarpPoint(
-  w: MitralWarp,
-  rx: number,
-  ry: number,
-  rz: number,
-  hx: number,
-  hy: number,
-  hz: number,
-  out: V3,
-): void {
-  const [cxR, cyR, cxA, cyA] = w.centre;
-  const dx = rx - cxR,
-    dy = ry - cyR;
-  const f = ((Math.atan2(dy, dx) + Math.PI) / (2 * Math.PI)) * MITRAL_SECTORS - 0.5;
-  const i0 = Math.floor(f);
-  const fr = f - i0;
-  const a = ((i0 % MITRAL_SECTORS) + MITRAL_SECTORS) % MITRAL_SECTORS,
-    b = (a + 1) % MITRAL_SECTORS;
-  const S = w.sectors;
-  const rR = S[4 * a]! + fr * (S[4 * b]! - S[4 * a]!),
-    zR = S[4 * a + 1]! + fr * (S[4 * b + 1]! - S[4 * a + 1]!),
-    rA = S[4 * a + 2]! + fr * (S[4 * b + 2]! - S[4 * a + 2]!),
-    zA = S[4 * a + 3]! + fr * (S[4 * b + 3]! - S[4 * a + 3]!);
-  const depth = rz - zR;
-  const wt =
-    depth <= MITRAL_FADE_CM[0]
-      ? 1
-      : depth >= MITRAL_FADE_CM[1]
-        ? 0
-        : (MITRAL_FADE_CM[1] - depth) / (MITRAL_FADE_CM[1] - MITRAL_FADE_CM[0]);
-  const sc = rA / rR;
-  out[0] = wt * (cxA + dx * sc) + (1 - wt) * hx;
-  out[1] = wt * (cyA + dy * sc) + (1 - wt) * hy;
-  out[2] = wt * (rz + zA - zR) + (1 - wt) * hz;
-}
-
-/**
- * The CT's aortic valve plane (decision 373): its centre, axis (toward the aorta, the side of `toward`) and radius in the
- * heart frame (cm), and its voxels made the root's blood. Null when the volume has none.
- */
-function takeValvePlane(
-  h: LabelVolumeHeader,
-  label: Uint8Array,
-  M: { o: V3; ex: V3; ey: V3; ez: V3 },
-  F: { origin: V3; ex: V3; ey: V3; ez: V3 },
-  k: number,
-  toward: { x: number; y: number; z: number },
-  valve: number,
-  blood: number,
-): { centre: V3; axis: V3; radius: number } | null {
-  const [nx, ny] = h.dims;
-  const pts: V3[] = [];
-  for (let v = 0; v < label.length; v++) {
-    if (label[v] !== valve) continue;
-    const i = v % nx,
-      j = Math.floor(v / nx) % ny,
-      kk = Math.floor(v / (nx * ny));
-    const m: V3 = [
-      h.origin[0] + (i + 0.5) * h.voxelMm - M.o[0],
-      h.origin[1] + (j + 0.5) * h.voxelMm - M.o[1],
-      h.origin[2] + (kk + 0.5) * h.voxelMm - M.o[2],
-    ];
-    const a: V3 = [dot(m, M.ex) * k, dot(m, M.ey) * k, dot(m, M.ez) * k];
-    pts.push(
-      [0, 1, 2].map(
-        (c) => F.origin[c]! + a[0] * F.ex[c]! + a[1] * F.ey[c]! + a[2] * F.ez[c]!,
-      ) as V3,
-    );
-    label[v] = blood;
-  }
-  if (pts.length < 10) return null;
-  const centre: V3 = [0, 0, 0];
-  for (const p of pts) for (let c = 0; c < 3; c++) centre[c]! += p[c]! / pts.length;
-  const C = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-  for (const p of pts)
-    for (let r = 0; r < 3; r++)
-      for (let c = 0; c < 3; c++)
-        C[3 * r + c]! += ((p[r]! - centre[r]!) * (p[c]! - centre[c]!)) / pts.length;
-  // the disc's two long axes by power iteration; its axis is normal to both
-  const power = (ortho: V3[]): V3 => {
-    let x: V3 = [0.3, 0.5, 0.8];
-    for (let it = 0; it < 100; it++) {
-      let y: V3 = [0, 1, 2].map(
-        (r) => C[3 * r]! * x[0] + C[3 * r + 1]! * x[1] + C[3 * r + 2]! * x[2],
-      ) as V3;
-      for (const o of ortho) {
-        const d = dot(y, o);
-        y = [y[0] - d * o[0], y[1] - d * o[1], y[2] - d * o[2]];
-      }
-      const l = Math.hypot(...y);
-      x = [y[0] / l, y[1] / l, y[2] / l];
-    }
-    return x;
-  };
-  const e1 = power([]),
-    e2 = power([e1]);
-  let axis: V3 = [
-    e1[1] * e2[2] - e1[2] * e2[1],
-    e1[2] * e2[0] - e1[0] * e2[2],
-    e1[0] * e2[1] - e1[1] * e2[0],
-  ];
-  if (axis[0] * toward.x + axis[1] * toward.y + axis[2] * toward.z < 0)
-    axis = [-axis[0], -axis[1], -axis[2]];
-  const radial = pts
-    .map((p) => {
-      const d: V3 = [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
-      const t = dot(d, axis);
-      return Math.hypot(d[0] - t * axis[0], d[1] - t * axis[1], d[2] - t * axis[2]);
-    })
-    .sort((a, b) => a - b);
-  return { centre, axis, radius: radial[Math.floor(0.98 * (radial.length - 1))]! };
 }

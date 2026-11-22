@@ -50,10 +50,37 @@ export function useSimulation(
     const caseDef = loadCaseById(store.caseId);
     loadedCaseRef.current = store.caseId;
     void client.loadCase(caseDef, buildInput(sizeRef.current));
-    // Inputs are pushed on store changes (independent of rAF, which browsers pause in hidden tabs).
+    // Inputs are pushed on simulation-relevant store changes (ignoring fpsUi/HUD-only updates).
     const push = () => client.send(buildInput(sizeRef.current));
-    const unsub = useSimStore.subscribe(push);
-    const safety = setInterval(push, 500);
+    const unsub = useSimStore.subscribe((next, prev) => {
+      if (
+        next.probe === prev.probe &&
+        next.patient === prev.patient &&
+        next.settings === prev.settings &&
+        next.modality === prev.modality &&
+        next.frozen === prev.frozen &&
+        next.cineOffset === prev.cineOffset &&
+        next.color === prev.color &&
+        next.spectral === prev.spectral &&
+        next.cursorThetaRad === prev.cursorThetaRad &&
+        next.gateDepthCm === prev.gateDepthCm &&
+        next.quality === prev.quality &&
+        next.rendererBackend === prev.rendererBackend &&
+        next.anatomy === prev.anatomy &&
+        next.imageFormation === prev.imageFormation &&
+        next.artifactLab === prev.artifactLab &&
+        next.activeTool === prev.activeTool &&
+        next.activeMeasurementId === prev.activeMeasurementId &&
+        next.mode === prev.mode &&
+        next.ui === prev.ui
+      ) {
+        return;
+      }
+      push();
+    });
+    const safety = setInterval(() => {
+      if (!document.hidden) push();
+    }, 500);
     let raf = 0;
     let frames = 0;
     let fpsT = performance.now();

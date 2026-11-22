@@ -38,18 +38,10 @@ import {
   CALCIUM_FREQ,
   CALCIUM_GAIN,
   CALCIUM_OFFSET,
-  CLUTTER_AMP,
-  CLUTTER_BASE,
-  CLUTTER_DECAY_CM,
   CLUTTER_FREQ,
   CLUTTER_IM_A,
   CLUTTER_IM_B,
   CLUTTER_LINE_FREQ,
-  CLUTTER_MAX_CM,
-  CLUTTER_MOD_DEPTH_FREQ,
-  CLUTTER_HAZE,
-  CLUTTER_MOD_FREQ,
-  CLUTTER_MOD_LINE_FREQ,
   CLUTTER_RE_A_X,
   CLUTTER_RE_B,
   HETERO_FREQ,
@@ -63,38 +55,15 @@ import {
   PHASOR_IM_B,
   PHASOR_NORM,
   PHASOR_RE_B,
-  PLEURA_AMP,
-  PLEURA_BASE,
-  PLEURA_DEPTH_FREQ,
-  PLEURA_LINE_FREQ,
-  PLEURA_Z,
-  pleuralCoherence,
-  pleuralIncidenceCos,
-  pleuralReverberation,
-  PLEURA_DIFFUSE_FLOOR,
-  PLEURA_SLOPE_WINDOW_CM,
-  REVERB_MOD_AMP,
-  REVERB_MOD_BASE,
-  REVERB_MOD_DEPTH_FREQ,
-  REVERB_MOD_LINE_FREQ,
-  REVERB_MOD_Z,
-  REVERB_PHASOR_IM_A,
-  REVERB_PHASOR_IM_B,
-  REVERB_PHASOR_LINE_FREQ,
-  REVERB_PHASOR_RE_A_Z,
-  REVERB_PHASOR_RE_B,
   RINGDOWN_CM,
   RINGDOWN_GAIN,
   focusingGain,
   membraneWeight,
   cordAlignment,
   cordWeight,
-  beamAttenWindowLines,
-  BEAM_ATTEN_MAX_LINES,
   COMPOUND_LOOKS,
   LOOK_SHIFT,
   GRAIN_GAIN,
-  GRAIN_THRESHOLD,
   GRAIN_OFFSET,
   SCATTER_FREQ,
   SCATTER_FREQ_RATIO,
@@ -105,6 +74,17 @@ import {
   ELEVATION_SIGMA_PER_HALF_WIDTH,
   STRONG_SCATTERER_FRACTION,
 } from '../acoustic/acoustics';
+import {
+  beamMarch,
+  chestWallClutter,
+  clutterLoss,
+  grainCoef,
+  torsoToHeartDir,
+  type LineContext,
+} from './beamMarch';
+import { drawLungFrame, lungEcho, pleuraEcho } from './lungEcho';
+
+export { beamMarch, clutterLoss };
 
 // lattice offsets as scalars: the inner loops read them per sample
 const [PRB_X, PRB_Y, PRB_Z] = PHASOR_RE_B;
@@ -113,9 +93,6 @@ const [PIB_X, PIB_Y, PIB_Z] = PHASOR_IM_B;
 const [HET_X, HET_Y, HET_Z] = HETERO_OFFSET;
 const [GR_X, GR_Y, GR_Z] = GRAIN_OFFSET;
 const [CAL_X, CAL_Y, CAL_Z] = CALCIUM_OFFSET;
-const [RRB_X, RRB_Y, RRB_Z] = REVERB_PHASOR_RE_B;
-const [RIA_X, RIA_Y, RIA_Z] = REVERB_PHASOR_IM_A;
-const [RIB_X, RIB_Y, RIB_Z] = REVERB_PHASOR_IM_B;
 const [CRB_X, CRB_Y] = CLUTTER_RE_B;
 const [CIA_X, CIA_Y, CIA_Z] = CLUTTER_IM_A;
 const [CIB_X, CIB_Y, CIB_Z] = CLUTTER_IM_B;
@@ -243,7 +220,17 @@ export class ProceduralSliceRenderer implements RendererBackend {
         this.heartFlag,
       );
     }
-    this.drawLung(ctx, spec, this.re, this.im, out.transmission);
+    drawLungFrame(
+      ctx,
+      spec,
+      this.lungEntry,
+      this.active.looks,
+      this.re,
+      this.im,
+      out.transmission,
+      this.clutRe,
+      this.clutIm,
+    );
     const kernels = this.kernels(scene, spec);
     // the march of the beam, not of the pencil line (decision 144): the echoes scaled by its transmission
     beamMarch(
@@ -472,149 +459,6 @@ export class ProceduralSliceRenderer implements RendererBackend {
     };
   }
 
-  /** The pleural line at sample `idx`: coherent, the same in every look; its specular share follows the incidence. */
-  private pleuraEcho(
-    ctx: LineContext,
-    li: number,
-    idx: number,
-    r: number,
-    entryT: number,
-    coherence: number,
-    looks: number,
-    re: Float32Array,
-    im: Float32Array,
-  ): void {
-    const lk = ctx.line ? ctx.line.kernels : null;
-    const nFrame = ctx.spec.lines * ctx.spec.samples;
-    let pleura =
-      entryT *
-      (PLEURA_BASE +
-        PLEURA_AMP *
-          latticeNoise3(li * PLEURA_LINE_FREQ, r * PLEURA_DEPTH_FREQ, PLEURA_Z, ctx.latA)) *
-      (PLEURA_DIFFUSE_FLOOR + (1 - PLEURA_DIFFUSE_FLOOR) * coherence);
-    if (lk) pleura *= lk.single;
-    for (let k = 0; k < looks; k++) {
-      re[k * nFrame + idx] = pleura;
-      im[k * nFrame + idx] = 0;
-    }
-  }
-
-  /** Reverberation behind the pleura at sample `idx`: incoherent, a phasor tied to the line and the depth per look. */
-  private lungEcho(
-    ctx: LineContext,
-    li: number,
-    idx: number,
-    r: number,
-    entryR: number,
-    entryT: number,
-    coherence: number,
-    looks: number,
-    re: Float32Array,
-    im: Float32Array,
-    clutterEntryT: number,
-    clutterScale: number,
-    clut: { re: Float32Array; im: Float32Array } | null = null,
-  ): void {
-    const { latA, latB, latC } = ctx;
-    const incAxial = ctx.line ? ctx.line.kernels.incoherentAxial : 1;
-    const nFrame = ctx.spec.lines * ctx.spec.samples;
-    const R = SCATTER_FREQ_RATIO;
-    const nn =
-      REVERB_MOD_BASE +
-      REVERB_MOD_AMP *
-        latticeNoise3(li * REVERB_MOD_LINE_FREQ, r * REVERB_MOD_DEPTH_FREQ, REVERB_MOD_Z, latC);
-    // the chest wall's reverberation reaches this depth over the lung too, with the soft-tissue loss of its depth capped at
-    // the transmission at the pleura (decision 270); `clutterScale` turns that into the line's units. A frame's line keeps
-    // it apart, unscaled, for the beam march, which gives it the loss of decision 312 (`clutterLoss` over the lung)
-    const softT = Math.exp(-ATTEN_NP_PER_DB * SOFT_TISSUE_ATTEN_DB * ctx.fAtten * r);
-    const cm = ctx.clutter > 0 ? chestWallClutter(ctx, li, r) : 0;
-    const pleural = pleuralReverberation(r, entryR, entryT, nn, coherence, ctx.fAtten);
-    const a = clut ? pleural : pleural + cm * Math.min(softT, clutterEntryT) * clutterScale;
-    // reverberation energy is incoherent: a phasor tied to the line and the depth, one per look (decision 145)
-    const px2 = li * REVERB_PHASOR_LINE_FREQ,
-      pr = r * SCATTER_FREQ;
-    for (let k = 0; k < looks; k++) {
-      const sx = LOOK_SHIFT[k]![0],
-        sy = LOOK_SHIFT[k]![1],
-        sz = LOOK_SHIFT[k]![2];
-      const zr =
-        (latticeNoise3(px2 + sx, pr + sy, REVERB_PHASOR_RE_A_Z + sz, latA) +
-          latticeNoise3(px2 + RRB_X + sx, pr * R + RRB_Y + sy, RRB_Z + sz, latB) -
-          1) *
-        PHASOR_NORM *
-        incAxial;
-      const zi =
-        (latticeNoise3(px2 + RIA_X + sx, pr + RIA_Y + sy, RIA_Z + sz, latC) +
-          latticeNoise3(px2 + RIB_X + sx, pr * R + RIB_Y + sy, RIB_Z + sz, latA) -
-          1) *
-        PHASOR_NORM *
-        incAxial;
-      re[k * nFrame + idx] = a * zr;
-      im[k * nFrame + idx] = a * zi;
-      if (clut) {
-        clut.re[k * nFrame + idx] = cm * zr;
-        clut.im[k * nFrame + idx] = cm * zi;
-      }
-    }
-  }
-
-  /**
-   * The pleura and the reverberations of a frame (decision 221): how square the pleura stands to a line comes from the
-   * entries of its neighbours, each taken within PLEURA_SLOPE_WINDOW_CM of its own (a neighbour without lung there is a
-   * cliff); `glslPasses.ts` repeats it from the pass A flags.
-   */
-  private drawLung(
-    ctx: LineContext,
-    spec: PolarFrameSpec,
-    re: Float32Array,
-    im: Float32Array,
-    tr: Float32Array,
-  ): void {
-    const { dr } = ctx;
-    const lines = spec.lines,
-      samples = spec.samples;
-    const w = Math.floor(PLEURA_SLOPE_WINDOW_CM / dr + 0.5);
-    const dTheta = spec.sectorRad / lines;
-    const entry = this.lungEntry;
-    for (let li = 0; li < lines; li++) {
-      const e = entry[li]!;
-      if (e < 0) continue;
-      const near = (j: number): number => {
-        const ej = entry[j]!;
-        return ej < 0 ? e + w : Math.min(e + w, Math.max(e - w, ej));
-      };
-      let dEntry = 0,
-        span = 1;
-      if (li > 0 && li < lines - 1) {
-        dEntry = near(li + 1) - near(li - 1);
-        span = 2;
-      } else if (li > 0) dEntry = e - near(li - 1);
-      else if (li < lines - 1) dEntry = near(li + 1) - e;
-      const rE = (e + 0.5) * dr;
-      const coherence = pleuralCoherence(pleuralIncidenceCos(dEntry * dr, span * rE * dTheta));
-      const base = li * samples;
-      this.pleuraEcho(ctx, li, base + e, rE, 1, coherence, this.active.looks, re, im);
-      // the line's transmission at the pleura: the beam march scales the lung's echoes by it
-      const tE = Math.max(tr[base + e]!, TRANSMISSION_FLOOR);
-      for (let si = e + 1; si < samples; si++)
-        this.lungEcho(
-          ctx,
-          li,
-          base + si,
-          (si + 0.5) * dr,
-          rE,
-          1,
-          coherence,
-          this.active.looks,
-          re,
-          im,
-          tE,
-          1 / tE,
-          { re: this.clutRe, im: this.clutIm },
-        );
-    }
-  }
-
   private renderLine(
     ctx: LineContext,
     theta: number,
@@ -836,7 +680,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
       const idx = base + si;
       if (dead) {
         // an M-mode line: its pleura faces the beam (a frame's lines wait for their neighbours, decision 221)
-        this.lungEcho(ctx, li, idx, r, lungEntryR, lungEntryT, 1, looks, re, im, lungEntryT, 1);
+        lungEcho(ctx, li, idx, r, lungEntryR, lungEntryT, 1, looks, re, im, lungEntryT, 1);
         st[idx] = Structure.Lung;
         tr[idx] = 0;
         ti[idx] = Tissue.Lung;
@@ -890,7 +734,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
           }
           break;
         }
-        this.pleuraEcho(ctx, li, idx, r, lungEntryT, 1, looks, re, im);
+        pleuraEcho(ctx, li, idx, r, lungEntryT, 1, looks, re, im);
         dead = true;
         continue;
       }
@@ -1112,267 +956,4 @@ export class ProceduralSliceRenderer implements RendererBackend {
       if (softTransmission < TRANSMISSION_FLOOR) softTransmission = TRANSMISSION_FLOOR;
     }
   }
-}
-
-/**
- * The chest wall's reverberation at depth `r` on line `li`, times the scene's clutter level (decisions 238 and 258): the
- * near-field term and the haze of the cavities. It is an artifact of the wall, so it appears at that depth whatever lies
- * there, the lung included (decision 270).
- */
-function chestWallClutter(ctx: LineContext, li: number, r: number): number {
-  const { beam } = ctx;
-  const ox = beam.origin.x,
-    oy = beam.origin.y,
-    oz = beam.origin.z;
-  let cm = 0;
-  // near-field clutter: reverberation in the chest wall under the footprint, incoherent, fixed to the probe position
-  if (r < CLUTTER_MAX_CM)
-    cm =
-      Math.exp(-r / CLUTTER_DECAY_CM) *
-      (CLUTTER_BASE +
-        CLUTTER_AMP *
-          latticeNoise3(
-            ox * CLUTTER_MOD_FREQ + li * CLUTTER_MOD_LINE_FREQ,
-            oy * CLUTTER_MOD_FREQ + oz * CLUTTER_MOD_FREQ,
-            r * CLUTTER_MOD_DEPTH_FREQ,
-            ctx.latC,
-          ));
-  // Diffuse clutter has no extra image-plane envelope: its phasors and the receive PSF form the texture.
-  cm += CLUTTER_HAZE;
-  return cm * ctx.clutter;
-}
-
-/**
- * The loss the chest wall's reverberation carries to a sample (decision 312): the wall's own loss, at most the soft-tissue
- * one, until the line reaches the heart (`wall` < 0), and past the heart's surface the soft-tissue loss times what it had
- * there over the soft-tissue loss there (`wall`). `transmission` and `soft` reach the sample; the GPU's pass B does the
- * same with the beam's transmission.
- */
-export function clutterLoss(transmission: number, soft: number, wall: number): number {
-  return wall < 0 ? Math.min(transmission, soft) : soft * wall;
-}
-
-/**
- * The march of the beam (decisions 144 and 299). Each line marched its own attenuation, so a line running inside the
- * lateral wall from the apex reached 7 cm 15 dB weaker than its neighbour in the blood. A pulse is not a pencil: the
- * energy that reaches a sample left the whole aperture and crossed, at every depth on the way, the width of the beam
- * there. Decision 144 averaged the attenuation increments of the lines within the beam's half-width at each depth
- * (`beamHalfWidthCm`, the aperture tapering to the focus, at most ±12° of sector: `beamAttenWindowLines`) and marched the
- * mean — a geometric mean of the sub-beams' transmissions, so a rib across 30 % of the beam took 30 % of its 120 dB,
- * −36 dB, where the 70 % that passes beside it carries −3 dB. Since decision 299 each line marches its own pencil, and
- * the transmission a line's echo pays at a depth is the mean of those pencil transmissions over the window, over the
- * body-tissue samples among them: the arithmetic mean of the amplitude the sub-beams carry. Outside-body and lung
- * samples neither pay nor count, and a line's contact drop-out stays its own. Prefix sums across lines make the window
- * mean O(1). The echoes come unscaled from the line march and are scaled here by the beam's transmission, the lung
- * echoes of a line by the transmission of its last tissue sample before the pleura.
- */
-export function beamMarch(
-  re: Float32Array,
-  im: Float32Array,
-  tr: Float32Array,
-  ti: Uint8Array,
-  atten: Float32Array,
-  spec: PolarFrameSpec,
-  contact: number,
-  seed: number,
-  prefix: Float32Array,
-  looks = 1,
-  clutter: {
-    re: Float32Array;
-    im: Float32Array;
-    heart: Uint8Array;
-    fAtten: number;
-  } | null = null,
-  spatialCompound = 0,
-): void {
-  const { lines, samples } = spec;
-  const n = lines * samples;
-  const dr = spec.depthCm / samples;
-  const dTheta = spec.sectorRad / lines;
-  // 1. each line's pencil: the transmission reaching each body-tissue sample, without the contact drop-out, kept in `tr`
-  for (let li = 0; li < lines; li++) {
-    let t = 1;
-    for (let si = 0; si < samples; si++) {
-      const i = li * samples + si;
-      const tis = ti[i]!;
-      if (tis === Tissue.None || tis === Tissue.Lung) continue;
-      tr[i] = t;
-      t *= Math.exp(-atten[i]!);
-      if (t < TRANSMISSION_FLOOR) t = TRANSMISSION_FLOOR;
-    }
-  }
-  // 2. the window mean of the pencils at each depth, over the body-tissue samples, replaces them in place: prefix sums
-  // per sample across lines (`prefix`, (lines + 1) × samples) and the count of tissue samples
-  const count = new Int32Array(lines + 1);
-  for (let si = 0; si < samples; si++) {
-    const r = (si + 0.5) * dr;
-    const baseK = beamAttenWindowLines(r, spec.focusCm, dTheta);
-    const K =
-      spatialCompound > 0
-        ? Math.min(BEAM_ATTEN_MAX_LINES, Math.floor(baseK * (1 + 0.55 * spatialCompound) + 0.5))
-        : baseK;
-    let acc = 0;
-    let cnt = 0;
-    prefix[si] = 0;
-    count[0] = 0;
-    for (let li = 0; li < lines; li++) {
-      const i = li * samples + si;
-      const t = ti[i]!;
-      if (t !== Tissue.None && t !== Tissue.Lung) {
-        acc += tr[i]!;
-        cnt++;
-      }
-      prefix[(li + 1) * samples + si] = acc;
-      count[li + 1] = cnt;
-    }
-    for (let li = 0; li < lines; li++) {
-      const i = li * samples + si;
-      const t = ti[i]!;
-      if (t === Tissue.None || t === Tissue.Lung) continue;
-      const a = Math.max(0, li - K),
-        b = Math.min(lines, li + K + 1);
-      const m = count[b]! - count[a]!;
-      if (m > 0) tr[i] = (prefix[b * samples + si]! - prefix[a * samples + si]!) / m;
-    }
-  }
-  // 3. the line's own contact, and the echoes scaled
-  for (let li = 0; li < lines; li++) {
-    const base = li * samples;
-    const drop = hash3(li, 7, 0, seed) > contact ? 0.08 : 1;
-    let transmission = drop;
-    let lungScale = -1;
-    // the chest wall's reverberation (decision 312): the soft-tissue loss and the wall's loss at the heart's surface
-    let soft = drop;
-    let wall = -1;
-    const softStep = clutter
-      ? Math.exp(-ATTEN_NP_PER_DB * SOFT_TISSUE_ATTEN_DB * clutter.fAtten * dr)
-      : 1;
-    for (let si = 0; si < samples; si++) {
-      const i = base + si;
-      const t = ti[i]!;
-      if (t === Tissue.None) {
-        tr[i] = transmission;
-        continue;
-      }
-      if (t === Tissue.Lung) {
-        // the pleural line and the reverberation behind it, drawn at unit transmission by the line march
-        if (lungScale < 0) {
-          lungScale = transmission;
-          tr[i] = transmission;
-        } else tr[i] = 0;
-        // the chest wall's reverberation over the lung: the soft-tissue loss of its depth capped at the pleura's
-        // transmission (decision 270), or past the heart's surface what it had there (decision 312)
-        let loss = 0;
-        if (clutter) {
-          const softR = Math.exp(
-            -ATTEN_NP_PER_DB * SOFT_TISSUE_ATTEN_DB * clutter.fAtten * (si + 0.5) * dr,
-          );
-          loss = wall < 0 ? Math.min(softR, lungScale) : drop * softR * wall;
-        }
-        for (let k = 0; k < looks; k++) {
-          re[k * n + i] =
-            re[k * n + i]! * lungScale + (clutter ? clutter.re[k * n + i]! * loss : 0);
-          im[k * n + i] =
-            im[k * n + i]! * lungScale + (clutter ? clutter.im[k * n + i]! * loss : 0);
-        }
-        continue;
-      }
-      transmission = Math.max(TRANSMISSION_FLOOR, drop * tr[i]!);
-      tr[i] = transmission;
-      let loss = 0;
-      if (clutter) {
-        if (clutter.heart[i] && wall < 0) wall = Math.min(1, transmission / soft);
-        loss = clutterLoss(transmission, soft, wall);
-        soft *= softStep;
-        if (soft < TRANSMISSION_FLOOR) soft = TRANSMISSION_FLOOR;
-      }
-      for (let k = 0; k < looks; k++) {
-        re[k * n + i] =
-          re[k * n + i]! * transmission + (clutter ? clutter.re[k * n + i]! * loss : 0);
-        im[k * n + i] =
-          im[k * n + i]! * transmission + (clutter ? clutter.im[k * n + i]! * loss : 0);
-      }
-    }
-  }
-}
-
-interface LineContext {
-  scene: Scene;
-  beam: BeamFrame;
-  spec: PolarFrameSpec;
-  dr: number;
-  fAtten: number;
-  seed: number;
-  harm: boolean;
-  clutter: number;
-  contact: number;
-  fwdH: { x: number; y: number; z: number };
-  latH: { x: number; y: number; z: number };
-  nrmH: { x: number; y: number; z: number };
-  /** Lattice shift of the flowing blood's scatterers in this frame (decision 163). */
-  bloodShift: number;
-  /** Multi-angle spatial compounding strength (0..1). */
-  spatialCompound: number;
-  latA: Uint8Array;
-  latB: Uint8Array;
-  latC: Uint8Array;
-  /** Set only for an M-mode line (decision 84). */
-  line: {
-    kernels: LineKernels;
-    /** Beam axes (along, across in the scan plane, elevation) in torso and heart coordinates, 3 × 3 flattened. */
-    torsoAxes: number[];
-    heartAxes: number[];
-    /** Lattice offset of flowing blood for this pulse: its speckle does not persist from one pulse to the next. */
-    bloodCells: number;
-    /**
-     * Per sample: incoherent backscatter reaching the probe (σ × transmission), its lattice coordinates across the beam, and
-     * for tissue of the thorax (still under the probe) its material coordinate along the beam; NaN in the heart.
-     */
-    sigma: Float32Array;
-    across: Float32Array;
-    elevation: Float32Array;
-    along: Float32Array;
-    /** Per sample: scale of the parenchymal grains reaching the probe (0 without grains) and their lattice frequency. */
-    grainScale: Float32Array;
-    grainCells: Float32Array;
-  } | null;
-}
-
-/** A grain field above its threshold, 0–1. */
-const grainAbove = (g: number): number =>
-  g > GRAIN_THRESHOLD ? (g - GRAIN_THRESHOLD) / (1 - GRAIN_THRESHOLD) : 0;
-
-/**
- * Coefficient (0–1) of the parenchymal grains at a lattice coordinate (decision 145): the slice holds two or three grain
- * cells across, whose coherent echoes add, so it reads the mean (¼ ½ ¼) of three independent grain fields rather than a
- * single one, at every tier and on an M-mode line alike.
- */
-function grainCoef(
-  x: number,
-  y: number,
-  z: number,
-  latA: Uint8Array,
-  latB: Uint8Array,
-  latC: Uint8Array,
-): number {
-  return (
-    0.25 * grainAbove(latticeNoise3(x, y, z, latA)) +
-    0.5 * grainAbove(latticeNoise3(x, y, z, latB)) +
-    0.25 * grainAbove(latticeNoise3(x, y, z, latC))
-  );
-}
-
-function torsoToHeartDir(
-  f: {
-    ex: { x: number; y: number; z: number };
-    ey: { x: number; y: number; z: number };
-    ez: { x: number; y: number; z: number };
-  },
-  d: { x: number; y: number; z: number },
-) {
-  return {
-    x: d.x * f.ex.x + d.y * f.ex.y + d.z * f.ex.z,
-    y: d.x * f.ey.x + d.y * f.ey.y + d.z * f.ey.z,
-    z: d.x * f.ez.x + d.y * f.ez.y + d.z * f.ez.z,
-  };
 }

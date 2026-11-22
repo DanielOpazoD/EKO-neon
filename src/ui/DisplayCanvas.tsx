@@ -143,7 +143,28 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       frameBus.diag.frames++;
     });
     redrawOverlayRef.current = redrawOverlay;
-    const unsubStore = useSimStore.subscribe(redrawOverlay);
+    const unsubStore = useSimStore.subscribe((next, prev) => {
+      if (
+        next.caseId === prev.caseId &&
+        next.modality === prev.modality &&
+        next.frozen === prev.frozen &&
+        next.cineOffset === prev.cineOffset &&
+        next.settings === prev.settings &&
+        next.color === prev.color &&
+        next.spectral === prev.spectral &&
+        next.cursorThetaRad === prev.cursorThetaRad &&
+        next.gateDepthCm === prev.gateDepthCm &&
+        next.activeTool === prev.activeTool &&
+        next.activeMeasurementId === prev.activeMeasurementId &&
+        next.measurements === prev.measurements &&
+        next.reviewMarkers === prev.reviewMarkers &&
+        next.reviewSelectedId === prev.reviewSelectedId &&
+        next.ui === prev.ui
+      ) {
+        return;
+      }
+      redrawOverlay();
+    });
     // the segment under the pointer in another view (cut map, 3D heart, polar map) is highlighted here too
     const unsubHover = useSegmentHover.subscribe(redrawOverlay);
     // the structure under the pointer on the cut map is outlined here (decision 202)

@@ -714,6 +714,7 @@ export class SimulatorCore {
             }
           : null;
       bitmap = this.gpu.present({ lut: this.lut, width: W, height: sectorH, color, tintMap });
+      if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
     }
     this.timing.presentMs = bitmap ? performance.now() - tp : 0;
     const buffer = bitmap ? new ArrayBuffer(0) : this.takeBuffer(W * H * 4);
