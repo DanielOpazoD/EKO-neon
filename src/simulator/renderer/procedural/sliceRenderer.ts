@@ -90,6 +90,7 @@ import {
   cordAlignment,
   cordWeight,
   beamAttenWindowLines,
+  BEAM_ATTEN_MAX_LINES,
   COMPOUND_LOOKS,
   LOOK_SHIFT,
   GRAIN_GAIN,
@@ -257,6 +258,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
       this.prefix,
       looks,
       { re: this.clutRe, im: this.clutIm, heart: this.heartFlag, fAtten: ctx.fAtten },
+      ctx.spatialCompound,
     );
     // the looks are detected one by one and their envelopes averaged (compounding, decision 145)
     out.amplitude.fill(0);
@@ -462,6 +464,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
       latH: torsoToHeartDir(hf, beam.lateral),
       nrmH: torsoToHeartDir(hf, beam.normal),
       bloodShift: bloodShiftCells(physics.bloodFrame ?? 0),
+      spatialCompound: Math.max(0, Math.min(1, physics.spatialCompound ?? 0)),
       latA: noiseLattice(physics.seed),
       latB: noiseLattice(physics.seed ^ 0x2545f491),
       latC: noiseLattice(physics.seed ^ 0x51),
@@ -680,6 +683,29 @@ export class ProceduralSliceRenderer implements RendererBackend {
     const dhx = fwdH.x * ct + latH.x * sn,
       dhy = fwdH.y * ct + latH.y * sn,
       dhz = fwdH.z * ct + latH.z * sn;
+    // Multi-angle spatial compounding (SonoCT-style): ±14°·sc virtual steered beams in the scan plane
+    const sc = line ? 0 : ctx.spatialCompound;
+    const scAlpha = sc * 0.24434609527920614;
+    const scCos = Math.cos(scAlpha);
+    const scSin = Math.sin(scAlpha);
+    const pxT = -beam.forward.x * sn + beam.lateral.x * ct;
+    const pyT = -beam.forward.y * sn + beam.lateral.y * ct;
+    const pzT = -beam.forward.z * sn + beam.lateral.z * ct;
+    const dxP = dx * scCos + pxT * scSin,
+      dyP = dy * scCos + pyT * scSin,
+      dzP = dz * scCos + pzT * scSin;
+    const dxM = dx * scCos - pxT * scSin,
+      dyM = dy * scCos - pyT * scSin,
+      dzM = dz * scCos - pzT * scSin;
+    const pxH = -fwdH.x * sn + latH.x * ct;
+    const pyH = -fwdH.y * sn + latH.y * ct;
+    const pzH = -fwdH.z * sn + latH.z * ct;
+    const dhxP = dhx * scCos + pxH * scSin,
+      dhyP = dhy * scCos + pyH * scSin,
+      dhzP = dhz * scCos + pzH * scSin;
+    const dhxM = dhx * scCos - pxH * scSin,
+      dhyM = dhy * scCos - pyH * scSin,
+      dhzM = dhz * scCos - pzH * scSin;
     const nX = beam.normal.x,
       nY = beam.normal.y,
       nZ = beam.normal.z;
@@ -704,17 +730,20 @@ export class ProceduralSliceRenderer implements RendererBackend {
       );
       // a cord's sample carries its axis: it reflects with the beam across it (decision 227)
       const nd = q.tissue === Tissue.Chordae ? cordAlignment(nd0) : nd0;
+      let ndP = nd;
+      let ndM = nd;
+      if (sc > 0) {
+        const ndP0 = Math.abs(
+          inH ? q.nx * dhxP + q.ny * dhyP + q.nz * dhzP : q.nx * dxP + q.ny * dyP + q.nz * dzP,
+        );
+        const ndM0 = Math.abs(
+          inH ? q.nx * dhxM + q.ny * dhyM + q.nz * dhzM : q.nx * dxM + q.ny * dyM + q.nz * dzM,
+        );
+        ndP = q.tissue === Tissue.Chordae ? cordAlignment(ndP0) : ndP0;
+        ndM = q.tissue === Tissue.Chordae ? cordAlignment(ndM0) : ndM0;
+      }
       let sigma = props.reflect;
       if (q.tissue === Tissue.Blood && harm) sigma *= BLOOD_HARMONIC_SIGMA;
-      // myocardial backscatter is strongest with the beam across the fibres: in the LV walls they run
-      // ~circumferentially around the long axis (heart-frame z), so the circumferential direction at
-      // the sample is ẑ × radial = (−my, mx, 0)/r — beam·fibre alignment darkens the wall, not the
-      // wall normal. Other myocardium keeps the normal-based response.
-      // The right ventricular free wall wraps the same axis with the same circumferential-oblique fibres, so it takes
-      // the fibre response too; the atrial walls and the interatrial septum scatter without anisotropy (thin walls of
-      // crossing fibre bundles, decision 140). Under the wall-normal response both ran along the apical beams and
-      // fell to the floor: RV free wall 71-76 grey against 61 in its blood, atrial walls 75-102 against 74-84, next
-      // to a septum at 95-100 (A4C and A5C, default console).
       if (q.tissue === Tissue.Myocardium) {
         if (
           inH &&
@@ -722,17 +751,31 @@ export class ProceduralSliceRenderer implements RendererBackend {
             q.structure === Structure.RvWall)
         ) {
           const rr = Math.sqrt(q.mx * q.mx + q.my * q.my);
+          const trm = q.transmural >= 0 ? q.transmural : 0.5;
           const dphi = rr > MYO_ANISO_RADIAL_EPS ? (dhy * q.mx - dhx * q.my) / rr : 0;
-          // the fibre helix across the wall (decision 144); a wall sample without a depth (the RV free wall) takes the mid-wall
-          sigma *= myoHelixGain(dphi, dhz, q.transmural >= 0 ? q.transmural : 0.5);
-          // the myocardium's own backscatter over normal (disarray and fibrosis, decision 267); the RV free wall keeps it
+          let gMyo = myoHelixGain(dphi, dhz, trm);
+          if (sc > 0) {
+            const dphiP = rr > MYO_ANISO_RADIAL_EPS ? (dhyP * q.mx - dhxP * q.my) / rr : 0;
+            const dphiM = rr > MYO_ANISO_RADIAL_EPS ? (dhyM * q.mx - dhxM * q.my) / rr : 0;
+            gMyo =
+              0.5 * gMyo +
+              0.25 * myoHelixGain(dphiP, dhzP, trm) +
+              0.25 * myoHelixGain(dphiM, dhzM, trm);
+          }
+          sigma *= gMyo;
           if (q.structure !== Structure.RvWall) sigma *= myoIb;
         } else if (
           inH &&
           (q.structure === Structure.PapillaryMuscle || q.structure === Structure.RvPapillary)
         ) {
-          // the papillary fibres run along the muscle, near the long axis (decision 265)
-          sigma *= papillaryFibreGain(dhz);
+          let gPap = papillaryFibreGain(dhz);
+          if (sc > 0) {
+            gPap =
+              0.5 * gPap +
+              0.25 * papillaryFibreGain(dhzP) +
+              0.25 * papillaryFibreGain(dhzM);
+          }
+          sigma *= gPap;
           if (q.structure === Structure.PapillaryMuscle) sigma *= myoIb;
         } else if (
           !inH ||
@@ -740,7 +783,8 @@ export class ProceduralSliceRenderer implements RendererBackend {
             q.structure !== Structure.RaWall &&
             q.structure !== Structure.InteratrialSeptum)
         ) {
-          sigma *= MYO_ANISO_FLOOR + (1 - MYO_ANISO_FLOOR) * nd * nd;
+          const nd2 = sc > 0 ? 0.5 * nd * nd + 0.25 * ndP * ndP + 0.25 * ndM * ndM : nd * nd;
+          sigma *= MYO_ANISO_FLOOR + (1 - MYO_ANISO_FLOOR) * nd2;
         }
       }
       const het = heteroDb(q.tissue);
@@ -770,10 +814,20 @@ export class ProceduralSliceRenderer implements RendererBackend {
                 latB,
               ));
       let specular = 0;
-      // the interface echo belongs to the sample the interface crosses (distance along the line < one sample)
-      if (props.specular > 0 && Math.abs(q.sdf) < Math.max(nd, SPECULAR_WINDOW_MIN) * dr)
-        specular =
-          props.specular * SPECULAR_GAIN * nd * nd * nd * nd * (harm ? SPECULAR_HARMONIC : 1);
+      if (props.specular > 0) {
+        const sScale = props.specular * SPECULAR_GAIN * (harm ? SPECULAR_HARMONIC : 1);
+        const absSdf = Math.abs(q.sdf);
+        const sp0 = absSdf < Math.max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0;
+        if (sc > 0) {
+          const spP =
+            absSdf < Math.max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0;
+          const spM =
+            absSdf < Math.max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0;
+          specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
+        } else {
+          specular = sp0;
+        }
+      }
       a.sigma = sigma;
       a.spec = specular;
     };
@@ -1129,6 +1183,7 @@ export function beamMarch(
     heart: Uint8Array;
     fAtten: number;
   } | null = null,
+  spatialCompound = 0,
 ): void {
   const { lines, samples } = spec;
   const n = lines * samples;
@@ -1151,7 +1206,11 @@ export function beamMarch(
   const count = new Int32Array(lines + 1);
   for (let si = 0; si < samples; si++) {
     const r = (si + 0.5) * dr;
-    const K = beamAttenWindowLines(r, spec.focusCm, dTheta);
+    const baseK = beamAttenWindowLines(r, spec.focusCm, dTheta);
+    const K =
+      spatialCompound > 0
+        ? Math.min(BEAM_ATTEN_MAX_LINES, Math.floor(baseK * (1 + 0.55 * spatialCompound) + 0.5))
+        : baseK;
     let acc = 0;
     let cnt = 0;
     prefix[si] = 0;
@@ -1252,6 +1311,8 @@ interface LineContext {
   nrmH: { x: number; y: number; z: number };
   /** Lattice shift of the flowing blood's scatterers in this frame (decision 163). */
   bloodShift: number;
+  /** Multi-angle spatial compounding strength (0..1). */
+  spatialCompound: number;
   latA: Uint8Array;
   latB: Uint8Array;
   latC: Uint8Array;

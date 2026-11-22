@@ -597,12 +597,15 @@ export function overlayColorField(
 
     const edgeT = Math.min(1, Math.max(0, (wSum - 0.18) / 0.54));
     const edgeAlpha = edgeT * edgeT * (3 - 2 * edgeT);
-    const g = rgba[o] ?? 0;
-    const tissuePrio = g <= 165 ? 1 : Math.max(0.28, (235 - g) / 70);
+    const r0 = rgba[o] ?? 0;
+    const g0 = rgba[o + 1] ?? 0;
+    const b0 = rgba[o + 2] ?? 0;
+    const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+    const tissuePrio = lum <= 165 ? 1 : Math.max(0.28, (235 - lum) / 70);
     const blend = COLOR_BLEND * edgeAlpha * tissuePrio;
     const inv = 1 - blend;
-    rgba[o] = Math.round(rgb[0] * blend + g * inv);
-    rgba[o + 1] = Math.round(rgb[1] * blend + g * inv);
-    rgba[o + 2] = Math.round(rgb[2] * blend + g * inv);
+    rgba[o] = Math.round(rgb[0] * blend + r0 * inv);
+    rgba[o + 1] = Math.round(rgb[1] * blend + g0 * inv);
+    rgba[o + 2] = Math.round(rgb[2] * blend + b0 * inv);
   }
 }

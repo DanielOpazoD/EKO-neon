@@ -104,5 +104,6 @@ export function buildInput(display: { width: number; height: number }): SimInput
     anatomy: s.anatomy,
     imageFormation: s.imageFormation,
     artifactOverrides: s.artifactLab,
+    needSegments: s.ui.imageSegments || s.ui.navSegments || s.ui.segmentsOpen || s.ui.reviewMode,
   };
 }

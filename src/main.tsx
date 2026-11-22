@@ -2,9 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App';
 import { useHudStore, useSimStore } from './app/store';
-// the interface's own type, self-hosted (decision 198): Inter for text, JetBrains Mono for figures
-import '@fontsource-variable/inter';
-import '@fontsource-variable/jetbrains-mono';
+// the interface's own type, self-hosted (decision 198): Inter for text, JetBrains Mono for figures (latin + latin-ext only)
+import './app/fonts.css';
 import './app/styles.css';
 import type {
   compareBackends,

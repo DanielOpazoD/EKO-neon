@@ -148,7 +148,8 @@ export class AtlasRenderer implements RendererBackend {
       a.windowAttenuation === b.windowAttenuation &&
       a.seed === b.seed &&
       (a.beamWidth ?? 0) === (b.beamWidth ?? 0) &&
-      (a.sideLobe ?? 0) === (b.sideLobe ?? 0)
+      (a.sideLobe ?? 0) === (b.sideLobe ?? 0) &&
+      (a.spatialCompound ?? 0) === (b.spatialCompound ?? 0)
     );
   }
 

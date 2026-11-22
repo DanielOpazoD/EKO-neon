@@ -10,6 +10,7 @@ import { IconMinus, IconPlus } from './icons';
 export function ImageQuickBar() {
   const s = useSimStore(
     useShallow((st) => ({
+      autoOptimize: st.autoOptimize,
       depthCm: st.settings.depthCm,
       gainDb: st.settings.gainDb,
       setSettings: st.setSettings,
@@ -34,6 +35,16 @@ export function ImageQuickBar() {
         onLess={() => s.setSettings({ gainDb: s.gainDb - 2 })}
         onMore={() => s.setSettings({ gainDb: s.gainDb + 2 })}
       />
+      <i className="quick-sep" aria-hidden="true" />
+      <button
+        type="button"
+        className="quick-auto"
+        aria-label="Auto-optimizar ganancia y TGC"
+        data-tip="Auto-Opt (iScan)"
+        onClick={() => s.autoOptimize()}
+      >
+        Auto-Opt
+      </button>
     </div>
   );
 }

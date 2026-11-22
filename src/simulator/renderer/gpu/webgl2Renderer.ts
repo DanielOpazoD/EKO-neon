@@ -8,7 +8,9 @@ import type {
   RenderHints,
   RendererBackend,
   Scene,
+  TintMapId,
 } from '../types';
+import { tintMapIndex } from '../postprocess/tintMap';
 import { TISSUE_PROPS } from '@/simulator/anatomy/tissue';
 import { noiseLattice } from '@/core/noise';
 import { GLSL_COMMON } from './glslCommon';
@@ -60,6 +62,7 @@ export interface PresentRequest {
   width: number;
   height: number;
   color: PresentColor | null;
+  tintMap?: TintMapId;
   /** Equivalence checks: read the drawn RGBA (top row first) into this array instead of returning an ImageBitmap. */
   readback?: Uint8Array;
 }
@@ -88,6 +91,7 @@ const PRESENT_UNIFORMS = [
   'uLines',
   'uSamples',
   'uColorOn',
+  'uTintMap',
   'uBox',
   'uColorMap',
 ] as const;
@@ -180,6 +184,7 @@ export class Webgl2Renderer implements RendererBackend {
   private probe8 = new Uint8Array(4);
   private lastPresentMs = 0;
   private lastOutput: 'float' | 'display' = 'float';
+  private lastSegRead = true;
   private paramsTex: WebGLTexture;
   private noiseTex: WebGLTexture;
   private psfTex: WebGLTexture;
@@ -336,6 +341,7 @@ export class Webgl2Renderer implements RendererBackend {
       readMs: Number(this.lastReadMs.toFixed(2)),
       presentMs: Number(this.lastPresentMs.toFixed(2)),
       output: this.lastOutput,
+      segRead: this.lastSegRead ? 1 : 0,
       gpu: 'webgl2',
     };
   }
@@ -760,17 +766,17 @@ export class Webgl2Renderer implements RendererBackend {
     const w = spec.samples,
       h = spec.lines;
     this.formEnvelope(scene, beam, spec);
-    // read back: amplitude + transmission from D, ids from B. A one-texel read first waits for the GPU, so the
-    // stats separate GPU work (gpuMs) from the transfer of the frame (readMs).
+    // Read back amplitude + transmission from D and ids from B directly without a redundant 1×1 pipeline stall
     gl.readBuffer(gl.COLOR_ATTACHMENT0);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, this.probe);
-    const tGpu = performance.now();
-    this.lastGpuMs = tGpu - t0;
+    const tRead = performance.now();
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, this.readAmp);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
     gl.readBuffer(gl.COLOR_ATTACHMENT1);
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readIds);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const tDone = performance.now();
+    this.lastGpuMs = tRead - t0;
+    this.lastReadMs = tDone - tRead;
     const n = w * h;
     const amp = out.amplitude,
       tr = out.transmission,
@@ -789,7 +795,6 @@ export class Webgl2Renderer implements RendererBackend {
     this.packedFresh = false;
     this.lastOutput = 'float';
     this.lastMs = performance.now() - t0;
-    this.lastReadMs = performance.now() - tGpu;
   }
 
   /**
@@ -871,16 +876,20 @@ export class Webgl2Renderer implements RendererBackend {
     this.bindAt(5, this.texHist[this.histCurrent]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     for (let unit = 2; unit <= 5; unit++) this.bindAt(unit, null);
+    const readSeg = con.needSegments !== false;
     gl.readBuffer(gl.COLOR_ATTACHMENT1);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.probe8);
-    const tGpu = performance.now();
-    this.lastGpuMs = tGpu - t0;
+    const tRead = performance.now();
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readPacked);
-    // the LV segment map (decision 152): the ids of pass B, whose fourth channel the packed display has no room for
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
-    gl.readBuffer(gl.COLOR_ATTACHMENT1);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readIds);
+    if (readSeg) {
+      // the LV segment map (decision 152): the ids of pass B, whose fourth channel the packed display has no room for
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbB);
+      gl.readBuffer(gl.COLOR_ATTACHMENT1);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.readIds);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const tDone = performance.now();
+    this.lastGpuMs = tRead - t0;
+    this.lastReadMs = tDone - tRead;
     // a context lost during the frame reads nothing: decline before touching any state
     if (gl.isContextLost()) return false;
     this.histCurrent = next;
@@ -891,21 +900,31 @@ export class Webgl2Renderer implements RendererBackend {
     con.state.frameIndex++;
     const n = w * h;
     const rp = this.readPacked;
-    const ri = this.readIds;
     const st = out.structure,
       ti = out.tissue,
       tr = out.transmission,
       sg = out.segment;
-    for (let i = 0, o = 0; i < n; i++, o += 4) {
-      display[i] = rp[o]!;
-      st[i] = rp[o + 1]!;
-      ti[i] = rp[o + 2]!;
-      tr[i] = TRANS_DECODE[rp[o + 3]!]!;
-      sg[i] = ri[o + 3]!;
+    if (readSeg) {
+      const ri = this.readIds;
+      for (let i = 0, o = 0; i < n; i++, o += 4) {
+        display[i] = rp[o]!;
+        st[i] = rp[o + 1]!;
+        ti[i] = rp[o + 2]!;
+        tr[i] = TRANS_DECODE[rp[o + 3]!]!;
+        sg[i] = ri[o + 3]!;
+      }
+    } else {
+      for (let i = 0, o = 0; i < n; i++, o += 4) {
+        display[i] = rp[o]!;
+        st[i] = rp[o + 1]!;
+        ti[i] = rp[o + 2]!;
+        tr[i] = TRANS_DECODE[rp[o + 3]!]!;
+      }
+      sg.fill(0);
     }
+    this.lastSegRead = readSeg;
     this.lastOutput = 'display';
     this.lastMs = performance.now() - t0;
-    this.lastReadMs = performance.now() - tGpu;
     return true;
   }
 
@@ -938,6 +957,7 @@ export class Webgl2Renderer implements RendererBackend {
     gl.uniform1i(u.uLines, lut.lines);
     gl.uniform1i(u.uSamples, lut.samples);
     gl.uniform1i(u.uColorOn, color ? 1 : 0);
+    gl.uniform1i(u.uTintMap, tintMapIndex(req.tintMap));
     if (color) {
       const c = color.settings;
       gl.uniform4f(u.uBox, c.boxRMinCm, c.boxRMaxCm, c.boxThetaMinRad, c.boxThetaMaxRad);
@@ -1005,7 +1025,7 @@ export class Webgl2Renderer implements RendererBackend {
   }
 
   private ensureCompensation(s: AcquisitionSettings, spec: PolarFrameSpec): void {
-    const key = `${spec.samples}|${spec.depthCm}|${s.frequencyMHz}|${s.gainDb}|${s.tgcDb.join(',')}`;
+    const key = `${spec.samples}|${spec.depthCm}|${spec.focusCm}|${s.frequencyMHz}|${s.gainDb}|${s.depthCompensationDbPerCmMHz ?? ''}|${s.tgcDb.join(',')}`;
     if (key === this.compKey) return;
     if (this.compData.length !== spec.samples) this.compData = new Float32Array(spec.samples);
     consoleCompensation(s, spec, this.compData);

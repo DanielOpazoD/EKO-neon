@@ -1,4 +1,5 @@
-import type { PolarFrameSpec } from './types';
+import type { PolarFrameSpec, TintMapId } from './types';
+import { tintGrayByte, tintPackedLut } from './postprocess/tintMap';
 
 /**
  * Sector scan conversion: polar (line, sample) → cartesian RGBA. Apex at top-centre, radius = depth.
@@ -73,6 +74,9 @@ export interface ScanLut {
   inWs: Uint16Array; // sample weight × 1024
   inDl: Uint8Array; // 1 when a next line exists and carries weight
   inDs: Uint8Array; // 1 when a next sample exists and carries weight
+  /** Precomputed line and sample indices for inside pixels (avoids per-pixel division in scanConvertLut). */
+  inL0?: Int16Array;
+  inS0?: Int16Array;
   wl: Float32Array; // line interpolation weight
   ws: Float32Array; // sample interpolation weight
   li: Int16Array; // nearest line index (for colour/masks)
@@ -106,6 +110,8 @@ export function buildScanLut(spec: PolarFrameSpec, m: SectorMapping): ScanLut {
   const inWs = new Uint16Array(n);
   const inDl = new Uint8Array(n);
   const inDs = new Uint8Array(n);
+  const inL0 = new Int16Array(n);
+  const inS0 = new Int16Array(n);
   let count = 0;
   const invPx = 1 / m.pxPerCm;
   const maxR = depthCm;
@@ -157,6 +163,8 @@ export function buildScanLut(spec: PolarFrameSpec, m: SectorMapping): ScanLut {
       inWs[count] = wsQ;
       inDl[count] = wlQ > 0 && l0 < lines - 1 ? 1 : 0;
       inDs[count] = wsQ > 0 && s0 < samples - 1 ? 1 : 0;
+      inL0[count] = l0;
+      inS0[count] = s0;
       count++;
       li[p] = Math.min(lines - 1, Math.round(lf));
       si[p] = Math.min(samples - 1, Math.round(sf));
@@ -181,76 +189,220 @@ export function buildScanLut(spec: PolarFrameSpec, m: SectorMapping): ScanLut {
     inWs: inWs.slice(0, count),
     inDl: inDl.slice(0, count),
     inDs: inDs.slice(0, count),
+    inL0: inL0.slice(0, count),
+    inS0: inS0.slice(0, count),
   };
 }
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
+/** Precomputed 1024×4 Catmull-Rom basis weights (16 KB, L1-cache resident) for quantized 10-bit fractional coords. */
+const CR_WEIGHTS = (() => {
+  const lut = new Float32Array(1024 * 4);
+  for (let i = 0; i < 1024; i++) {
+    const t = i * (1 / 1024);
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const o = i << 2;
+    lut[o] = -0.5 * t + t2 - 0.5 * t3;
+    lut[o + 1] = 1 - 2.5 * t2 + 1.5 * t3;
+    lut[o + 2] = 0.5 * t + 2 * t2 - 1.5 * t3;
+    lut[o + 3] = -0.5 * t2 + 0.5 * t3;
+  }
+  return lut;
+})();
+
 /**
  * Gather polar intensities into RGBA using a prebuilt LUT. Pixels outside the sector are black.
- * Fast path: one native fill for the background and a fixed-point bilinear gather over the in-sector
- * list written as 32-bit pixels (≤ 1 gray level from the float reference).
+ * Uses clamped Catmull-Rom 4×4 bicubic interpolation (anti-ringing clamped to the local 2×2
+ * range) for crisp valve/endocardial borders in the far field, followed by an O(1) 256-entry
+ * clinical chroma/tint LUT lookup. Matches GPU `GLSL_PRESENT_FRAG` to ≤ 1 gray level.
  */
 export function scanConvertLut(
   polar: Uint8ClampedArray,
   lut: ScanLut,
   rgba: Uint8ClampedArray,
+  tintMap?: TintMapId,
 ): void {
   const n = lut.idx.length;
   if (LITTLE_ENDIAN && rgba.byteOffset % 4 === 0 && rgba.length >= n * 4) {
     const px = new Uint32Array(rgba.buffer, rgba.byteOffset, n);
     px.fill(0xff000000);
+    const tintLut = tintPackedLut(tintMap);
+    const cr = CR_WEIGHTS;
     const S = lut.samples;
-    const { inPix, inIdx, inWl, inWs, inDl, inDs } = lut;
+    const L = lut.lines;
+    const maxS = S - 1;
+    const maxL = L - 1;
+    const maxS2 = S - 2;
+    const maxL2 = L - 2;
+    const { inPix, inIdx, inWl, inWs, inL0, inS0 } = lut;
     const m = inPix.length;
     for (let k = 0; k < m; k++) {
-      const i = inIdx[k]!;
-      const dl = inDl[k]! * S;
-      const ds = inDs[k]!;
-      const lt = inWl[k]!;
-      const st = inWs[k]!;
-      const v00 = polar[i]!;
-      const v10 = polar[i + dl]!;
-      const v01 = polar[i + ds]!;
-      const v11 = polar[i + dl + ds]!;
-      const g =
-        ((v00 * (1024 - lt) + v10 * lt) * (1024 - st) + (v01 * (1024 - lt) + v11 * lt) * st) >>> 20;
-      px[inPix[k]!] = (0xff000000 | (g * 0x010101)) >>> 0;
+      let l0: number;
+      let s0: number;
+      if (inL0 && inS0) {
+        l0 = inL0[k]!;
+        s0 = inS0[k]!;
+      } else {
+        const i0 = inIdx[k]!;
+        l0 = (i0 / S) | 0;
+        s0 = i0 - l0 * S;
+      }
+
+      const os = inWs[k]! << 2;
+      const ws0 = cr[os]!;
+      const ws1 = cr[os + 1]!;
+      const ws2 = cr[os + 2]!;
+      const ws3 = cr[os + 3]!;
+
+      const ol = inWl[k]! << 2;
+      const wl0 = cr[ol]!;
+      const wl1 = cr[ol + 1]!;
+      const wl2 = cr[ol + 2]!;
+      const wl3 = cr[ol + 3]!;
+
+      let c0: number;
+      let c1: number;
+      let c2: number;
+      let c3: number;
+      let v00: number;
+      let v01: number;
+      let v10: number;
+      let v11: number;
+
+      if (l0 > 0 && l0 < maxL2 && s0 > 0 && s0 < maxS2) {
+        // Interior fast path (~97% of sector pixels): zero boundary clamps
+        const r1 = l0 * S + s0;
+        const r0 = r1 - S;
+        const r2 = r1 + S;
+        const r3 = r2 + S;
+
+        c0 = polar[r0 - 1]! * ws0 + polar[r0]! * ws1 + polar[r0 + 1]! * ws2 + polar[r0 + 2]! * ws3;
+        v00 = polar[r1]!;
+        v01 = polar[r1 + 1]!;
+        c1 = polar[r1 - 1]! * ws0 + v00 * ws1 + v01 * ws2 + polar[r1 + 2]! * ws3;
+        v10 = polar[r2]!;
+        v11 = polar[r2 + 1]!;
+        c2 = polar[r2 - 1]! * ws0 + v10 * ws1 + v11 * ws2 + polar[r2 + 2]! * ws3;
+        c3 = polar[r3 - 1]! * ws0 + polar[r3]! * ws1 + polar[r3 + 1]! * ws2 + polar[r3 + 2]! * ws3;
+      } else {
+        const sm1 = s0 > 0 ? s0 - 1 : 0;
+        const s1 = s0 < maxS ? s0 + 1 : maxS;
+        const s2 = s0 + 2 <= maxS ? s0 + 2 : maxS;
+
+        const lm1 = l0 > 0 ? l0 - 1 : 0;
+        const l1 = l0 < maxL ? l0 + 1 : maxL;
+        const l2 = l0 + 2 <= maxL ? l0 + 2 : maxL;
+
+        const r0 = lm1 * S;
+        const r1 = l0 * S;
+        const r2 = l1 * S;
+        const r3 = l2 * S;
+
+        c0 = polar[r0 + sm1]! * ws0 + polar[r0 + s0]! * ws1 + polar[r0 + s1]! * ws2 + polar[r0 + s2]! * ws3;
+        v00 = polar[r1 + s0]!;
+        v01 = polar[r1 + s1]!;
+        c1 = polar[r1 + sm1]! * ws0 + v00 * ws1 + v01 * ws2 + polar[r1 + s2]! * ws3;
+        v10 = polar[r2 + s0]!;
+        v11 = polar[r2 + s1]!;
+        c2 = polar[r2 + sm1]! * ws0 + v10 * ws1 + v11 * ws2 + polar[r2 + s2]! * ws3;
+        c3 = polar[r3 + sm1]! * ws0 + polar[r3 + s0]! * ws1 + polar[r3 + s1]! * ws2 + polar[r3 + s2]! * ws3;
+      }
+
+      let val = c0 * wl0 + c1 * wl1 + c2 * wl2 + c3 * wl3;
+      // Local 2×2 min/max anti-ringing clamp without variadic Math.min/max overhead
+      const loA = v00 < v10 ? v00 : v10;
+      const hiA = v00 > v10 ? v00 : v10;
+      const loB = v01 < v11 ? v01 : v11;
+      const hiB = v01 > v11 ? v01 : v11;
+      const lo = loA < loB ? loA : loB;
+      const hi = hiA > hiB ? hiA : hiB;
+      if (val < lo) val = lo;
+      else if (val > hi) val = hi;
+      px[inPix[k]!] = tintLut[(val + 0.5) | 0]!;
     }
     return;
   }
-  scanConvertLutReference(polar, lut, rgba);
+  scanConvertLutReference(polar, lut, rgba, tintMap);
 }
 
-/** Float bilinear gather (reference for the fast path and fallback on big-endian hosts). */
+/** Float clamped Catmull-Rom gather (reference for the fast path and fallback on big-endian hosts). */
 export function scanConvertLutReference(
   polar: Uint8ClampedArray,
   lut: ScanLut,
   rgba: Uint8ClampedArray,
+  tintMap?: TintMapId,
 ): void {
   const n = lut.idx.length;
   const S = lut.samples;
-  const lines = lut.lines;
+  const L = lut.lines;
+  const maxS = S - 1;
+  const maxL = L - 1;
+  const rgb: [number, number, number] = [0, 0, 0];
   for (let p = 0, o = 0; p < n; p++, o += 4) {
-    const i = lut.idx[p] ?? -1;
-    if (i < 0) {
+    const i0 = lut.idx[p] ?? -1;
+    if (i0 < 0) {
       rgba[o] = 0;
       rgba[o + 1] = 0;
       rgba[o + 2] = 0;
       rgba[o + 3] = 255;
       continue;
     }
-    const lt = lut.wl[p] ?? 0,
-      st = lut.ws[p] ?? 0;
-    const hasL = lt > 0 && i + S < lines * S;
-    const v00 = polar[i] ?? 0;
-    const v01 = st > 0 ? (polar[i + 1] ?? v00) : v00;
-    const v10 = hasL ? (polar[i + S] ?? v00) : v00;
-    const v11 = hasL && st > 0 ? (polar[i + S + 1] ?? v10) : v10;
-    const g = ((v00 * (1 - lt) + v10 * lt) * (1 - st) + (v01 * (1 - lt) + v11 * lt) * st) | 0;
-    rgba[o] = g;
-    rgba[o + 1] = g;
-    rgba[o + 2] = g;
+    const l0 = (i0 / S) | 0;
+    const s0 = i0 - l0 * S;
+    const fl = lut.wl[p] ?? 0;
+    const fs = lut.ws[p] ?? 0;
+    const sm1 = s0 > 0 ? s0 - 1 : 0;
+    const s1 = s0 < maxS ? s0 + 1 : maxS;
+    const s2 = s0 + 2 <= maxS ? s0 + 2 : maxS;
+    const lm1 = l0 > 0 ? l0 - 1 : 0;
+    const l1 = l0 < maxL ? l0 + 1 : maxL;
+    const l2 = l0 + 2 <= maxL ? l0 + 2 : maxL;
+    const r0 = lm1 * S,
+      r1 = l0 * S,
+      r2 = l1 * S,
+      r3 = l2 * S;
+    const fs2 = fs * fs,
+      fs3 = fs2 * fs;
+    const ws0 = -0.5 * fs + fs2 - 0.5 * fs3;
+    const ws1 = 1 - 2.5 * fs2 + 1.5 * fs3;
+    const ws2 = 0.5 * fs + 2 * fs2 - 1.5 * fs3;
+    const ws3 = -0.5 * fs2 + 0.5 * fs3;
+    const c0 =
+      (polar[r0 + sm1] ?? 0) * ws0 +
+      (polar[r0 + s0] ?? 0) * ws1 +
+      (polar[r0 + s1] ?? 0) * ws2 +
+      (polar[r0 + s2] ?? 0) * ws3;
+    const v00 = polar[r1 + s0] ?? 0;
+    const v01 = polar[r1 + s1] ?? 0;
+    const c1 =
+      (polar[r1 + sm1] ?? 0) * ws0 + v00 * ws1 + v01 * ws2 + (polar[r1 + s2] ?? 0) * ws3;
+    const v10 = polar[r2 + s0] ?? 0;
+    const v11 = polar[r2 + s1] ?? 0;
+    const c2 =
+      (polar[r2 + sm1] ?? 0) * ws0 + v10 * ws1 + v11 * ws2 + (polar[r2 + s2] ?? 0) * ws3;
+    const c3 =
+      (polar[r3 + sm1] ?? 0) * ws0 +
+      (polar[r3 + s0] ?? 0) * ws1 +
+      (polar[r3 + s1] ?? 0) * ws2 +
+      (polar[r3 + s2] ?? 0) * ws3;
+    const fl2 = fl * fl,
+      fl3 = fl2 * fl;
+    let val =
+      c0 * (-0.5 * fl + fl2 - 0.5 * fl3) +
+      c1 * (1 - 2.5 * fl2 + 1.5 * fl3) +
+      c2 * (0.5 * fl + 2 * fl2 - 1.5 * fl3) +
+      c3 * (-0.5 * fl2 + 0.5 * fl3);
+    const lo = Math.min(v00, v10, v01, v11);
+    const hi = Math.max(v00, v10, v01, v11);
+    if (val < lo) val = lo;
+    else if (val > hi) val = hi;
+    const g = Math.floor(val + 0.5);
+    tintGrayByte(g, tintMap, rgb);
+    rgba[o] = rgb[0];
+    rgba[o + 1] = rgb[1];
+    rgba[o + 2] = rgb[2];
     rgba[o + 3] = 255;
   }
 }
@@ -261,9 +413,10 @@ export function scanConvert(
   spec: PolarFrameSpec,
   m: SectorMapping,
   rgba: Uint8ClampedArray,
+  tintMap?: TintMapId,
 ): void {
   const lut = buildScanLut(spec, m);
-  scanConvertLut(polar, lut, rgba);
+  scanConvertLut(polar, lut, rgba, tintMap);
 }
 
 /** Bit 11 of the third texel channel: the pixel lies inside the sector. */

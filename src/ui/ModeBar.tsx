@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSlidingPill } from './useSlidingPill';
 import { useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
 import { exportCaseTag, modePolicy } from '@/app/modePolicy';
-import { exportDisplayPng } from '@/app/exportImage';
+import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
 import { useRestartTutorial } from './Tutorial';
 import { IconPause, IconPlay, IconSliders, IconTorso } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
@@ -19,11 +19,14 @@ export function ModeBar() {
   const s = useSimStore(
     useShallow((st) => ({
       cineOffset: st.cineOffset,
+      cineSpeed: st.cineSpeed,
       fpsUi: st.fpsUi,
       frozen: st.frozen,
+      jumpCinePhase: st.jumpCinePhase,
       modality: st.modality,
       mode: st.mode,
       setCineOffset: st.setCineOffset,
+      setCineSpeed: st.setCineSpeed,
       setModality: st.setModality,
       setUi: st.setUi,
       toggleFreeze: st.toggleFreeze,
@@ -68,7 +71,60 @@ export function ModeBar() {
       </button>
       {s.frozen && hud && (
         <div className="cine">
-          <CinePlay length={hud.cineLength} spanS={hud.cineWindow.endS - hud.cineWindow.startS} />
+          <CinePlay
+            length={hud.cineLength}
+            spanS={hud.cineWindow.endS - hud.cineWindow.startS}
+            speed={s.cineSpeed}
+          />
+          <button
+            type="button"
+            className="cine-chip"
+            aria-label="Cuadro anterior"
+            data-tip="Cuadro anterior"
+            disabled={s.cineOffset <= -(hud.cineLength - 1)}
+            onClick={() => s.setCineOffset(s.cineOffset - 1)}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            className="cine-chip"
+            aria-label="Cuadro siguiente"
+            data-tip="Cuadro siguiente"
+            disabled={s.cineOffset >= 0}
+            onClick={() => s.setCineOffset(s.cineOffset + 1)}
+          >
+            ›
+          </button>
+          <button
+            type="button"
+            className="cine-chip"
+            aria-label={`Velocidad del cine ${s.cineSpeed}×`}
+            data-tip="Cambiar velocidad del bucle (1× / 0.5× / 0.25×)"
+            onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
+          >
+            {s.cineSpeed}×
+          </button>
+          <button
+            type="button"
+            className="cine-chip cine-phase"
+            aria-label="Ir a telediástole"
+            data-tip="Saltar a telediástole (TD · onda R)"
+            disabled={hud.cineLength < 2}
+            onClick={() => s.jumpCinePhase('ed')}
+          >
+            TD
+          </button>
+          <button
+            type="button"
+            className="cine-chip cine-phase"
+            aria-label="Ir a telesístole"
+            data-tip="Saltar a telesístole (TS · volumen mínimo VI)"
+            disabled={hud.cineLength < 2}
+            onClick={() => s.jumpCinePhase('es')}
+          >
+            TS
+          </button>
           <input
             type="range"
             aria-label="Cine"
@@ -78,7 +134,7 @@ export function ModeBar() {
             onChange={(e) => s.setCineOffset(Number(e.target.value))}
           />
           <span className="small cine-read">
-            cuadro {hud.cineLength + s.cineOffset}/{hud.cineLength} · fase{' '}
+            {hud.cineLength + s.cineOffset}/{hud.cineLength} ·{' '}
             {(hud.cineFramePhase * 100).toFixed(0)}%
           </span>
         </div>
@@ -152,6 +208,7 @@ function OverflowMenu() {
   const policy = modePolicy(s.mode);
   const restartTutorial = useRestartTutorial();
   const { open, setOpen, wrap } = usePopover();
+  const [recording, setRecording] = useState(false);
 
   return (
     <div className="menu-wrap" ref={wrap}>
@@ -234,6 +291,17 @@ function OverflowMenu() {
             }}
           />
           <ActionItem
+            label={recording ? 'Grabando clip WebM…' : 'Exportar clip WebM (3 s)'}
+            onClick={() => {
+              if (recording) return;
+              setRecording(true);
+              setOpen(false);
+              void recordDisplayClip(exportCaseTag(s.mode, s.examFinished, s.caseId), 3000).finally(
+                () => setRecording(false),
+              );
+            }}
+          />
+          <ActionItem
             label="Atajos de teclado"
             onClick={() => {
               s.setUi({ shortcutsOpen: true });
@@ -258,16 +326,24 @@ function OverflowMenu() {
  * newest wraps to the oldest. The loop lives in the store, so any frame picked by hand, a tool, review mode or the
  * freeze stops it (decision 197); the button keeps one name and says whether it plays with aria-pressed.
  */
-function CinePlay({ length, spanS }: { length: number; spanS: number }) {
+function CinePlay({
+  length,
+  spanS,
+  speed,
+}: {
+  length: number;
+  spanS: number;
+  speed: 0.25 | 0.5 | 1;
+}) {
   const playing = useSimStore((st) => st.cinePlaying);
   const setPlaying = useSimStore((st) => st.setCinePlaying);
   const stepCine = useSimStore((st) => st.stepCine);
   useEffect(() => {
     if (!playing || length < 2) return;
-    const frameMs = (1000 * Math.max(0.1, spanS)) / (length - 1);
+    const frameMs = (1000 * Math.max(0.1, spanS)) / (length - 1) / speed;
     const id = setInterval(stepCine, frameMs);
     return () => clearInterval(id);
-  }, [playing, length, spanS, stepCine]);
+  }, [playing, length, spanS, speed, stepCine]);
   return (
     <button
       className={`icon-btn${playing ? ' active' : ''}`}

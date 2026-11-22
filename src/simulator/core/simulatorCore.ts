@@ -22,7 +22,9 @@ import {
 } from '@/simulator/cardiac-cycle/respiration';
 import { ejectionTimeS, preEjectionPeriodS } from '@/simulator/cardiac-cycle/timing';
 import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
-import { ecgSample } from '@/simulator/cardiac-cycle/ecg';
+import { EcgRing } from './ecgRing';
+import { ColorFieldDriver } from './colorFieldDriver';
+import { ExperimentalLoaders } from './experimentalLoaders';
 import { isSpectralModality, isStripModality } from '@/simulator/renderer/modality';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import { createWebgl2Renderer, type Webgl2Renderer } from '@/simulator/renderer/gpu/webgl2Renderer';
@@ -47,6 +49,7 @@ import {
   type ArtifactSettings,
   type ConsoleState,
 } from '@/simulator/renderer/postprocess/consolePipeline';
+import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
 import {
   caseArtifactLevels,
   consoleArtifacts,
@@ -75,20 +78,12 @@ import { explainPointAt } from './explainPoint';
 import { analyzeView, type ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 import {
   buildFlowParams,
-  sampleFlow,
   type FlowFieldParams,
-  type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
-import {
-  allocColorField,
-  computeColorField,
-  overlayColorField,
-  type ColorField,
-} from '@/simulator/doppler/color/colorDoppler';
+import { overlayColorField, type ColorField } from '@/simulator/doppler/color/colorDoppler';
 import { spectralRange } from '@/simulator/doppler/spectral/spectrum';
 import { computeGroundTruth, type StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type {
-  EcgPoint,
   PhaseMarks,
   QualityTier,
   SimInput,
@@ -99,10 +94,6 @@ import type {
 } from './protocol';
 import { resolveQualityTier } from './quality';
 import type { AssetFetcher } from '@/simulator/anatomy/roderoAsset';
-import type * as RoderoHeartModule from '@/simulator/core/roderoHeart';
-import type * as ColeImageModule from '@/simulator/core/coleImage';
-import type { LabelVolume, VolumeHeart } from '@/simulator/anatomy/volumeHeart';
-import type { HeartVolumeGpu } from '@/simulator/renderer/types';
 import { MMODE_TRACE_SHARE } from './mmodeStrip';
 import { StripEngine, type StripCtx } from './stripEngine';
 
@@ -111,9 +102,6 @@ import { StripEngine, type StripCtx } from './stripEngine';
  * Owns: case models, cardiac clock, renderer backend, console state, cine ring, Doppler strips,
  * ECG ring and view analysis. The UI only sends inputs and draws outputs + overlays.
  */
-const ECG_HZ = 200;
-/** ECG kept and sent before the oldest cine frame, so its beat reads at the left edge of a frozen strip (s). */
-const CINE_ECG_MARGIN_S = 0.3;
 
 export class SimulatorCore {
   readonly caseDef: CaseDefinition;
@@ -136,25 +124,8 @@ export class SimulatorCore {
     thorax: ThoraxModel;
   }>();
   private procedural = new ProceduralSliceRenderer();
-  /**
-   * The experimental anatomy (decision 352): the shipped Rodero volume, loaded once on demand, and the volume heart bound
-   * to the current heart model with its end-diastolic pose: the CPU tracer and the GPU port each read it (decision 353).
-   */
-  private readonly fetchAsset: AssetFetcher;
-  private roderoLib: typeof RoderoHeartModule | null = null;
-  private roderoVolume: LabelVolume | null = null;
-  private roderoLoad: Promise<void> | null = null;
-  private roderoFailure: string | null = null;
-  /** The experimental image formation (decision 354), loaded once on demand. */
-  private coleLib: typeof ColeImageModule | null = null;
-  private coleLoad: Promise<void> | null = null;
-  private coleFailure: string | null = null;
-  private roderoBound: {
-    heart: HeartModel;
-    vh: VolumeHeart;
-    gpu: HeartVolumeGpu;
-    endDiastole: HeartPose;
-  } | null = null;
+  /** Lazy loaders for the experimental Rodero volume heart and Cole convolution image formation (decisions 352–354). */
+  private experimental: ExperimentalLoaders;
   /** The CPU tracer of review mode's point explanation (decision 340), made on first use. */
   private explainTracer: ProceduralSliceRenderer | null = null;
   private atlas: AtlasRenderer;
@@ -176,44 +147,32 @@ export class SimulatorCore {
   }
   private input: SimInput;
   private acquisitionModality: SimInput['modality'];
-  private colorAcquisitionKey = '';
   /** Phase of the last frame handed out (live or cine): what a review marker refers to. */
   private displayedFrame: CineFrame | undefined;
   private frame: PolarFrame | null = null;
   private display: Uint8ClampedArray | null = null;
-  /** The two colour field buffers: each update writes the one that does not hold `colorPrev` (decision 56). */
-  private colorBuffers: [ColorField, ColorField] | null = null;
-  /**
-   * Field of the latest colour update: the composite, the cine and the GPU present pass show it, and the next update
-   * blends it (persistence). Null until the first update after a polar spec or modality change.
-   */
-  private colorPrev: ColorField | null = null;
-  private colorFrameCounter = 0;
+  /** Double-buffered Color Doppler polar field & packet cadence driver (decision 56). */
+  private colorDriver = new ColorFieldDriver();
   private colorFps = 0;
-  /** Incremented whenever the colour field is recomputed (the GPU present pass uploads it only then). */
-  private colorVersion = 0;
   /** The display of the last rendered frame was formed on the GPU and is still there (decision 54). */
   private displayOnGpu = false;
   private cine = new CineBuffer();
   private frameId = 0;
   private timeS = 0;
   private frameAccumulator = 0;
-  /** Simulated frame interval of the current step, and the simulation time of the last B-mode and colour frames (decision 94). */
+  /** Simulated frame interval of the current step, and the simulation time of the last B-mode frame (decision 94). */
   private frameIntervalS = 1 / 30;
   private lastFrameTimeS = NaN;
-  private lastColorTimeS = NaN;
   private lastPersistence = 0;
   private lastAnalysis: ViewAnalysis | null = null;
   private analysisCounter = 0;
-  private ecg: EcgPoint[] = [];
-  private ecgAccum = 0;
+  private ecgRing = new EcgRing();
   /** Spectral and M-mode strips: columns, displayed image, gate/auto-trace read-outs (decisions 84, 115). */
   private strips = new StripEngine();
   private patientKey = '';
   private rgbaPool: ArrayBuffer[] = [];
   /** Bumped when the patient models are rebuilt: traced lines and gate flow of the old models are stale. */
   private modelVersion = 0;
-  private flowSample: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
   private lastOutputBeam: BeamFrame | null = null;
   private lastSector: (SectorMapping & { x: number; y: number }) | null = null;
   private lastStrip: StripInfo | null = null;
@@ -233,7 +192,9 @@ export class SimulatorCore {
 
   constructor(caseDef: CaseDefinition, input: SimInput, options: SimulatorCoreOptions = {}) {
     this.caseDef = caseDef;
-    this.fetchAsset = options.fetchAsset ?? fetchFromAppBase;
+    this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () =>
+      this.atlas.invalidate(),
+    );
     this.input = constrainAcquisition(input);
     this.acquisitionModality = input.modality;
     const models = buildCaseModels(caseDef, input.patient);
@@ -425,7 +386,7 @@ export class SimulatorCore {
       this.applyArtifactOverrides(input.artifactOverrides);
     if (!input.frozen && input.modality !== this.acquisitionModality) {
       this.strips.reset();
-      this.colorPrev = null;
+      this.colorDriver.resetHistory();
       this.acquisitionModality = input.modality;
     }
     this.input = constrainAcquisition(input);
@@ -493,7 +454,16 @@ export class SimulatorCore {
     this.syncBeatTables();
     this.rememberBeat();
     if (this.tablesVersion !== previousTablesVersion) this.atlas.invalidate();
-    this.accumulateEcg(pre.timeInBeatS, pre.rrS, dt);
+    this.ecgRing.advance(
+      pre.timeInBeatS,
+      pre.rrS,
+      dt,
+      this.timeS,
+      this.cine.oldest?.timeS,
+      this.caseDef.rhythm,
+      this.clock.current.beatIndex,
+      this.caseDef.seed,
+    );
     // the trace budget of the M-mode lines follows the frame interval, not the step: a late step must not buy a longer one
     if (isStrip)
       this.strips.advance(dt, beam, spec, (MMODE_TRACE_SHARE * 1000) / fps, this.stripCtx());
@@ -543,31 +513,6 @@ export class SimulatorCore {
     this.displayOnGpu = false;
   }
 
-  private accumulateEcg(timeInBeatStart: number, rrS: number, dt: number): void {
-    this.ecgAccum += dt;
-    const step = 1 / ECG_HZ;
-    let t = timeInBeatStart;
-    while (this.ecgAccum >= step) {
-      this.ecgAccum -= step;
-      t += step;
-      const tb = t % rrS;
-      const v = ecgSample(
-        tb,
-        rrS,
-        this.caseDef.rhythm,
-        this.clock.current.beatIndex,
-        this.caseDef.seed,
-      );
-      this.ecg.push({ t: this.timeS - this.ecgAccum, v });
-    }
-    // six seconds, and at least back to the oldest cine frame, so a frozen strip can show the whole cine (decision 197)
-    const cutoff = Math.min(
-      this.timeS - 6,
-      (this.cine.oldest?.timeS ?? this.timeS) - CINE_ECG_MARGIN_S,
-    );
-    while (this.ecg.length && (this.ecg[0]?.t ?? 0) < cutoff) this.ecg.shift();
-  }
-
   private physics(): ScenePhysics {
     return scenePhysicsFor(this.caseDef, this.input.settings, {
       artifacts: this.artifactLevels,
@@ -579,8 +524,8 @@ export class SimulatorCore {
   private scene(phase: number): Scene {
     const state = cycleStateAt(this.tables, phase, this.flow.flowPeaks);
     const heartPose = computeHeartPose(this.heart, state);
-    const rodero = this.roderoHeart();
-    const cole = this.coleImage();
+    const rodero = this.experimental.roderoHeart(this.input.anatomy, this.heart, this.tables);
+    const cole = this.experimental.coleImage(this.input.imageFormation);
     return {
       heart: this.heart,
       heartPose,
@@ -599,81 +544,14 @@ export class SimulatorCore {
     };
   }
 
-  /**
-   * The Rodero volume heart bound to the current heart model, when the experimental anatomy is chosen and its volume has
-   * arrived; starts loading it the first time it is asked for. Null otherwise (the analytic heart draws meanwhile).
-   */
-  private roderoHeart(): { vh: VolumeHeart; gpu: HeartVolumeGpu; endDiastole: HeartPose } | null {
-    if (this.input.anatomy !== 'rodero') return null;
-    if (!this.roderoLoad)
-      this.roderoLoad = import('@/simulator/core/roderoHeart')
-        .then(async (lib) => {
-          this.roderoVolume = await lib.loadRoderoVolume(this.fetchAsset);
-          this.roderoLib = lib;
-          // the atlas kept the analytic heart's frames while the volume was on its way
-          this.atlas.invalidate();
-        })
-        .catch((e: unknown) => {
-          this.roderoFailure = e instanceof Error ? e.message : String(e);
-        });
-    if (!this.roderoLib || !this.roderoVolume) return null;
-    if (this.roderoBound?.heart !== this.heart) {
-      const endDiastole = computeHeartPose(this.heart, cycleStateAt(this.tables, 0));
-      const vh = this.roderoLib.volumeHeart(this.roderoVolume, this.heart, endDiastole);
-      this.roderoBound = {
-        heart: this.heart,
-        vh,
-        gpu: this.roderoLib.volumeHeartGpu(vh, endDiastole),
-        endDiastole,
-      };
-    }
-    return this.roderoBound;
-  }
-
-  /**
-   * The convolution image formation, when the experimental image is chosen and its chunk has arrived; starts loading it
-   * the first time it is asked for. Null otherwise (the lattice image forms meanwhile).
-   */
-  private coleImage(): typeof ColeImageModule | null {
-    if (this.input.imageFormation !== 'cole') return null;
-    if (!this.coleLoad)
-      this.coleLoad = import('@/simulator/core/coleImage')
-        .then((lib) => {
-          this.coleLib = lib;
-          // the atlas kept the lattice image's frames while the chunk was on its way
-          this.atlas.invalidate();
-        })
-        .catch((e: unknown) => {
-          this.coleFailure = e instanceof Error ? e.message : String(e);
-        });
-    return this.coleLib;
-  }
-
   /** Resolves when the experimental image formation has arrived or failed (tests and tools). */
   async coleReady(): Promise<void> {
-    this.coleImage();
-    await this.coleLoad;
-  }
-
-  /** How the frames form the image, for the Dev panel. */
-  private imageFormationStatus(): string {
-    if (this.input.imageFormation !== 'cole') return 'red';
-    if (this.coleFailure) return `convolución: error (${this.coleFailure})`;
-    return this.coleLib ? 'convolución' : 'convolución (cargando…)';
+    await this.experimental.coleReady(this.input.imageFormation);
   }
 
   /** Resolves when the experimental anatomy's volume has arrived or failed (tests and tools). */
   async roderoReady(): Promise<void> {
-    this.roderoHeart();
-    await this.roderoLoad;
-  }
-
-  /** What heart the frames draw, for the Dev panel. */
-  private anatomyStatus(): string {
-    if (this.input.anatomy !== 'rodero') return 'analítica';
-    if (this.roderoFailure) return `Rodero: error (${this.roderoFailure})`;
-    if (!this.roderoLib || !this.roderoVolume) return 'Rodero (cargando…)';
-    return this.backend === this.procedural ? 'Rodero (CPU)' : 'Rodero (GPU)';
+    await this.experimental.roderoReady(this.input.anatomy, this.heart, this.tables);
   }
 
   private renderFrame(beam: BeamFrame, spec: PolarFrameSpec): void {
@@ -688,12 +566,8 @@ export class SimulatorCore {
       this.frame = allocPolarFrame(spec);
       this.display = new Uint8ClampedArray(spec.lines * spec.samples);
       this.consoleState = createConsoleState(this.caseDef.seed);
-      this.colorBuffers = [
-        allocColorField(spec.lines * spec.samples),
-        allocColorField(spec.lines * spec.samples),
-      ];
-      this.colorPrev = null;
-      this.lastFrameTimeS = this.lastColorTimeS = NaN;
+      this.colorDriver.resize(spec.lines * spec.samples);
+      this.lastFrameTimeS = NaN;
     }
     this.frame.spec = spec;
     // persistence decays with simulated time, not per frame the renderer managed to produce (decision 94)
@@ -718,40 +592,38 @@ export class SimulatorCore {
       budgetMs: this.frameBudgetMs,
       sceneAtPhase: (ph) => this.scene(ph),
     };
+    const needSegments = (inp.needSegments ?? true) || (this.analysisCounter + 1) % 5 === 1;
     if (this.gpu?.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
-    let onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings);
+    let onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     if (this.gpu?.contextLost) {
       // lost while forming this frame: nothing valid was read back, so form it again with the CPU tracer
       this.dropGpu('WebGL context lost: CPU tracer');
-      onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings);
+      onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     }
     this.displayOnGpu = onGpu;
     let colorVel: Float32Array | null = null;
     let colorVar: Float32Array | null = null;
     if (inp.modality === 'color') {
-      const colorKey = JSON.stringify([
-        inp.probe,
-        inp.color,
-        scene.physics.frequencyMHz,
-        scene.physics.harmonics,
-        this.modelVersion,
-        spec.lines,
-        spec.samples,
-        spec.depthCm,
-        spec.sectorRad,
-      ]);
-      if (colorKey !== this.colorAcquisitionKey) {
-        this.colorPrev = null;
-        this.colorAcquisitionKey = colorKey;
-      }
-      this.colorFrameCounter++;
-      // colour packets cost frames: update the colour field every other B-mode frame
-      if (this.colorFrameCounter % 2 === 0 || !this.colorPrev)
-        this.computeColor(scene, beam, spec, phase);
-      if (this.colorPrev) {
-        colorVel = this.colorPrev.vel;
-        colorVar = this.colorPrev.variance;
-      }
+      const cOut = this.colorDriver.step({
+        frame: this.frame,
+        scene,
+        heart: this.heart,
+        flow: this.flow,
+        tables: this.tables,
+        beam,
+        spec,
+        phase,
+        probe: inp.probe,
+        color: inp.color,
+        frequencyMHz: inp.settings.frequencyMHz,
+        harmonics: inp.settings.harmonics,
+        modelVersion: this.modelVersion,
+        timeS: this.timeS,
+        frameIntervalS: this.frameIntervalS,
+        seed: this.caseDef.seed,
+      });
+      colorVel = cOut.vel;
+      colorVar = cOut.variance;
     }
     this.analysisCounter++;
     if (this.analysisCounter % 5 === 1) {
@@ -784,8 +656,8 @@ export class SimulatorCore {
         phaseMarks: this.phaseMarks(),
         stripAcquisitionId: isStripModality(inp.modality) ? this.strips.historyId : null,
         colorTimeS:
-          inp.modality === 'color' && Number.isFinite(this.lastColorTimeS)
-            ? this.lastColorTimeS
+          inp.modality === 'color' && Number.isFinite(this.colorDriver.lastTimeS)
+            ? this.colorDriver.lastTimeS
             : null,
       },
       scene,
@@ -824,6 +696,7 @@ export class SimulatorCore {
     phase: number,
     hints: RenderHints,
     settings: AcquisitionSettings,
+    needSegments: boolean,
   ): boolean {
     const frame = this.frame!;
     const display = this.display!;
@@ -837,7 +710,7 @@ export class SimulatorCore {
         phase,
         frame,
         hints,
-        { settings, state: this.consoleState },
+        { settings, state: this.consoleState, needSegments },
         display,
       ) === true
     ) {
@@ -851,74 +724,6 @@ export class SimulatorCore {
     applyConsole(frame, settings, this.consoleState, display, this.artifacts);
     this.timing.consoleMs = performance.now() - tc;
     return false;
-  }
-
-  private computeColor(scene: Scene, beam: BeamFrame, spec: PolarFrameSpec, phase: number): void {
-    const frame = this.frame!;
-    const hf = this.heart.frame;
-    const fs = this.flowSample;
-    const { samples, sectorRad, lines, depthCm } = spec;
-    const dr = depthCm / samples;
-    const flow = this.flow;
-    const tables = this.tables;
-    const hp = scene.heartPose;
-    // write into the buffer that does not hold the previous field, which persistence blends
-    const [a, b] = this.colorBuffers!;
-    const out = this.colorPrev === a ? b : a;
-    // the colour field updates every other B-mode frame: its persistence decays over that nominal interval (decision 94)
-    const colorElapsed = Number.isFinite(this.lastColorTimeS)
-      ? this.timeS - this.lastColorTimeS
-      : 2 * this.frameIntervalS;
-    this.lastColorTimeS = this.timeS;
-    computeColorField(
-      frame,
-      {
-        ...this.input.color,
-        persistence: persistenceOverTime(
-          this.input.color.persistence,
-          colorElapsed,
-          2 * this.frameIntervalS,
-        ),
-      },
-      this.colorPrev,
-      (_idx, li, si, o) => {
-        const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
-        const ct = Math.cos(theta),
-          sn = Math.sin(theta);
-        const dx = beam.forward.x * ct + beam.lateral.x * sn;
-        const dy = beam.forward.y * ct + beam.lateral.y * sn;
-        const dz = beam.forward.z * ct + beam.lateral.z * sn;
-        const r = (si + 0.5) * dr;
-        const px = beam.origin.x + dx * r,
-          py = beam.origin.y + dy * r,
-          pz = beam.origin.z + dz * r;
-        const hx =
-          (px - hf.origin.x) * hf.ex.x +
-          (py - hf.origin.y) * hf.ex.y +
-          (pz - hf.origin.z) * hf.ex.z;
-        const hy =
-          (px - hf.origin.x) * hf.ey.x +
-          (py - hf.origin.y) * hf.ey.y +
-          (pz - hf.origin.z) * hf.ey.z;
-        const hz =
-          (px - hf.origin.x) * hf.ez.x +
-          (py - hf.origin.y) * hf.ez.y +
-          (pz - hf.origin.z) * hf.ez.z;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
-        const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
-        const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
-        const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
-        o.v = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz); // + = toward the transducer
-        o.disp = fs.dispersion;
-        o.present = fs.present;
-      },
-      out,
-      { frequencyMHz: this.input.settings.frequencyMHz, harmonics: this.input.settings.harmonics },
-      // every update is a new estimate from new echoes (decision 116)
-      { realization: this.colorVersion, seed: this.caseDef.seed },
-    );
-    this.colorPrev = out;
-    this.colorVersion++;
   }
 
   /** Cardiac phase landmarks as fractions of RR (for phase checks in the technique engine). */
@@ -984,12 +789,26 @@ export class SimulatorCore {
     if (req.kind === 'canonicalControl') {
       const view = getViewTarget(req.viewId);
       // the Rodero heart's four-chamber plane passes through its own crux (decision 360)
-      const rodero = this.input.anatomy === 'rodero' ? this.roderoHeart() : null;
+      const rodero =
+        this.input.anatomy === 'rodero'
+          ? this.experimental.roderoHeart(this.input.anatomy, this.heart, this.tables)
+          : null;
       const c = rodero?.vh.crux();
       return {
         kind: 'canonicalControl',
         control: controlThroughCrux(view, this.heart, this.thorax, c ? v3(c[0], c[1], c[2]) : null),
       };
+    }
+    if (req.kind === 'autoOpt') {
+      if (!this.display || !this.frame) return null;
+      const opt = computeAutoOpt(this.display, this.frame.tissue, this.frame.spec, this.input.settings);
+      return { kind: 'autoOpt', gainDb: opt.gainDb, tgcDb: opt.tgcDb };
+    }
+    if (req.kind === 'cinePhaseJump') {
+      const targetPhase = req.target === 'es' ? this.phaseMarks().endSystole : 0;
+      const found = this.cine.findNearestPhaseOffset(targetPhase);
+      if (!found) return null;
+      return { kind: 'cinePhaseJump', offset: found.offset, phase: found.phase };
     }
     if (
       this.input.frozen &&
@@ -1043,16 +862,14 @@ export class SimulatorCore {
     );
     const key = lutKey(fspec, mapping);
     if (!this.lut || this.lut.key !== key) this.lut = buildScanLut(fspec, mapping);
-    const colorVel = cf
-      ? cf.colorVel
-      : inp.modality === 'color' && this.colorPrev
-        ? this.colorPrev.vel
-        : null;
+    const colorCur = this.colorDriver.current;
+    const colorVel = cf ? cf.colorVel : inp.modality === 'color' && colorCur ? colorCur.vel : null;
     const colorVar = cf
       ? cf.colorVar
-      : inp.modality === 'color' && this.colorPrev
-        ? this.colorPrev.variance
+      : inp.modality === 'color' && colorCur
+        ? colorCur.variance
         : null;
+    const tintMap = inp.settings.tintMap;
     // a live 2D or colour frame whose display was formed on the GPU is scan-converted there as well and travels
     // as an ImageBitmap (decision 54); strips, cine review and the CPU console keep the CPU composite
     let bitmap: ImageBitmap | null = null;
@@ -1063,11 +880,11 @@ export class SimulatorCore {
           ? {
               vel: colorVel,
               variance: colorVar,
-              version: this.colorVersion,
+              version: this.colorDriver.version,
               settings: colorSettings,
             }
           : null;
-      bitmap = this.gpu.present({ lut: this.lut, width: W, height: sectorH, color });
+      bitmap = this.gpu.present({ lut: this.lut, width: W, height: sectorH, color, tintMap });
     }
     this.timing.presentMs = bitmap ? performance.now() - tp : 0;
     const buffer = bitmap ? new ArrayBuffer(0) : this.takeBuffer(W * H * 4);
@@ -1075,7 +892,7 @@ export class SimulatorCore {
     if (!bitmap) {
       // the sector occupies the top rows of the composite: scan-convert straight into the buffer
       const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
-      scanConvertLut(display, this.lut, sectorRgba);
+      scanConvertLut(display, this.lut, sectorRgba, tintMap);
       if (colorVel && colorVar)
         overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings);
     }
@@ -1097,7 +914,7 @@ export class SimulatorCore {
       kind: null,
     };
     if (isStrip && (!cf || cf.acquisition.stripAcquisitionId === this.strips.historyId))
-      strip = this.strips.drawStrip(rgba, W, H, sectorH);
+      strip = this.strips.drawStrip(rgba, W, H, sectorH, tintMap);
     const view = cf ? cf.analysis : this.lastAnalysis;
     const c = this.clock.current;
     const structure = cf ? cf.structure : this.frame ? this.frame.structure : new Uint8Array(0);
@@ -1107,17 +924,7 @@ export class SimulatorCore {
       : isStrip
         ? this.strips.gateInfo(beam, fspec, c.phase, structure, this.stripCtx())
         : null;
-    // live, the last 1200 samples (6 s); frozen, back to the oldest cine frame, which a slow cadence puts further
-    let from = Math.max(0, this.ecg.length - 1200);
-    if (frozen) {
-      const t0 = (this.cine.oldest?.timeS ?? this.timeS) - CINE_ECG_MARGIN_S;
-      while (from > 0 && (this.ecg[from - 1]?.t ?? -Infinity) >= t0) from--;
-    }
-    const ecgTail = new Float64Array(2 * (this.ecg.length - from));
-    for (let i = from, k = 0; i < this.ecg.length; i++, k += 2) {
-      ecgTail[k] = this.ecg[i]!.t;
-      ecgTail[k + 1] = this.ecg[i]!.v;
-    }
+    const ecgTail = this.ecgRing.extractTail(frozen, this.timeS, this.cine.oldest?.timeS);
     this.lastOutputBeam = beam;
     const sector = { ...mapping, x: 0, y: 0 };
     this.lastSector = sector;
@@ -1168,8 +975,8 @@ export class SimulatorCore {
       stats: {
         ...this.backend.stats(),
         backend: this.backend.id,
-        anatomy: this.anatomyStatus(),
-        imagen: this.imageFormationStatus(),
+        anatomy: this.experimental.anatomyStatus(this.input.anatomy, this.backend === this.procedural),
+        imagen: this.experimental.imageFormationStatus(this.input.imageFormation),
         gpu: this.gpuReason,
         tier: this.tier,
         lines: spec.lines,
@@ -1226,7 +1033,7 @@ export class SimulatorCore {
   }
   /** Colour field of the latest update (null before the first) and its version, which keys the GPU present upload. */
   get lastColorField(): { field: ColorField | null; version: number } {
-    return { field: this.colorPrev, version: this.colorVersion };
+    return { field: this.colorDriver.current, version: this.colorDriver.version };
   }
   get currentPhase(): number {
     return this.clock.current.phase;

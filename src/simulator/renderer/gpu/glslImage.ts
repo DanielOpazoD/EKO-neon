@@ -11,6 +11,7 @@ import {
 } from '../postprocess/consolePipeline';
 import { colorMapDefinesGlsl } from '../postprocess/colorMap';
 import { sriDefinesGlsl } from '../postprocess/sriFilter';
+import { tintMapGlsl } from '../postprocess/tintMap';
 import { psfDefinesGlsl } from '../acoustic/psf';
 import { TRANS_K } from '../transmissionCode';
 
@@ -247,12 +248,14 @@ uniform int uHeightPx;
 uniform int uLines;
 uniform int uSamples;
 uniform int uColorOn;
+uniform int uTintMap;       // 0 gray, 1 cool-blue, 2 sepia, 3 amber
 uniform vec4 uBox;          // rMin, rMax, thetaMin, thetaMax
 uniform vec2 uColorMap;     // scale (m/s), show variance (0/1)
 out vec4 outColor;
 ${colorMapDefinesGlsl()}
+${tintMapGlsl()}
 
-uint grey(int s, int l) { return uint(texelFetch(uPacked, ivec2(s, l), 0).r * 255.0 + 0.5); }
+float greyF(int s, int l) { return floor(texelFetch(uPacked, ivec2(s, l), 0).r * 255.0 + 0.5); }
 
 // postprocess/colorMap.ts colorMap
 vec3 colorMap(float v, float scale, float variance, bool showVariance) {
@@ -285,32 +288,61 @@ void main() {
   uint st = L.a & 1023u;
   int dl = int((L.b >> 10u) & 1u);
   int ds = int((L.a >> 10u) & 1u);
-  uint v00 = grey(s0, l0), v10 = grey(s0, l0 + dl), v01 = grey(s0 + ds, l0), v11 = grey(s0 + ds, l0 + dl);
-  uint g = ((v00 * (1024u - lt) + v10 * lt) * (1024u - st) + (v01 * (1024u - lt) + v11 * lt) * st) >> 20u;
-  vec3 rgb = vec3(float(g));
+  float fl = float(lt) * (1.0 / 1024.0);
+  float fs = float(st) * (1.0 / 1024.0);
+
+  // Clamped Catmull-Rom 4x4 bicubic gather matching CPU scanConvertLut
+  int maxS = uSamples - 1;
+  int maxL = uLines - 1;
+  int sm1 = max(0, s0 - 1);
+  int s1 = min(maxS, s0 + 1);
+  int s2 = min(maxS, s0 + 2);
+  int lm1 = max(0, l0 - 1);
+  int l1 = min(maxL, l0 + 1);
+  int l2 = min(maxL, l0 + 2);
+
+  float fs2 = fs * fs;
+  float fs3 = fs2 * fs;
+  vec4 ws = vec4(-0.5 * fs + fs2 - 0.5 * fs3, 1.0 - 2.5 * fs2 + 1.5 * fs3, 0.5 * fs + 2.0 * fs2 - 1.5 * fs3, -0.5 * fs2 + 0.5 * fs3);
+
+  float c0 = dot(vec4(greyF(sm1, lm1), greyF(s0, lm1), greyF(s1, lm1), greyF(s2, lm1)), ws);
+  float v00 = greyF(s0, l0);
+  float v01 = greyF(s1, l0);
+  float c1 = dot(vec4(greyF(sm1, l0), v00, v01, greyF(s2, l0)), ws);
+  float v10 = greyF(s0, l1);
+  float v11 = greyF(s1, l1);
+  float c2 = dot(vec4(greyF(sm1, l1), v10, v11, greyF(s2, l1)), ws);
+  float c3 = dot(vec4(greyF(sm1, l2), greyF(s0, l2), greyF(s1, l2), greyF(s2, l2)), ws);
+
+  float fl2 = fl * fl;
+  float fl3 = fl2 * fl;
+  vec4 wl = vec4(-0.5 * fl + fl2 - 0.5 * fl3, 1.0 - 2.5 * fl2 + 1.5 * fl3, 0.5 * fl + 2.0 * fl2 - 1.5 * fl3, -0.5 * fl2 + 0.5 * fl3);
+  float lo = min(min(v00, v10), min(v01, v11));
+  float hi = max(max(v00, v10), max(v01, v11));
+  float g = floor(clamp(dot(vec4(c0, c1, c2, c3), wl), lo, hi) + 0.5);
+  vec3 rgb = applyTintMap(g, uTintMap);
   if (uColorOn == 1) {
     vec2 rt = texelFetch(uPolar, ivec2(x, y), 0).rg;
     if (rt.x >= uBox.x && rt.x <= uBox.y && rt.y >= uBox.z && rt.y <= uBox.w) {
-      int l1 = min(uLines - 1, l0 + dl);
-      int s1 = min(uSamples - 1, s0 + ds);
-      vec4 c00 = texelFetch(uColor, ivec2(s0, l0), 0);
-      vec4 c10 = texelFetch(uColor, ivec2(s0, l1), 0);
-      vec4 c01 = texelFetch(uColor, ivec2(s1, l0), 0);
-      vec4 c11 = texelFetch(uColor, ivec2(s1, l1), 0);
-      float fl = float(lt) * (1.0 / 1024.0);
-      float fs = float(st) * (1.0 / 1024.0);
-      float w00 = (1.0 - fl) * (1.0 - fs) * c00.a;
-      float w10 = fl * (1.0 - fs) * c10.a;
-      float w01 = (1.0 - fl) * fs * c01.a;
-      float w11 = fl * fs * c11.a;
+      int cl1 = min(uLines - 1, l0 + dl);
+      int cs1 = min(uSamples - 1, s0 + ds);
+      vec4 d00 = texelFetch(uColor, ivec2(s0, l0), 0);
+      vec4 d10 = texelFetch(uColor, ivec2(s0, cl1), 0);
+      vec4 d01 = texelFetch(uColor, ivec2(cs1, l0), 0);
+      vec4 d11 = texelFetch(uColor, ivec2(cs1, cl1), 0);
+      float w00 = (1.0 - fl) * (1.0 - fs) * d00.a;
+      float w10 = fl * (1.0 - fs) * d10.a;
+      float w01 = (1.0 - fl) * fs * d01.a;
+      float w11 = fl * fs * d11.a;
       float wSum = w00 + w10 + w01 + w11;
       if (wSum > 0.18) {
-        vec2 ph = c00.rg * w00 + c10.rg * w10 + c01.rg * w01 + c11.rg * w11;
-        float vari = (c00.b * w00 + c10.b * w10 + c01.b * w01 + c11.b * w11) / wSum;
+        vec2 ph = d00.rg * w00 + d10.rg * w10 + d01.rg * w01 + d11.rg * w11;
+        float vari = (d00.b * w00 + d10.b * w10 + d01.b * w01 + d11.b * w11) / wSum;
         float scale = max(1e-3, uColorMap.x);
         float v = (scale / 3.141592653589793) * atan(ph.y, ph.x);
         float edgeAlpha = smoothstep(0.18, 0.72, wSum);
-        float tissuePrio = clamp((235.0 - float(g)) / 70.0, 0.28, 1.0);
+        float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
+        float tissuePrio = clamp((235.0 - lum) / 70.0, 0.28, 1.0);
         float blend = COLOR_BLEND * edgeAlpha * tissuePrio;
         rgb = floor(colorMap(v, scale, vari, uColorMap.y > 0.5) * blend + rgb * (1.0 - blend) + 0.5);
       }

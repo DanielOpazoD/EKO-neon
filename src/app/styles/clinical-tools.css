@@ -1,0 +1,415 @@
+
+/* measurement protocol panel (spec 16/28) */
+.pill.bad {
+  color: #ff7b7b;
+}
+.protocol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.protocol-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 1px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.protocol-row button {
+  min-width: 64px;
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+}
+.protocol-row.active {
+  background: var(--accent-soft);
+}
+.protocol-value {
+  font-family: var(--mono);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.protocol-instruction {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px;
+  margin-bottom: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.protocol-instruction button {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+}
+.protocol details summary {
+  cursor: pointer;
+  margin-top: 4px;
+}
+.technique-notes {
+  margin: 2px 0 0 12px;
+  padding: 0;
+  max-width: 320px;
+}
+
+/* artifact laboratory */
+.artifact-row {
+  border-bottom: 1px solid var(--border);
+  padding: 2px 0;
+}
+.artifact-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.artifact-row label > span:first-child {
+  min-width: 130px;
+}
+.artifact-row input[type='range'] {
+  flex: 1;
+}
+.artifact-row .mono {
+  font-family: var(--mono);
+  min-width: 32px;
+  text-align: right;
+}
+
+/* curriculum, progress, impression */
+.curriculum .module {
+  margin-bottom: 14px;
+}
+.curriculum .tasks {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+}
+.curriculum .tasks li {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+.curriculum .tasks li:last-child {
+  margin-bottom: 0;
+}
+.curriculum .tasks li.locked > b,
+.curriculum .tasks li.locked .why {
+  opacity: 0.55;
+}
+.curriculum .tasks li.done {
+  border-color: #234a35;
+  background: #12211a;
+}
+.curriculum .tasks li.done b {
+  color: var(--ok);
+}
+.curriculum .why {
+  margin: 2px 0 4px 0;
+  max-width: 720px;
+}
+.impression-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+.impression-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  background: var(--panel);
+  margin: 0;
+}
+.impression-form legend {
+  font-size: var(--fs-caps);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.impression-form .finding {
+  display: block;
+  font-size: var(--fs-md);
+  padding: 1px 0;
+}
+.impression-form .finding.ok {
+  color: var(--ok);
+}
+.impression-form .finding.bad {
+  color: #ff7b7b;
+}
+.impression-form .finding.missed {
+  color: var(--warn);
+}
+.pill.missed {
+  color: var(--warn);
+}
+.guidance .causes .cause {
+  margin: 3px 0;
+}
+
+/* collapsed "fine tuning" group inside console sections */
+details.adv {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 6px;
+}
+details.adv > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+details.adv > summary::-webkit-details-marker {
+  display: none;
+}
+details.adv > summary::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  margin-top: -2px;
+}
+details.adv[open] > summary::before {
+  transform: rotate(45deg);
+}
+details.adv > summary:hover {
+  color: var(--text);
+}
+details.adv > summary:hover::before {
+  border-color: var(--text);
+}
+.tool-grid button {
+  padding: 5px 2px;
+  font-size: var(--fs-sm);
+}
+
+/* focused capture card shown while a measurement tool is armed */
+.capture-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-lg);
+}
+.capture-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.capture-hint {
+  margin: 8px 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .capture-dot {
+    animation: none;
+  }
+}
+
+/* empty state for tabs without an active modality */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 30px 16px;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+}
+.empty svg {
+  opacity: 0.45;
+}
+.empty p {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.45;
+}
+.empty .quick {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ---- review mode (decision 134) ---- */
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.review-head select {
+  flex: 1;
+  min-width: 0;
+}
+.review-n {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #ff6ad5;
+  color: #14141c;
+  font-weight: 700;
+  font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.review-place {
+  font-size: var(--fs-md);
+  color: #9aa4b5;
+  line-height: 1.35;
+}
+.review-item textarea,
+.review-note,
+.review-preview {
+  width: 100%;
+  min-height: 44px;
+  resize: vertical;
+  font: inherit;
+  font-size: var(--fs-md);
+  background: #0e1218;
+  color: inherit;
+  border: 1px solid #2a3140;
+  border-radius: var(--r-sm);
+  padding: 6px;
+  box-sizing: border-box;
+}
+.review-preview {
+  min-height: 140px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-sm);
+}
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.review-actions button.primary {
+  border-color: #ff6ad5;
+}
+.review-status {
+  font-size: var(--fs-md);
+  color: #7ce8a0;
+  margin-top: 6px;
+}
+.review-item.on {
+  border-color: #ff6ad5;
+  box-shadow: 0 0 0 1px #ff6ad5 inset;
+}
+.review-item {
+  border: 1px solid #2a3140;
+  border-radius: var(--r-md);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+}
+.review-chip {
+  font-size: var(--fs-xs);
+  border: 1px solid #ff6ad5;
+  color: #ff6ad5;
+  border-radius: var(--r-xs);
+  padding: 0 4px;
+  flex: none;
+}
+.review-help {
+  font-size: var(--fs-sm);
+  color: #9aa4b5;
+  margin-top: 6px;
+}
+.review-source {
+  font-size: var(--fs-md);
+  color: #ffc857;
+  margin-top: 4px;
+}
+canvas.overlay.review,
+canvas.overlay.armed {
+  cursor: crosshair;
+}
+.review-children {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: 14px;
+  border-left: 2px solid #ff6ad5;
+  padding-left: 8px;
+}
+.review-child {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+.review-child.on .review-n {
+  background: #ffffff;
+}
+.review-n.small {
+  width: 26px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+.review-actions button.on {
+  border-color: #ffc857;
+  color: #ffc857;
+}
+
+/* ---- split navigator: torso above, cut face below (decision 137) ---- */
+.torso-caption {
+  font-size: var(--fs-caps);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  pointer-events: none;
+  text-shadow: none;
+}
+.torso-caption.top {
+  position: static;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.torso-caption.bottom {
+  position: static;
+  color: #cbd5e1;
+}
+.torso-wrap.split .torso-help {
+  bottom: calc(50% + 6px);
+}
+.torso-wrap.split .torso-help.cut {
+  bottom: 6px;
+}

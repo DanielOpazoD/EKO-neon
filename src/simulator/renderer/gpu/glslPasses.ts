@@ -34,34 +34,50 @@ float heteroDb(int t) {
 /** A grain field above its threshold, 0–1 (decision 145). */
 float grainAbove(float g) { return g > GRAIN_THRESHOLD ? (g - GRAIN_THRESHOLD) / (1.0 - GRAIN_THRESHOLD) : 0.0; }
 
-void acoustic(int tissue, int structure, float sdf, float extra, float nd, vec3 m, vec3 dirH, float transmural, out float sigma, out float specular) {
+void acoustic(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
   if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
-  // myocardial backscatter is strongest with the beam across the fibres, which run ~circumferentially
-  // around the LV long axis (heart-frame z): circumferential direction = (−m.y, m.x, 0)/r
-  // the RV free wall takes the fibre response too; atrial walls and the interatrial septum scatter without anisotropy (decision 140)
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);
+      float trm = transmural >= 0.0 ? transmural : 0.5;
       float dphi = rr > MYO_ANISO_RADIAL_EPS ? dot(dirH.xy, vec2(-m.y, m.x)) / rr : 0.0;
-      // the fibre helix across the wall (decision 144); a wall sample without a depth (the RV free wall) takes the mid-wall
-      sigma *= myoHelixGain(dphi, dirH.z, transmural >= 0.0 ? transmural : 0.5);
-      // decision 267: the myocardium's own backscatter over normal; the RV free wall keeps it
+      float gMyo = myoHelixGain(dphi, dirH.z, trm);
+      if (sc > 0.0) {
+        float dphiP = rr > MYO_ANISO_RADIAL_EPS ? dot(dirHP.xy, vec2(-m.y, m.x)) / rr : 0.0;
+        float dphiM = rr > MYO_ANISO_RADIAL_EPS ? dot(dirHM.xy, vec2(-m.y, m.x)) / rr : 0.0;
+        gMyo = 0.5 * gMyo + 0.25 * myoHelixGain(dphiP, dirHP.z, trm) + 0.25 * myoHelixGain(dphiM, dirHM.z, trm);
+      }
+      sigma *= gMyo;
       if (structure != S_RV_WALL) sigma *= MYO_IB;
     } else if (structure == S_PAP || structure == S_RV_PAP) {
-      // decision 265: the papillary fibres run along the muscle, near the long axis
-      sigma *= papillaryFibreGain(dirH.z);
+      float gPap = papillaryFibreGain(dirH.z);
+      if (sc > 0.0) gPap = 0.5 * gPap + 0.25 * papillaryFibreGain(dirHP.z) + 0.25 * papillaryFibreGain(dirHM.z);
+      sigma *= gPap;
       if (structure == S_PAP) sigma *= MYO_IB;
     } else if (structure != S_LA_WALL && structure != S_RA_WALL && structure != S_IAS) {
-      sigma *= MYO_ANISO_FLOOR + (1.0 - MYO_ANISO_FLOOR) * nd * nd;
+      float nd2 = sc > 0.0 ? 0.5 * nd * nd + 0.25 * ndP * ndP + 0.25 * ndM * ndM : nd * nd;
+      sigma *= MYO_ANISO_FLOOR + (1.0 - MYO_ANISO_FLOOR) * nd2;
     }
   }
   float het = heteroDb(tissue);
   if (het > 0.0) sigma *= pow(10.0, ((lat(m * HETERO_FREQ + HETERO_OFFSET, 2) - 0.5) * het) / 20.0);
   if (extra > 0.0) sigma += extra * CALCIUM_GAIN * (CALCIUM_BASE + CALCIUM_AMP * lat(m * CALCIUM_FREQ + CALCIUM_OFFSET, 1));
   specular = 0.0;
-  if (props.y > 0.0 && abs(sdf) < max(nd, SPECULAR_WINDOW_MIN) * (DEPTH / SAMPLES)) specular = props.y * SPECULAR_GAIN * nd * nd * nd * nd * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
+  if (props.y > 0.0) {
+    float dr = DEPTH / SAMPLES;
+    float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
+    float absSdf = abs(sdf);
+    float sp0 = absSdf < max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0.0;
+    if (sc > 0.0) {
+      float spP = absSdf < max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0.0;
+      float spM = absSdf < max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0.0;
+      specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
+    } else {
+      specular = sp0;
+    }
+  }
 }
 
 void main() {
@@ -71,8 +87,17 @@ void main() {
   float ct = P(LINE_TRIG_BASE + 2 * li), sn = P(LINE_TRIG_BASE + 2 * li + 1);
   vec3 bF = vec3(B_FX, B_FY, B_FZ), bL = vec3(B_LX, B_LY, B_LZ), bN = vec3(B_NX, B_NY, B_NZ);
   vec3 dirT = bF * ct + bL * sn;           // torso-frame line direction
+  vec3 perpT = -bF * sn + bL * ct;
   vec3 ex = vec3(HF_EXX, HF_EXY, HF_EXZ), ey = vec3(HF_EYX, HF_EYY, HF_EYZ), ez = vec3(HF_EZX, HF_EZY, HF_EZZ);
   vec3 dirH = vec3(dot(dirT, ex), dot(dirT, ey), dot(dirT, ez));
+  vec3 perpH = vec3(dot(perpT, ex), dot(perpT, ey), dot(perpT, ez));
+  float sc = SPATIAL_COMP;
+  float scAlpha = sc * 0.24434609527920614;
+  float scCos = cos(scAlpha), scSin = sin(scAlpha);
+  vec3 dirTP = dirT * scCos + perpT * scSin;
+  vec3 dirTM = dirT * scCos - perpT * scSin;
+  vec3 dirHP = dirH * scCos + perpH * scSin;
+  vec3 dirHM = dirH * scCos - perpH * scSin;
   float r = (float(si) + 0.5) * dr;
   // slice thickness: the side passes sample the planes at ±sliceHalfWidthCm (elevation beam width, acoustic/psf.ts)
   float e = sliceHalfWidthCm(r);
@@ -104,10 +129,15 @@ void main() {
   }
   vec4 props = uTissue[s.tissue];
   float nd = abs(inHeart ? dot(s.n, dirH) : dot(s.n, dirT));
-  // a cord's sample carries its axis: it reflects with the beam across it (decision 227)
   if (s.tissue == T_CHORDAE) nd = cordAlignment(nd);
+  float ndP = nd, ndM = nd;
+  if (sc > 0.0) {
+    ndP = abs(inHeart ? dot(s.n, dirHP) : dot(s.n, dirTP));
+    ndM = abs(inHeart ? dot(s.n, dirHM) : dot(s.n, dirTM));
+    if (s.tissue == T_CHORDAE) { ndP = cordAlignment(ndP); ndM = cordAlignment(ndM); }
+  }
   float sigma, specular;
-  acoustic(s.tissue, s.structure, s.sdf, s.extra, nd, s.m, dirH, s.transmural, sigma, specular);
+  acoustic(s.tissue, s.structure, s.sdf, s.extra, nd, ndP, ndM, s.m, dirH, dirHP, dirHM, s.transmural, sc, sigma, specular);
   // complex scatterer phasor anchored in tissue coordinates (moves with the tissue); across the plane its lattice cell is
   // the slice thickness (decision 99), as in the CPU renderer
   vec3 nrm = inHeart ? vec3(dot(bN, ex), dot(bN, ey), dot(bN, ez)) : bN;
@@ -191,28 +221,50 @@ float heteroDb(int t) {
   return 0.0;
 }
 
-void acousticSide(int tissue, int structure, float sdf, float extra, float nd, vec3 m, vec3 dirH, float transmural, out float sigma, out float specular) {
+void acousticSide(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
   if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);
+      float trm = transmural >= 0.0 ? transmural : 0.5;
       float dphi = rr > MYO_ANISO_RADIAL_EPS ? dot(dirH.xy, vec2(-m.y, m.x)) / rr : 0.0;
-      sigma *= myoHelixGain(dphi, dirH.z, transmural >= 0.0 ? transmural : 0.5);
+      float gMyo = myoHelixGain(dphi, dirH.z, trm);
+      if (sc > 0.0) {
+        float dphiP = rr > MYO_ANISO_RADIAL_EPS ? dot(dirHP.xy, vec2(-m.y, m.x)) / rr : 0.0;
+        float dphiM = rr > MYO_ANISO_RADIAL_EPS ? dot(dirHM.xy, vec2(-m.y, m.x)) / rr : 0.0;
+        gMyo = 0.5 * gMyo + 0.25 * myoHelixGain(dphiP, dirHP.z, trm) + 0.25 * myoHelixGain(dphiM, dirHM.z, trm);
+      }
+      sigma *= gMyo;
       if (structure != S_RV_WALL) sigma *= MYO_IB;
     } else if (structure == S_PAP || structure == S_RV_PAP) {
-      sigma *= papillaryFibreGain(dirH.z);
+      float gPap = papillaryFibreGain(dirH.z);
+      if (sc > 0.0) gPap = 0.5 * gPap + 0.25 * papillaryFibreGain(dirHP.z) + 0.25 * papillaryFibreGain(dirHM.z);
+      sigma *= gPap;
       if (structure == S_PAP) sigma *= MYO_IB;
     } else if (structure != S_LA_WALL && structure != S_RA_WALL && structure != S_IAS) {
-      sigma *= MYO_ANISO_FLOOR + (1.0 - MYO_ANISO_FLOOR) * nd * nd;
+      float nd2 = sc > 0.0 ? 0.5 * nd * nd + 0.25 * ndP * ndP + 0.25 * ndM * ndM : nd * nd;
+      sigma *= MYO_ANISO_FLOOR + (1.0 - MYO_ANISO_FLOOR) * nd2;
     }
   }
   float het = heteroDb(tissue);
   if (het > 0.0) sigma *= pow(10.0, ((lat(m * HETERO_FREQ + HETERO_OFFSET, 2) - 0.5) * het) / 20.0);
   if (extra > 0.0) sigma += extra * CALCIUM_GAIN * (CALCIUM_BASE + CALCIUM_AMP * lat(m * CALCIUM_FREQ + CALCIUM_OFFSET, 1));
   specular = 0.0;
-  if (props.y > 0.0 && abs(sdf) < max(nd, SPECULAR_WINDOW_MIN) * (DEPTH / SAMPLES)) specular = props.y * SPECULAR_GAIN * nd * nd * nd * nd * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
+  if (props.y > 0.0) {
+    float dr = DEPTH / SAMPLES;
+    float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
+    float absSdf = abs(sdf);
+    float sp0 = absSdf < max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0.0;
+    if (sc > 0.0) {
+      float spP = absSdf < max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0.0;
+      float spM = absSdf < max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0.0;
+      specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
+    } else {
+      specular = sp0;
+    }
+  }
 }
 
 void main() {
@@ -222,8 +274,17 @@ void main() {
   float ct = P(LINE_TRIG_BASE + 2 * li), sn = P(LINE_TRIG_BASE + 2 * li + 1);
   vec3 bF = vec3(B_FX, B_FY, B_FZ), bL = vec3(B_LX, B_LY, B_LZ), bN = vec3(B_NX, B_NY, B_NZ);
   vec3 dirT = bF * ct + bL * sn;
+  vec3 perpT = -bF * sn + bL * ct;
   vec3 ex = vec3(HF_EXX, HF_EXY, HF_EXZ), ey = vec3(HF_EYX, HF_EYY, HF_EYZ), ez = vec3(HF_EZX, HF_EZY, HF_EZZ);
   vec3 dirH = vec3(dot(dirT, ex), dot(dirT, ey), dot(dirT, ez));
+  vec3 perpH = vec3(dot(perpT, ex), dot(perpT, ey), dot(perpT, ez));
+  float sc = SPATIAL_COMP;
+  float scAlpha = sc * 0.24434609527920614;
+  float scCos = cos(scAlpha), scSin = sin(scAlpha);
+  vec3 dirTP = dirT * scCos + perpT * scSin;
+  vec3 dirTM = dirT * scCos - perpT * scSin;
+  vec3 dirHP = dirH * scCos + perpH * scSin;
+  vec3 dirHM = dirH * scCos - perpH * scSin;
   float r = (float(si) + 0.5) * dr;
   float e = sliceHalfWidthCm(r);
   vec3 pT = vec3(B_OX, B_OY, B_OZ) + dirT * r + bN * (ELEV_OFFSET + uElevK * e);
@@ -255,8 +316,14 @@ void main() {
   }
   float nd = abs(inHeart ? dot(s.n, dirH) : dot(s.n, dirT));
   if (s.tissue == T_CHORDAE) nd = cordAlignment(nd);
+  float ndP = nd, ndM = nd;
+  if (sc > 0.0) {
+    ndP = abs(inHeart ? dot(s.n, dirHP) : dot(s.n, dirTP));
+    ndM = abs(inHeart ? dot(s.n, dirHM) : dot(s.n, dirTM));
+    if (s.tissue == T_CHORDAE) { ndP = cordAlignment(ndP); ndM = cordAlignment(ndM); }
+  }
   float sigma, specular;
-  acousticSide(s.tissue, s.structure, s.sdf, s.extra, nd, s.m, dirH, s.transmural, sigma, specular);
+  acousticSide(s.tissue, s.structure, s.sdf, s.extra, nd, ndP, ndM, s.m, dirH, dirHP, dirHM, s.transmural, sc, sigma, specular);
   vec3 nrm = inHeart ? vec3(dot(bN, ex), dot(bN, ey), dot(bN, ez)) : bN;
   if (s.tissue == T_VALVE) {
     float wm = membraneWeight(dot(s.n, nrm), e);
@@ -521,8 +588,11 @@ void main() {
   float r = (float(si) + 0.5) * dr;
   float dTheta = SECTOR / LINES;
   const int kMax = int(BEAM_ATTEN_MAX_LINES);
-  int K = min(kMax, min(int(floor(BEAM_ATTEN_MAX_HALF_ANGLE_RAD / dTheta + 0.5)),
+  int baseK = min(kMax, min(int(floor(BEAM_ATTEN_MAX_HALF_ANGLE_RAD / dTheta + 0.5)),
                         int(floor(beamHalfWidthCm(r, FOCUS) / max(BEAM_ATTEN_MIN_ARC_CM, r * dTheta) + 0.5))));
+  int K = SPATIAL_COMP > 0.0
+    ? min(kMax, int(floor(float(baseK) * (1.0 + 0.55 * SPATIAL_COMP) + 0.5)))
+    : baseK;
   int last = int(LINES) - 1;
   float sum = 0.0;
   float n = 0.0;

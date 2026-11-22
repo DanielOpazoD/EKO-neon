@@ -1,0 +1,650 @@
+/* dedicated top header bar for the 3D navigator */
+.torso-head {
+  height: 36px;
+  flex: 0 0 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 38px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  z-index: 6;
+}
+/* the WebGL torso above and, when split, the 2D cut map below (decision 141) */
+.torso-3d {
+  flex: 1 1 100%;
+  min-height: 0;
+  position: relative;
+  margin: 6px 8px 0;
+  border-radius: var(--r-md);
+  border: 0;
+  overflow: hidden;
+  /* dark studio chamber with subtle central vignette so the probe silhouette never disappears */
+  background: radial-gradient(ellipse at 50% 44%, #111827 0%, #050811 66%, #000000 100%);
+}
+.cut-map {
+  flex: 1 1 50%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  margin: 6px 8px 0;
+  border-radius: var(--r-md);
+  border: 0;
+  overflow: hidden;
+  background: #000000;
+}
+.cut-map-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  background: #0b0f17;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  min-height: 28px;
+  flex-shrink: 0;
+  z-index: 3;
+}
+.cut-map-head .torso-caption.bottom {
+  position: static;
+  font-size: var(--fs-caps);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  border-radius: 0;
+  pointer-events: none;
+  text-shadow: none;
+}
+.cut-map-head .cut-map-hover {
+  position: static;
+  font-size: 12px;
+  font-weight: 600;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+.cut-map-head .cut-map-hover:empty {
+  display: none;
+}
+.cut-map-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #000000;
+}
+.cut-map-body canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  background: #000000;
+}
+/* the gesture legend shows while the pointer is over the navigator, as a subtle dark glass bar */
+.torso-help {
+  position: absolute;
+  pointer-events: none;
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
+  font-size: 12px;
+  color: #f1f5f9;
+  background: rgba(15, 23, 42, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  line-height: 1.35;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+/* each legend shows while the pointer is over its own panel (decision 189) */
+.torso-3d:hover > .torso-help,
+.torso-3d:focus-within > .torso-help,
+.cut-map:hover .torso-help.cut {
+  opacity: 1;
+}
+.dial svg {
+  cursor: grab;
+  touch-action: none;
+}
+.dial-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.dial-controls button {
+  padding: 1px 5px;
+  font-size: var(--fs-xs);
+}
+/* LV segment panel (decision 152): polar map, legend in words, inspector; it scrolls when the rail is short */
+#lv-segments {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 52%;
+  display: flex;
+  flex-direction: column;
+}
+.segment-panel .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.segment-panel > * {
+  flex: 0 0 auto;
+}
+.bullseye {
+  align-self: center;
+  max-width: 100%;
+  height: auto;
+}
+.bullseye-seg {
+  cursor: pointer;
+  outline: none;
+}
+.bullseye-seg path,
+.bullseye-seg circle {
+  stroke: #0b0e12;
+  stroke-width: 1.2;
+}
+.bullseye-seg.partial path,
+.bullseye-seg.partial circle {
+  stroke: var(--warn);
+  stroke-dasharray: 3 2;
+  stroke-width: 1.4;
+}
+.bullseye-seg text {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  pointer-events: none;
+}
+.bullseye-seg:hover path,
+.bullseye-seg:hover circle {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.bullseye-seg:focus-visible path,
+.bullseye-seg:focus-visible circle {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-dasharray: none;
+}
+.bullseye-seg.hovered path,
+.bullseye-seg.hovered circle {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-dasharray: none;
+}
+.bullseye-seg.selected path,
+.bullseye-seg.selected circle {
+  stroke: #ffffff;
+  stroke-width: 3;
+  stroke-dasharray: none;
+}
+.bullseye-dir {
+  font-size: var(--fs-xs);
+  fill: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.bullseye-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.bullseye-legend .sw {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-xs);
+  vertical-align: -1px;
+  margin-right: 3px;
+}
+.bullseye-legend .sw.ok {
+  background: linear-gradient(90deg, rgb(58, 108, 184), rgb(184, 132, 58));
+}
+.bullseye-legend .sw.partial {
+  background: rgba(184, 132, 58, 0.35);
+  border: 1px dashed var(--warn);
+}
+.bullseye-legend .sw.out {
+  background: #262c36;
+  border: 1px solid var(--border);
+}
+.segment-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.segment-chip {
+  display: inline-block;
+  min-width: 20px;
+  text-align: center;
+  border-radius: var(--r-xs);
+  font-weight: 700;
+  padding: 0 4px;
+}
+.segment-inspector dt {
+  color: var(--muted);
+}
+.segment-inspector dd {
+  margin: 0;
+}
+.guidance {
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  max-height: 46%;
+  overflow-y: auto;
+  font-size: var(--fs-md);
+}
+/* exam notice shown in the centre column when the clean interface hides the rail */
+.center > .exam-notice {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.guidance .score {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.guidance .score b {
+  font-size: 20px;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.score-ring {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.score-ring svg {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+.score-ring circle {
+  fill: none;
+  stroke-width: 3.5;
+}
+.score-ring .track {
+  stroke: var(--panel-3);
+}
+.score-ring .fill {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.35s ease;
+}
+.guidance ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+.guidance li {
+  margin: 3px 0;
+}
+.guidance .target {
+  margin-top: 5px;
+}
+.guidance .hints {
+  margin-top: 8px;
+}
+.guidance .adv {
+  margin-top: 7px;
+}
+.guidance .comp {
+  margin-top: 8px;
+}
+.bar {
+  height: 5px;
+  background: #222a35;
+  border-radius: var(--r-xs);
+  overflow: hidden;
+  margin: 2px 0 6px;
+}
+.bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.comp {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.dev {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 300px;
+  max-height: 80%;
+  overflow: auto;
+  /* the theme's surface and text (decision 357): a fixed dark surface under the light theme's dark text read dark on
+     dark, and its chosen buttons, tinted on a transparent blue, read dimmer than the others */
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-1);
+  padding: 8px;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  z-index: 5;
+}
+.dev h4 {
+  margin: 4px 0;
+  color: var(--accent-2);
+  font-size: var(--fs-sm);
+}
+.dev table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.dev td {
+  padding: 1px 4px;
+  border-bottom: 1px solid var(--border);
+}
+/* a choice of the panel reads as chosen at a glance: filled as a primary button, not just tinted (decision 357) */
+.dev button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+.error {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  right: 8px;
+  background: #3a1616;
+  border: 1px solid var(--bad);
+  color: #ffd7d7;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  z-index: 6;
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.screen {
+  grid-column: 1 / -1;
+  overflow: auto;
+  padding: 26px 32px 56px;
+  max-width: 1060px;
+  margin: 0 auto;
+  width: 100%;
+}
+.screen-group {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* the sections of the «Informe» tab (decision 244): a small segmented control aligned with the text below it */
+.screen-group-head {
+  width: 100%;
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 16px 32px 0;
+}
+.nav-seg.screen-tabs {
+  display: inline-flex;
+  margin: 0;
+  background: var(--panel);
+}
+.nav-seg.screen-tabs button {
+  padding: 3px 12px;
+  font-size: var(--fs-md);
+}
+.screen-group > .screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 16px;
+}
+.screen h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.screen h2:not(:first-child) {
+  margin-top: 30px;
+}
+.screen h3 {
+  margin: 26px 0 10px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.screen table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  font-size: var(--fs-md);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.screen th {
+  font-size: var(--fs-caps);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.screen th,
+.screen td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.screen tbody tr:last-child td {
+  border-bottom: 0;
+}
+.screen tbody tr:hover td {
+  background: var(--panel-2);
+}
+.screen code {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  padding: 1px 6px;
+}
+.screen a {
+  color: var(--accent);
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 7px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  background: var(--panel-3);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.8;
+}
+.pill.ok {
+  color: var(--ok);
+}
+.pill.warn {
+  color: var(--warn);
+}
+.small {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.cine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cine input[type='range'] {
+  width: 180px;
+}
+.measure-list {
+  font-size: var(--fs-sm);
+}
+.measure-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 6px 0 2px;
+}
+/* the GPU notice keeps its tip although the HUD lets the pointer through to the image */
+.img-hud .hud-warn {
+  pointer-events: auto;
+}
+.measure-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.measure-row .m-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.measure-row .m-src {
+  margin-left: 6px;
+  color: var(--faint);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.measure-row .m-value {
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+.measure-row .icon-btn {
+  width: 20px;
+  height: 20px;
+  color: var(--faint);
+}
+@media (max-width: 1200px) {
+  .app {
+    grid-template-columns: 240px 1fr 252px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+.tutorial {
+  position: fixed;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  background: rgba(14, 18, 24, 0.96);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  padding: 14px 16px 12px;
+  z-index: 7;
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(6px);
+}
+.tutorial h4 {
+  margin: 0 0 6px;
+  font-size: var(--fs-xl);
+  color: #f3f6fb;
+}
+.tutorial p {
+  margin: 0 0 12px;
+  line-height: 1.5;
+  color: #c9d1dc;
+}
+.tut-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.tut-kicker {
+  font-size: var(--fs-caps);
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.tut-steps {
+  display: flex;
+  gap: 5px;
+}
+.tut-steps i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+.tut-steps i.done {
+  background: var(--accent-line);
+}
+.tut-steps i.now {
+  background: var(--accent);
+  width: 16px;
+  border-radius: var(--r-xs);
+}
+.preset-grid.secondary {
+  grid-template-columns: repeat(3, 1fr);
+}
+.preset-sub {
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.preset-grid button.active .preset-sub {
+  color: var(--accent);
+}

@@ -1,0 +1,464 @@
+/* captions on the rail: clean clinical badges aligned with modern white theme */
+
+/* ---- the rail, compact (decision 242): the LV segments in fewer words and less room, the view guide at the bottom
+   edge and smaller, the navigator's tools out of the probe's way ---- */
+.segment-panel {
+  border-top: 1px solid var(--border);
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  gap: 4px;
+  font-size: var(--fs-sm);
+}
+/* the model and the colour switch share one row */
+.segment-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.segment-controls .seg {
+  flex-wrap: nowrap;
+}
+.segment-controls .seg button {
+  padding: 2px 6px;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.segment-controls .row {
+  margin: 0;
+  gap: 5px;
+}
+.segment-controls .row label {
+  font-size: var(--fs-sm);
+}
+.segment-panel .bullseye-seg text {
+  font-size: var(--fs-sm);
+}
+.segment-panel .bullseye-dir {
+  font-size: 9px;
+}
+.segment-panel .bullseye-legend {
+  justify-content: center;
+  gap: 2px 8px;
+  font-size: var(--fs-xs);
+}
+.segment-orientation {
+  text-align: center;
+}
+.segment-inspector {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+}
+.segment-inspector dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  margin: 6px 0 0;
+  margin-top: 4px;
+  gap: 1px 6px;
+}
+/* the guide: a slimmer header on the rail's bottom edge, a smaller ring and a shorter box */
+.rail-head.guide-head {
+  margin-top: auto;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+}
+/* the guide's box: its percentage cap resolved against its own content, so it kept the whole height of the content
+   and showed 46 % of it, with the details and the causes clipped below an empty band; the cap now sits on the
+   wrapper, against the rail, and the guide scrolls inside it */
+#view-guidance {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 38%;
+}
+#view-guidance .guidance {
+  max-height: none;
+  min-height: 0;
+  padding: 6px 8px;
+  font-size: var(--fs-sm);
+}
+#view-guidance .guidance .score {
+  gap: 8px;
+}
+#view-guidance .score-ring {
+  width: 34px;
+  height: 34px;
+}
+#view-guidance .score-ring svg {
+  width: 34px;
+  height: 34px;
+}
+#view-guidance .guidance .score b {
+  font-size: 14px;
+}
+#view-guidance .guidance ul {
+  margin-top: 4px;
+}
+#view-guidance .guidance li {
+  margin: 2px 0;
+}
+/* the navigator's tools: the dial sits in the top-right corner of the 3D card; the camera buttons live in .torso-head */
+/* the navigator's tools: header bar buttons on the right, rotation dial in the 3D corner */
+/* the camera tools: docked in the navigator header bar on the right */
+.torso-tools {
+  display: flex;
+  position: absolute;
+  top: 50px;
+  right: 16px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 4;
+}
+.torso-tools > * {
+  pointer-events: auto;
+}
+/* the dial: its value in the middle, ticks every 30°, dark-glass instrument inside the 3D chamber */
+.dial {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  backdrop-filter: blur(8px);
+  padding: 3px;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-md);
+}
+.dial-lbl {
+  fill: #94a3b8;
+  font-family: var(--font);
+  font-size: var(--fs-xs);
+}
+.dial-val {
+  fill: #f8fafc;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+}
+.torso-buttons {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  opacity: 1;
+  margin-left: auto;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+}
+.torso-buttons button.icon-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+}
+/* the layers menu hangs from the header bar's right edge */
+.torso-head .menu-wrap {
+  position: relative;
+}
+.torso-head .menu.down {
+  right: 0;
+  top: calc(100% + 6px);
+}
+
+/* the case card under the case selector: the patient's history, plain */
+.case-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 0;
+  border-radius: var(--r-sm);
+}
+.case-history {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.48;
+  color: var(--text);
+  font-weight: 500;
+}
+.case-objectives {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+/* On a narrow display, the image keeps its physical canvas and panels move below it.
+   CSS changes presentation only: no acquisition control or probe pose is reset. */
+.mobile-panels {
+  display: none;
+}
+
+.torso-gesture {
+  position: absolute;
+  top: 50px;
+  left: 16px;
+  z-index: 5;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-sm);
+  padding: 3px 6px 3px 8px;
+  backdrop-filter: blur(8px);
+}
+.torso-gesture select {
+  max-width: 90px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 18px 1px 6px;
+  height: 22px;
+  background-color: rgba(30, 41, 59, 0.92);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: var(--r-xs);
+  color: #f8fafc;
+}
+.torso-3d canvas {
+  touch-action: none;
+}
+
+@media (max-width: 1040px) {
+  .brand-sub,
+  .modebar-status,
+  .seg-bar .kbd {
+    display: none;
+  }
+  .nav-seg button {
+    padding: 4px 8px;
+    font-size: var(--fs-md);
+  }
+
+  .app,
+  .app.rail-mini,
+  .app.no-torso {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .topbar {
+    order: 0;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    padding: 8px;
+    gap: 8px;
+  }
+  .topbar .nav-seg {
+    order: 2;
+    flex: 1 0 100%;
+    justify-content: center;
+    margin: 0;
+  }
+  .topbar select {
+    flex: 1 1 80px;
+    min-width: 0;
+    max-width: 130px;
+  }
+  .modebar {
+    order: 1;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px;
+  }
+  .modebar .seg-bar {
+    flex: 1 0 100%;
+    justify-content: space-between;
+    min-width: 0;
+    padding: 2px;
+  }
+  .modebar .seg-bar button {
+    justify-content: center;
+    flex: 1 1 0;
+    padding: 6px 3px;
+    min-height: 36px;
+  }
+  .modebar .sep {
+    display: none;
+  }
+  .modebar .cine {
+    order: 3;
+    flex: 1 0 100%;
+  }
+  .center {
+    order: 2;
+    flex: 0 0 clamp(300px, 46dvh, 480px);
+    min-height: 300px;
+    padding: 6px;
+  }
+  .mobile-panels {
+    order: 3;
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 6px;
+    background: var(--panel);
+  }
+  .mobile-panels button {
+    flex: 1;
+    min-height: 40px;
+  }
+  .mobile-panels button[aria-expanded='true'] {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+  .app .left,
+  .app .right {
+    order: 4;
+    flex: 0 0 420px;
+    min-height: 320px;
+    border: 0;
+  }
+  .app:not([data-mobile-panel='navigation']) .left,
+  .app:not([data-mobile-panel='console']) .right {
+    display: none !important;
+  }
+  .app .rail-main {
+    display: flex !important;
+  }
+  .rail-collapse,
+  .rail-strip {
+    display: none;
+  }
+  .app .screen,
+  .app .screen-group {
+    order: 2;
+    min-height: 400px;
+  }
+
+  .modebar .menu {
+    top: calc(100% + 8px);
+    bottom: auto;
+    max-height: 70dvh;
+    overflow-y: auto;
+  }
+
+  .torso-buttons {
+    grid-template-columns: repeat(2, 36px);
+    opacity: 1;
+  }
+  .torso-buttons button.icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .screen,
+  .screen-group-head {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .app .left {
+    flex-basis: 640px;
+  }
+  .app .left .torso-wrap.split .torso-3d {
+    min-height: 240px;
+  }
+  .quick-bar {
+    display: none;
+  }
+}
+
+/* The case report laid out as an echocardiography lab's report (design review of 2026-10-12): an identification header,
+   sections ruled off from one another and a conclusion, set apart from the teaching evaluation that follows it. */
+.clinical-report {
+  margin: 12px 0 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  overflow: hidden;
+}
+.clinical-report .cr-head {
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+}
+.clinical-report .cr-head h2 {
+  margin: 0 0 10px;
+  font-size: var(--fs-xl);
+  letter-spacing: 0.01em;
+}
+.clinical-report .cr-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
+.clinical-report .cr-meta > div {
+  min-width: 0;
+}
+.clinical-report .cr-meta .cr-meta-wide {
+  grid-column: 1 / -1;
+}
+.clinical-report .cr-meta dt {
+  font-size: var(--fs-caps);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.clinical-report .cr-meta dd {
+  margin: 2px 0 0;
+  color: var(--text);
+}
+.clinical-report .cr-section {
+  padding: 12px 20px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.clinical-report .cr-section:last-child {
+  border-bottom: 0;
+}
+.clinical-report .cr-section h3 {
+  margin: 4px 0 8px;
+  font-size: var(--fs-caps);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.clinical-report .cr-conclusion ol {
+  margin: 0;
+  padding-left: 20px;
+  font-size: var(--fs-lg);
+  line-height: 1.6;
+}
+.cr-eval {
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+.cr-eval > h2 {
+  font-size: var(--fs-xl);
+  color: var(--muted);
+}
+
+/* review mode's identification and pencil (decision 340) */
+.review-tool {
+  margin: 8px 0;
+}
+.review-explain {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.overlay.review.lasso {
+  cursor: crosshair;
+}

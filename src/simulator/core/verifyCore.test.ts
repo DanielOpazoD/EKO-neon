@@ -6,7 +6,24 @@ import { buildBeatTables, cycleStateAt } from '@/simulator/cardiac-cycle/cycleMo
 import { caseOutflow } from '@/simulator/cardiac-cycle/outflow';
 import { applySriPolar } from '@/simulator/renderer/postprocess/sriFilter';
 import { DEFAULT_COLOR, overlayColorField } from '@/simulator/doppler/color/colorDoppler';
-import type { ScanLut } from '@/simulator/renderer/scanConvert';
+import {
+  buildScanLut,
+  computeSectorMapping,
+  scanConvertLut,
+  scanConvertLutReference,
+  type ScanLut,
+} from '@/simulator/renderer/scanConvert';
+import {
+  TINT_MAP_OPTIONS,
+  tintGrayByte,
+  tintPackedLut,
+} from '@/simulator/renderer/postprocess/tintMap';
+import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
+import { Tissue } from '@/simulator/anatomy/tissue';
+import { CineBuffer, type CineFrame } from '@/simulator/core/cineBuffer';
+import { applyConsole, createConsoleState } from '@/simulator/renderer/postprocess/consolePipeline';
+import { allocPolarFrame, DEFAULT_ACQUISITION } from '@/simulator/renderer/types';
+import { DEFAULT_SPECTRAL } from '@/simulator/doppler/spectral/spectrum';
 
 describe('EchoTwin TTE core physiology and clinical cases', () => {
   it('loads and validates all 12 clinical cases with finite ground-truth hemodynamics', () => {
@@ -179,5 +196,233 @@ describe('EchoTwin TTE core physiology and clinical cases', () => {
     const tissueMinCh = Math.min(rgba[4]!, rgba[5]!, rgba[6]!);
     assert.ok(tissueMinCh > 100, `Expected tissue priority to preserve bright wall structure, got rgb=(${rgba[4]},${rgba[5]},${rgba[6]})`);
   });
+
+  it('performs anti-ringing bicubic Catmull-Rom scan conversion with exact reference parity and chroma tint LUTs', () => {
+    const spec = {
+      lines: 48,
+      samples: 64,
+      elevationSamples: 1,
+      sectorRad: (78 * Math.PI) / 180,
+      depthCm: 16,
+      focusCm: 8,
+    };
+    const mapping = computeSectorMapping(spec, 96, 80, false, 1);
+    const lut = buildScanLut(spec, mapping);
+
+    // Sharp high-contrast step edge (10 -> 240) across depth and azimuth to test anti-ringing clamp
+    const polar = new Uint8ClampedArray(spec.lines * spec.samples);
+    for (let li = 0; li < spec.lines; li++) {
+      for (let si = 0; si < spec.samples; si++) {
+        polar[li * spec.samples + si] = li >= 24 && si >= 32 ? 240 : 10;
+      }
+    }
+
+    const rgbaFast = new Uint8ClampedArray(96 * 80 * 4);
+    const rgbaRef = new Uint8ClampedArray(96 * 80 * 4);
+    scanConvertLut(polar, lut, rgbaFast, 'gray');
+    scanConvertLutReference(polar, lut, rgbaRef, 'gray');
+
+    let insideCount = 0;
+    for (let p = 0; p < 96 * 80; p++) {
+      const o = p * 4;
+      assert.equal(rgbaFast[o], rgbaRef[o], `Fast vs ref R mismatch at pixel ${p}`);
+      assert.equal(rgbaFast[o + 1], rgbaRef[o + 1], `Fast vs ref G mismatch at pixel ${p}`);
+      assert.equal(rgbaFast[o + 2], rgbaRef[o + 2], `Fast vs ref B mismatch at pixel ${p}`);
+      if (lut.idx[p]! >= 0) {
+        insideCount++;
+        const v = rgbaFast[o]!;
+        assert.ok(v >= 10 && v <= 240, `Catmull-Rom ringing escaped [10, 240]: got ${v} at pixel ${p}`);
+      }
+    }
+    assert.ok(insideCount > 500, `Expected > 500 pixels inside sector, got ${insideCount}`);
+
+    // Verify all 4 chroma tint maps preserve 0 -> black, 255 -> white, monotonicity, and packed LUT parity
+    const rgb: [number, number, number] = [0, 0, 0];
+    for (const opt of TINT_MAP_OPTIONS) {
+      tintGrayByte(0, opt.id, rgb);
+      assert.deepEqual(rgb, [0, 0, 0], `${opt.id} must map 0 to black`);
+      tintGrayByte(255, opt.id, rgb);
+      assert.deepEqual(rgb, [255, 255, 255], `${opt.id} must map 255 to white`);
+
+      const packed = tintPackedLut(opt.id);
+      const view = new Uint8Array(packed.buffer, packed.byteOffset, packed.byteLength);
+      let prevLum = -1;
+      for (let g = 0; g < 256; g++) {
+        tintGrayByte(g, opt.id, rgb);
+        assert.equal(view[g * 4], rgb[0], `${opt.id} packed R mismatch at ${g}`);
+        assert.equal(view[g * 4 + 1], rgb[1], `${opt.id} packed G mismatch at ${g}`);
+        assert.equal(view[g * 4 + 2], rgb[2], `${opt.id} packed B mismatch at ${g}`);
+        const lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+        assert.ok(lum >= prevLum - 0.5, `${opt.id} luminance non-monotonic at ${g}: ${lum} < ${prevLum}`);
+        prevLum = lum;
+      }
+    }
+  });
+
+  it('auto-optimizes gain and depth TGC for dark/attenuated frames while guarding washed-out cavities', () => {
+    const lines = 40;
+    const samples = 64;
+    const n = lines * samples;
+    const tissue = new Uint8Array(n).fill(Tissue.Myocardium);
+
+    // 1. Dark & far-field attenuated frame (near p85 ~ 95, far p85 ~ 35)
+    const dark = new Uint8ClampedArray(n);
+    for (let li = 0; li < lines; li++) {
+      for (let si = 0; si < samples; si++) {
+        const depthFrac = si / (samples - 1);
+        // 60% cavity (dark) + 40% myocardium wall (attenuating with depth)
+        const isWall = li % 5 >= 3;
+        dark[li * samples + si] = isWall ? Math.round(95 - 60 * depthFrac) : 14;
+      }
+    }
+    const optDark = computeAutoOpt(
+      dark,
+      tissue,
+      { lines, samples },
+      { gainDb: 0, tgcDb: [0, 0, 0, 0, 0, 0, 0, 0], dynamicRangeDb: 70 },
+    );
+    assert.ok(optDark.gainDb > 0, `Expected Auto-Opt to boost gain on dark frame, got ${optDark.gainDb}`);
+    assert.ok(
+      optDark.tgcDb[7]! > optDark.tgcDb[0]!,
+      `Expected Auto-Opt to tilt far TGC higher than near TGC: near=${optDark.tgcDb[0]}, far=${optDark.tgcDb[7]}`,
+    );
+
+    // 2. Over-gained frame with washed-out blood pool (p25 = 115 > 64)
+    const bright = new Uint8ClampedArray(n);
+    for (let li = 0; li < lines; li++) {
+      for (let si = 0; si < samples; si++) {
+        const isWall = li % 5 >= 3;
+        bright[li * samples + si] = isWall ? 225 : 115;
+      }
+    }
+    const optBright = computeAutoOpt(
+      bright,
+      tissue,
+      { lines, samples },
+      { gainDb: 10, tgcDb: [0, 0, 0, 0, 0, 0, 0, 0], dynamicRangeDb: 70 },
+    );
+    assert.ok(
+      optBright.gainDb < 10,
+      `Expected Auto-Opt to lower gain on washed-out frame, got ${optBright.gainDb}`,
+    );
+  });
+
+  it('recycles CineBuffer typed arrays in-place across wrap-around and snaps accurately to ED/ES phases', () => {
+    const buf = new CineBuffer(8);
+    const spec = {
+      lines: 8,
+      samples: 10,
+      elevationSamples: 1,
+      sectorRad: 1.2,
+      depthCm: 16,
+      focusCm: 8,
+    };
+    const makeFrame = (id: number, phase: number, val: number): CineFrame => ({
+      acquisition: {
+        modality: '2d',
+        probe: { u: 0, v: 0, rotationDeg: 0, tiltDeg: 0, rockDeg: 0, pressure: 0.5 },
+        patient: { position: 'left-lateral', respiration: 'expiration', headElevationDeg: 0 },
+        settings: { ...DEFAULT_ACQUISITION, tgcDb: [...DEFAULT_ACQUISITION.tgcDb] },
+        color: { ...DEFAULT_COLOR },
+        spectral: { ...DEFAULT_SPECTRAL },
+        cursorThetaRad: 0,
+        gateDepthCm: 8,
+        modelVersion: 1,
+        tablesVersion: 1,
+        phaseMarks: {
+          ejectionStart: 0.06,
+          ejectionEnd: 0.36,
+          endSystole: 0.35,
+          mitralOpen: 0.44,
+          eEnd: 0.65,
+          aStart: 0.84,
+          aEnd: 0.96,
+          hasAWave: true,
+        },
+        stripAcquisitionId: null,
+        colorTimeS: null,
+      },
+      scene: {} as CineFrame['scene'],
+      gate: null,
+      spectrumColumn: null,
+      spectralRange: { vMin: -1.5, vMax: 1.5 },
+      display: new Uint8ClampedArray(80).fill(val),
+      structure: new Uint8Array(80).fill(1),
+      segment: new Uint8Array(80).fill(2),
+      spec,
+      frameId: id,
+      rrS: 0.92,
+      phase,
+      timeS: id * 0.05,
+      beatIndex: Math.floor(id / 8),
+      colorVel: null,
+      colorVar: null,
+      beam: {
+        origin: { x: 0, y: 0, z: 0 },
+        forward: { x: 0, y: 0, z: 1 },
+        lateral: { x: 1, y: 0, z: 0 },
+        normal: { x: 0, y: 1, z: 0 },
+        contact: 1,
+      },
+      analysis: null,
+    });
+
+    for (let i = 0; i < 8; i++) buf.capture(makeFrame(i, i / 8, 10 + i));
+    const slot0Before = buf.oldest!;
+    const displayRefBefore = slot0Before.display;
+    const structureRefBefore = slot0Before.structure;
+    const segmentRefBefore = slot0Before.segment;
+
+    // Capturing the 9th frame overwrites slot 0 and must reuse its TypedArrays in-place
+    buf.capture(makeFrame(8, 0.02, 222));
+    const newest = buf.newest!;
+    assert.equal(newest.display, displayRefBefore, 'CineBuffer should reuse display Uint8ClampedArray');
+    assert.equal(newest.structure, structureRefBefore, 'CineBuffer should reuse structure Uint8Array');
+    assert.equal(newest.segment, segmentRefBefore, 'CineBuffer should reuse segment Uint8Array');
+    assert.equal(newest.display[0], 222);
+
+    // Phase snap across 2 full cardiac cycles prefers the latest beat's ED (0.0) and ES (0.35)
+    const cine2 = new CineBuffer(40);
+    for (let i = 0; i < 40; i++) {
+      cine2.capture(makeFrame(i, (i % 20) / 20, i));
+    }
+    const ed = cine2.findNearestPhaseOffset(0);
+    const es = cine2.findNearestPhaseOffset(0.35);
+    assert.ok(ed !== null && ed.offset >= -19, `ED snap should prefer newest beat, got offset=${ed?.offset}`);
+    assert.ok(ed!.phase <= 0.05 || ed!.phase >= 0.95, `ED phase should be ~0, got ${ed?.phase}`);
+    assert.ok(es !== null && es.offset >= -19, `ES snap should prefer newest beat, got offset=${es?.offset}`);
+    assert.ok(Math.abs(es!.phase - 0.35) <= 0.051, `ES phase should be ~0.35, got ${es?.phase}`);
+  });
+
+  it('reuses console persistence buffer in-place and maintains monotonic gray-map LUTs', () => {
+    const spec = {
+      lines: 16,
+      samples: 32,
+      elevationSamples: 1,
+      sectorRad: 1.2,
+      depthCm: 16,
+      focusCm: 8,
+    };
+    const frame = allocPolarFrame(spec);
+    for (let i = 0; i < frame.amplitude.length; i++) {
+      frame.amplitude[i] = 0.005 + (i / frame.amplitude.length) * 0.9;
+    }
+    const state = createConsoleState(42);
+    const out = new Uint8ClampedArray(spec.lines * spec.samples);
+
+    applyConsole(frame, { ...DEFAULT_ACQUISITION, persistence: 0, sri: 0, edgeEnhance: 0, grayMap: 'clinical' }, state, out);
+    const prevRef = state.prev;
+    assert.ok(prevRef instanceof Float32Array);
+
+    applyConsole(frame, { ...DEFAULT_ACQUISITION, persistence: 0, sri: 0, edgeEnhance: 0, grayMap: 'high-contrast' }, state, out);
+    assert.equal(state.prev, prevRef, 'applyConsole should reuse state.prev in-place without reallocating');
+
+    for (const gm of ['clinical', 's-curve', 'high-contrast', 'linear'] as const) {
+      applyConsole(frame, { ...DEFAULT_ACQUISITION, persistence: 0, sri: 0, edgeEnhance: 0, grayMap: gm }, state, out);
+      assert.ok(out[out.length - 1]! >= out[0]!, `Gray map ${gm} should preserve high > low amplitude`);
+    }
+  });
 });
+
+
 

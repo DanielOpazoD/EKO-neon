@@ -477,7 +477,7 @@ export function compareImageChain(
     showVariance: true,
   };
   const cpuRgba = new Uint8ClampedArray(W * H * 4);
-  scanConvertLut(dispGpu, lut, cpuRgba);
+  scanConvertLut(dispGpu, lut, cpuRgba, settings.tintMap);
   overlayColorField(cpuRgba, lut, vel, variance, colorSettings);
   const gpuRgba = new Uint8Array(W * H * 4);
   gpu.present({
@@ -485,6 +485,7 @@ export function compareImageChain(
     width: W,
     height: H,
     color: { vel, variance, version: 1, settings: colorSettings },
+    tintMap: settings.tintMap,
     readback: gpuRgba,
   });
   gpu.dispose();

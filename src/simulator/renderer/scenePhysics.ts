@@ -40,7 +40,7 @@ export interface ScenePhysicsOptions {
  */
 export function scenePhysicsFor(
   c: CaseDefinition,
-  settings: Pick<AcquisitionSettings, 'frequencyMHz' | 'harmonics'>,
+  settings: Pick<AcquisitionSettings, 'frequencyMHz' | 'harmonics' | 'spatialCompound'>,
   opts: ScenePhysicsOptions = {},
 ): ScenePhysics {
   const a = opts.artifacts ?? caseArtifactLevels(c);
@@ -54,6 +54,7 @@ export function scenePhysicsFor(
     beamWidth: a.beamWidth,
     sideLobe: a.sideLobe,
     bloodFrame: opts.bloodFrame ?? 0,
+    spatialCompound: Math.max(0, Math.min(1, settings.spatialCompound ?? 0)),
   };
 }
 

@@ -66,6 +66,8 @@ export interface SimInput {
     beamWidth: number;
     clutter: number;
   } | null;
+  /** True when the UI actively displays LV segment overlays/maps (otherwise GPU only reads segments on analysis frames). */
+  needSegments?: boolean;
 }
 
 /** Acquisition controls and model versions that produced one image, independent of pending console changes. */
@@ -223,7 +225,11 @@ export type SimRequest =
       torso?: { x: number; y: number; z: number };
     }
   /** Where the echo at one point of the displayed frame comes from (review mode, decision 340). */
-  | { kind: 'explainPoint'; rCm: number; thetaRad: number };
+  | { kind: 'explainPoint'; rCm: number; thetaRad: number }
+  /** One-touch Auto-Optimization (iScan): analyzes current polar frame bands to optimize gain & TGC. */
+  | { kind: 'autoOpt' }
+  /** Jump to the cine frame closest to end-diastole ('ed') or end-systole ('es'). */
+  | { kind: 'cinePhaseJump'; target: 'ed' | 'es' };
 export type SimResponse =
   | {
       kind: 'autoTrace';
@@ -235,7 +241,9 @@ export type SimResponse =
     }
   | { kind: 'canonicalControl'; control: ProbeControl }
   | { kind: 'probePoint'; point: ProbePointInfo }
-  | { kind: 'explainPoint'; explain: PointExplanation };
+  | { kind: 'explainPoint'; explain: PointExplanation }
+  | { kind: 'autoOpt'; gainDb: number; tgcDb: number[] }
+  | { kind: 'cinePhaseJump'; offset: number; phase: number };
 
 export type { EchoSourceId };
 

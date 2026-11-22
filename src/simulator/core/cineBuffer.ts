@@ -58,7 +58,44 @@ export class CineBuffer {
     return this.at(Math.max(0, Math.min(this.count - 1, this.count - 1 + safeOffset)));
   }
 
+  /**
+   * Find the cine offset (`-(count-1)..0`) closest to `targetPhase` (0..1, circular distance),
+   * preferring the most recent cardiac cycle when multiple beats match closely.
+   */
+  findNearestPhaseOffset(targetPhase: number): { offset: number; phase: number } | null {
+    if (this.count === 0) return null;
+    const t = ((targetPhase % 1) + 1) % 1;
+    let bestOffset = 0;
+    let bestPhase = 0;
+    let bestScore = Infinity;
+    // Search newest → oldest; tiny recency tie-breaker (0.012) picks the latest beat's ED/ES cleanly
+    for (let i = this.count - 1; i >= 0; i--) {
+      const f = this.at(i);
+      if (!f) continue;
+      const dRaw = Math.abs(f.phase - t);
+      const d = Math.min(dRaw, 1 - dRaw);
+      const agePenalty = ((this.count - 1 - i) / Math.max(1, this.count)) * 0.012;
+      const score = d + agePenalty;
+      if (score < bestScore) {
+        bestScore = score;
+        bestOffset = i - (this.count - 1);
+        bestPhase = f.phase;
+      }
+    }
+    return { offset: bestOffset, phase: bestPhase };
+  }
+
   capture(frame: CineFrame): void {
+    const prev = this.frames[this.head];
+    const display = reuseU8Clamped(prev?.display, frame.display);
+    const structure = reuseU8(prev?.structure, frame.structure);
+    const segment = reuseU8(prev?.segment, frame.segment);
+    const spectrumColumn = frame.spectrumColumn
+      ? reuseF32(prev?.spectrumColumn ?? undefined, frame.spectrumColumn)
+      : null;
+    const colorVel = frame.colorVel ? reuseF32(prev?.colorVel ?? undefined, frame.colorVel) : null;
+    const colorVar = frame.colorVar ? reuseF32(prev?.colorVar ?? undefined, frame.colorVar) : null;
+
     this.frames[this.head] = {
       ...frame,
       acquisition: {
@@ -71,11 +108,11 @@ export class CineBuffer {
         phaseMarks: { ...frame.acquisition.phaseMarks },
       },
       gate: frame.gate ? { ...frame.gate, lineStructures: [...frame.gate.lineStructures] } : null,
-      spectrumColumn: frame.spectrumColumn?.slice() ?? null,
+      spectrumColumn,
       spectralRange: { ...frame.spectralRange },
-      display: frame.display.slice(),
-      structure: frame.structure.slice(),
-      segment: frame.segment.slice(),
+      display,
+      structure,
+      segment,
       spec: { ...frame.spec },
       beam: {
         ...frame.beam,
@@ -84,10 +121,38 @@ export class CineBuffer {
         lateral: { ...frame.beam.lateral },
         normal: { ...frame.beam.normal },
       },
-      colorVel: frame.colorVel?.slice() ?? null,
-      colorVar: frame.colorVar?.slice() ?? null,
+      colorVel,
+      colorVar,
     };
     this.head = (this.head + 1) % this.capacity;
     this.count = Math.min(this.capacity, this.count + 1);
   }
 }
+
+function reuseU8Clamped(
+  existing: Uint8ClampedArray | undefined,
+  src: Uint8ClampedArray,
+): Uint8ClampedArray {
+  if (existing && existing.length === src.length) {
+    existing.set(src);
+    return existing;
+  }
+  return src.slice();
+}
+
+function reuseU8(existing: Uint8Array | undefined, src: Uint8Array): Uint8Array {
+  if (existing && existing.length === src.length) {
+    existing.set(src);
+    return existing;
+  }
+  return src.slice();
+}
+
+function reuseF32(existing: Float32Array | undefined, src: Float32Array): Float32Array {
+  if (existing && existing.length === src.length) {
+    existing.set(src);
+    return existing;
+  }
+  return src.slice();
+}
+

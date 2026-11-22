@@ -57,6 +57,22 @@ export const S_CURVE_MIX = 0.85;
 export const HIGH_CONTRAST_GAMMA = 1.6;
 /** Floor added before the log so a zero envelope compresses to −∞ dB without NaN. */
 export const LOG_FLOOR = 1e-6;
+/** 20 / ln(10): exact multiplier to compute 20*log10(x) via faster Math.log(x). */
+const LOG10E_20 = 20 / Math.LN10;
+/** 4096-entry LUTs for clinical & high-contrast gray curves (< 0.0001 max error vs exact expm1/pow). */
+const GRAY_LUT_SIZE = 4096;
+const CLINICAL_GRAY_LUT = Uint8Array.from({ length: GRAY_LUT_SIZE + 1 }, (_, i) => {
+  const y = i / GRAY_LUT_SIZE;
+  return Math.round((Math.expm1(y * CLINICAL_GREY_LOG) / CLINICAL_GREY_CURVE) * 255);
+});
+const HIGH_CONTRAST_LUT = Uint8Array.from({ length: GRAY_LUT_SIZE + 1 }, (_, i) => {
+  const y = i / GRAY_LUT_SIZE;
+  return Math.round(Math.pow(y, HIGH_CONTRAST_GAMMA) * 255);
+});
+const S_CURVE_LUT = Uint8Array.from({ length: GRAY_LUT_SIZE + 1 }, (_, i) => {
+  const y = i / GRAY_LUT_SIZE;
+  return Math.round((y * y * (3 - 2 * y) * S_CURVE_MIX + y * (1 - S_CURVE_MIX)) * 255);
+});
 /**
  * Receiver-noise magnitude table: the Rayleigh tail is truncated at this fraction of the CDF (3.3 RMS), the
  * magnitude comes from the high 16 bits of the hash and the phase from its low 10 bits (decision 91).
@@ -288,19 +304,21 @@ export function applyConsole(
     }
   }
   // 2) axial resolution is formed by the renderer PSF (decision 52)
-  b.set(a);
-  // 3) log compression / dynamic range → 0..1
+  // 3) log compression / dynamic range → 0..1 (in-place on `a`)
+  const invDr = 1 / dr_;
   for (let i = 0; i < n; i++) {
-    const db = 20 * Math.log10((b[i] ?? 0) + LOG_FLOOR) - REF_DB;
-    const y = (db + dr_) / dr_;
-    a[i] = y < 0 ? 0 : y > 1 ? 1 : y;
+    const db = Math.log(a[i]! + LOG_FLOOR) * LOG10E_20 - REF_DB;
+    const y = (db + dr_) * invDr;
+    a[i] = y <= 0 ? 0 : y >= 1 ? 1 : y;
   }
   // 4) structure-oriented anisotropic speckle reduction (SRI / XRES-style) on 2D frames
   const sri = !line ? (settings.sri ?? 0) : 0;
+  let cur = a;
+  let tmp = b;
   if (sri > 0 && lines >= 3 && samples >= 3) {
-    applySriPolar(a, b, lines, samples, sri);
-  } else {
-    b.set(a);
+    applySriPolar(cur, tmp, lines, samples, sri);
+    cur = b;
+    tmp = a;
   }
   // 5) edge enhancement (unsharp along samples, mild)
   if (settings.edgeEnhance > 0) {
@@ -309,39 +327,47 @@ export function applyConsole(
     for (let li = 0; li < lines; li++) {
       const base = li * samples;
       for (let si = k; si < samples - k; si++) {
-        const c = b[base + si] ?? 0;
-        const m = ((b[base + si - k] ?? 0) + (b[base + si + k] ?? 0)) / 2;
-        a[base + si] = Math.min(1, Math.max(0, c + (c - m) * e));
+        const c = cur[base + si]!;
+        const m = (cur[base + si - k]! + cur[base + si + k]!) * 0.5;
+        const v = c + (c - m) * e;
+        tmp[base + si] = v <= 0 ? 0 : v >= 1 ? 1 : v;
       }
       for (let si = 0; si < k; si++) {
-        a[base + si] = b[base + si] ?? 0;
-        a[base + samples - 1 - si] = b[base + samples - 1 - si] ?? 0;
+        tmp[base + si] = cur[base + si]!;
+        tmp[base + samples - 1 - si] = cur[base + samples - 1 - si]!;
       }
     }
-  } else a.set(b);
-  // 6) persistence
+    const swap = cur;
+    cur = tmp;
+    tmp = swap;
+  }
+  // 6) persistence (reuse `state.prev` in-place to avoid per-frame TypedArray allocation)
   const p = line ? 0 : settings.persistence;
   if (line) {
     // an M-mode column has no history: each column is its own instant
   } else if (state.prev && state.prev.length === n && p > 0) {
     const prev = state.prev;
+    const oneMinusP = 1 - p;
     for (let i = 0; i < n; i++) {
-      const y = (a[i] ?? 0) * (1 - p) + (prev[i] ?? 0) * p;
-      a[i] = y;
+      const y = cur[i]! * oneMinusP + prev[i]! * p;
+      cur[i] = y;
       prev[i] = y;
     }
+  } else if (state.prev && state.prev.length === n) {
+    state.prev.set(cur);
   } else {
-    state.prev = new Float32Array(a);
+    state.prev = new Float32Array(cur);
   }
-  // 7) gray map
-  for (let i = 0; i < n; i++) {
-    let y = a[i] ?? 0;
-    if (settings.grayMap === 's-curve')
-      y = y * y * (3 - 2 * y) * S_CURVE_MIX + y * (1 - S_CURVE_MIX);
-    else if (settings.grayMap === 'high-contrast') y = Math.pow(y, HIGH_CONTRAST_GAMMA);
-    else if (settings.grayMap === 'clinical')
-      y = Math.expm1(y * CLINICAL_GREY_LOG) / CLINICAL_GREY_CURVE;
-    outU8[i] = Math.round(y * 255);
+  // 7) gray map (O(1) 4096-entry LUT for non-linear curves)
+  const gm = settings.grayMap;
+  if (gm === 'clinical') {
+    for (let i = 0; i < n; i++) outU8[i] = CLINICAL_GRAY_LUT[(cur[i]! * GRAY_LUT_SIZE + 0.5) | 0]!;
+  } else if (gm === 's-curve') {
+    for (let i = 0; i < n; i++) outU8[i] = S_CURVE_LUT[(cur[i]! * GRAY_LUT_SIZE + 0.5) | 0]!;
+  } else if (gm === 'high-contrast') {
+    for (let i = 0; i < n; i++) outU8[i] = HIGH_CONTRAST_LUT[(cur[i]! * GRAY_LUT_SIZE + 0.5) | 0]!;
+  } else {
+    for (let i = 0; i < n; i++) outU8[i] = (cur[i]! * 255 + 0.5) | 0;
   }
   state.gpuHistory = false;
   state.frameIndex++;

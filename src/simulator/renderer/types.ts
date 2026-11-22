@@ -6,6 +6,9 @@ import type { PsfKernels } from './acoustic/psf';
 import type { ScatterField } from './acoustic/scatterers';
 import type { ConsoleState } from './postprocess/consolePipeline';
 import { SRI_DEFAULT } from './postprocess/sriFilter';
+import { TINT_DEFAULT, type TintMapId } from './postprocess/tintMap';
+
+export type { TintMapId };
 
 export type ImagingModality = '2d' | 'm-mode' | 'cmm' | 'color' | 'pw' | 'cw' | 'tdi';
 export type LineDensity = 'low' | 'medium' | 'high';
@@ -25,7 +28,11 @@ export interface AcquisitionSettings {
   edgeEnhance: number; // 0..1 (smoothing when negative is not allowed; 0 = none)
   /** Structure-oriented anisotropic speckle reduction (SRI / XRES-style), 0..1. */
   sri?: number;
+  /** Multi-angle spatial compounding (SonoCT-style), 0..1: reduces specular dropout on grazing walls and softens narrow shadows. */
+  spatialCompound?: number;
   grayMap: 'linear' | 's-curve' | 'high-contrast' | 'clinical';
+  /** Clinical chroma tint LUT applied during presentation ('gray' | 'cool-blue' | 'sepia' | 'amber'). */
+  tintMap?: TintMapId;
   invertLR: boolean;
   zoom: number; // 1 = none
   /** Default depth compensation of the console (dB/cm/MHz, two-way path); the console's own value when absent. */
@@ -48,7 +55,9 @@ export const DEFAULT_ACQUISITION: AcquisitionSettings = {
   persistence: 0.35,
   edgeEnhance: 0.1,
   sri: SRI_DEFAULT,
+  spatialCompound: 0.4,
   grayMap: 'clinical',
+  tintMap: TINT_DEFAULT,
   invertLR: false,
   zoom: 1,
 };
@@ -110,6 +119,8 @@ export interface ScenePhysics {
    * 0 when omitted.
    */
   bloodFrame?: number;
+  /** Multi-angle spatial compounding strength (0..1): steers ±14°·c virtual beams for specular/anisotropy/shadow compounding. */
+  spatialCompound?: number;
 }
 
 export interface Scene {
@@ -197,6 +208,8 @@ export interface RenderHints {
 export interface DisplayConsole {
   settings: AcquisitionSettings;
   state: ConsoleState;
+  /** When false, skip reading back the LV segment channel from pass B (default true for compatibility). */
+  needSegments?: boolean;
 }
 
 /**

@@ -7,7 +7,8 @@ import type { CaseDefinition } from '@/cases/schema';
 import { computeHeartPose, type HeartModel } from '@/simulator/anatomy/heartModel';
 import { cycleStateAt, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import type { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
-import type { PolarFrame, PolarFrameSpec, Scene, ScenePhysics } from '@/simulator/renderer/types';
+import type { PolarFrame, PolarFrameSpec, Scene, ScenePhysics, TintMapId } from '@/simulator/renderer/types';
+import { tintGrayByte } from '@/simulator/renderer/postprocess/tintMap';
 import {
   applyConsole,
   createConsoleState,
@@ -134,6 +135,7 @@ export class StripEngine {
   /** The strip as displayed (RGBA, strip rows × columns), repainted one column at a time; its layout key. */
   private stripRgba: Uint8ClampedArray | null = null;
   private stripRgbaKey = '';
+  private lastTintMap: TintMapId | undefined = undefined;
   private rowMap: RowMap | null = null;
   /** Peak flow vector over the cycle at the last gate position (heart frame), keyed by that position. */
   private gateFlow = { key: '', best: 0, bx: 0, by: 0, bz: 0 };
@@ -914,9 +916,16 @@ export class StripEngine {
     return null;
   }
 
-  drawStrip(rgba: Uint8ClampedArray, W: number, H: number, sectorH: number): StripInfo {
+  drawStrip(
+    rgba: Uint8ClampedArray,
+    W: number,
+    H: number,
+    sectorH: number,
+    tintMap?: TintMapId,
+  ): StripInfo {
     const acquired = this.acquired;
     this.displayCols = W;
+    this.lastTintMap = tintMap;
     const y0 = sectorH + 2;
     const h = H - y0 - 4;
     const cols = this.stripCols;
@@ -926,7 +935,7 @@ export class StripEngine {
     const head = Math.floor(((this.stripHead % Math.max(1, cols)) / Math.max(1, cols)) * W);
     if (kind === 'm-mode' && this.stripMmode && acquired && h > 0) {
       // the strip image is kept between frames and repainted column by column as columns are written (decision 84)
-      const layout = `${cols}x${h}|${this.mmodeSamples}`;
+      const layout = `${cols}x${h}|${this.mmodeSamples}|${tintMap ?? 'gray'}`;
       if (this.stripRgbaKey !== layout || !this.stripRgba) {
         this.stripRgba = new Uint8ClampedArray(cols * h * 4);
         this.rowMap = buildRowMap(h, this.mmodeSamples);
@@ -962,6 +971,8 @@ export class StripEngine {
     }
     if (kind === 'spectral' && this.stripDisplay && acquired) {
       const { vMin, vMax } = spectralRange(acquired.spectral);
+      const customTint = tintMap && tintMap !== 'gray';
+      const rgb: [number, number, number] = [0, 0, 0];
       for (let y = 0; y < h; y++) {
         const b = Math.min(SPECTRAL_BINS - 1, Math.floor((y / h) * SPECTRAL_BINS));
         for (let x = 0; x < W; x++) {
@@ -969,9 +980,16 @@ export class StripEngine {
           const v = this.stripDisplay[col * SPECTRAL_BINS + b] ?? 0;
           const g = Math.round(Math.min(1, v) * 255);
           const o = ((y0 + y) * W + x) * 4;
-          rgba[o] = g;
-          rgba[o + 1] = Math.round(g * 0.93);
-          rgba[o + 2] = Math.round(g * 0.8);
+          if (customTint) {
+            tintGrayByte(g, tintMap, rgb);
+            rgba[o] = rgb[0];
+            rgba[o + 1] = rgb[1];
+            rgba[o + 2] = rgb[2];
+          } else {
+            rgba[o] = g;
+            rgba[o + 1] = Math.round(g * 0.93);
+            rgba[o + 2] = Math.round(g * 0.8);
+          }
           rgba[o + 3] = 255;
         }
       }
@@ -1025,6 +1043,8 @@ export class StripEngine {
     const cols = this.stripCols;
     const S = this.mmodeSamples;
     const { rows, taps, first, weights } = map;
+    const tint = this.lastTintMap;
+    const rgbGray: [number, number, number] = [0, 0, 0];
     for (let y = 0; y < rows; y++) {
       let g = 0;
       const i0 = first[y]!;
@@ -1033,9 +1053,16 @@ export class StripEngine {
         if (w > 0 && i0 + k < S) g += w * strip[(i0 + k) * cols + col]!;
       }
       const o = (y * cols + col) * 4;
-      img[o] = g;
-      img[o + 1] = g;
-      img[o + 2] = g;
+      if (tint && tint !== 'gray') {
+        tintGrayByte(Math.round(g), tint, rgbGray);
+        img[o] = rgbGray[0];
+        img[o + 1] = rgbGray[1];
+        img[o + 2] = rgbGray[2];
+      } else {
+        img[o] = g;
+        img[o + 1] = g;
+        img[o + 2] = g;
+      }
       img[o + 3] = 255;
     }
     const cmm = this.stripCmm;
