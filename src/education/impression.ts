@@ -1,0 +1,188 @@
+import { modelDiastolicAssessment, modelPulmonaryAssessment } from './modelInterpretation';
+import { rangeFlag } from '@/clinical/guidelines/normalRanges';
+import {
+  efCategory,
+  gradeAorticStenosis,
+  gradeMitralRegurgitation,
+  wallThickened,
+} from '@/clinical/guidelines/valveGrading';
+import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+
+/**
+ * Structured impression (spec 26, 28.4): the learner selects findings from a fixed catalogue instead
+ * of free text; the expected findings are derived from the model truth with guideline thresholds, so
+ * the comparison is deterministic and explainable. Scored as F1 between selected and expected sets.
+ */
+export type FindingDomain =
+  'lv' | 'valves' | 'right' | 'atria' | 'pericardium' | 'rhythm-diastole' | 'global';
+
+export interface Finding {
+  id: string;
+  label: string;
+  domain: FindingDomain;
+  /** ids that contradict this one (only one of the group can be true) */
+  exclusive?: string;
+}
+
+export const FINDINGS: Finding[] = [
+  { id: 'normal-study', label: 'Estudio dentro de límites normales', domain: 'global' },
+  {
+    id: 'ef-normal',
+    label: 'FEVI conservada (≥ 52 % hombres, ≥ 54 % mujeres)',
+    domain: 'lv',
+    exclusive: 'ef',
+  },
+  {
+    id: 'ef-mild',
+    label: 'Disfunción sistólica leve (41 % hasta el límite normal)',
+    domain: 'lv',
+    exclusive: 'ef',
+  },
+  {
+    id: 'ef-moderate',
+    label: 'Disfunción sistólica moderada (30–40 %)',
+    domain: 'lv',
+    exclusive: 'ef',
+  },
+  { id: 'ef-severe', label: 'Disfunción sistólica severa (< 30 %)', domain: 'lv', exclusive: 'ef' },
+  { id: 'lv-dilated', label: 'Ventrículo izquierdo dilatado', domain: 'lv' },
+  { id: 'lvh', label: 'Hipertrofia ventricular izquierda', domain: 'lv' },
+  { id: 'asymmetric-septal-hypertrophy', label: 'Hipertrofia septal asimétrica', domain: 'lv' },
+  { id: 'rwma', label: 'Alteración segmentaria de la motilidad', domain: 'lv' },
+  { id: 'lvot-obstruction', label: 'Obstrucción dinámica del TSVI', domain: 'valves' },
+  {
+    id: 'as-none',
+    label: 'Sin estenosis aórtica significativa',
+    domain: 'valves',
+    exclusive: 'as',
+  },
+  {
+    id: 'as-mild',
+    label: 'Estenosis aórtica leve / esclerosis',
+    domain: 'valves',
+    exclusive: 'as',
+  },
+  { id: 'as-moderate', label: 'Estenosis aórtica moderada', domain: 'valves', exclusive: 'as' },
+  { id: 'as-severe', label: 'Estenosis aórtica severa', domain: 'valves', exclusive: 'as' },
+  {
+    id: 'mr-none',
+    label: 'Sin insuficiencia mitral significativa',
+    domain: 'valves',
+    exclusive: 'mr',
+  },
+  { id: 'mr-mild', label: 'Insuficiencia mitral leve', domain: 'valves', exclusive: 'mr' },
+  { id: 'mr-moderate', label: 'Insuficiencia mitral moderada', domain: 'valves', exclusive: 'mr' },
+  { id: 'mr-severe', label: 'Insuficiencia mitral severa', domain: 'valves', exclusive: 'mr' },
+  { id: 'mvp', label: 'Prolapso mitral', domain: 'valves' },
+  { id: 'ar-present', label: 'Insuficiencia aórtica', domain: 'valves' },
+  { id: 'rv-dilated', label: 'Ventrículo derecho dilatado', domain: 'right' },
+  { id: 'rv-dysfunction', label: 'Disfunción sistólica del VD (TAPSE < 1,7 cm)', domain: 'right' },
+  {
+    id: 'ph-probable',
+    label: 'Hallazgos ecográficos sugestivos de hipertensión pulmonar',
+    domain: 'right',
+  },
+  { id: 'tr-significant', label: 'Insuficiencia tricuspídea moderada o mayor', domain: 'right' },
+  { id: 'la-dilated', label: 'Aurícula izquierda dilatada (> 34 mL/m²)', domain: 'atria' },
+  { id: 'effusion', label: 'Derrame pericárdico', domain: 'pericardium' },
+  { id: 'tamponade', label: 'Signos de taponamiento', domain: 'pericardium' },
+  { id: 'af', label: 'Fibrilación auricular', domain: 'rhythm-diastole' },
+  {
+    id: 'diastolic-dysfunction',
+    label: 'Disfunción diastólica',
+    domain: 'rhythm-diastole',
+  },
+  {
+    id: 'filling-pressure-elevated',
+    label: 'Presión de llenado izquierda elevada (algoritmo FA)',
+    domain: 'rhythm-diastole',
+    exclusive: 'filling-pressure',
+  },
+  {
+    id: 'filling-pressure-indeterminate',
+    label: 'Presión de llenado izquierda indeterminada (algoritmo FA)',
+    domain: 'rhythm-diastole',
+    exclusive: 'filling-pressure',
+  },
+];
+
+export function getFinding(id: string): Finding | undefined {
+  return FINDINGS.find((f) => f.id === id);
+}
+
+/** What the aortic stenosis grading reads from the truth: the forward stroke volume index is the flow. */
+export function aorticStenosisInput(t: StructuredEchoTruth) {
+  const av = t.aorticValve;
+  return {
+    vmaxMps: av.vmaxMps,
+    meanGradientMmHg: av.meanGradientMmHg,
+    avaCm2: av.continuityAvaCm2,
+    strokeVolumeIndexMlM2: t.lvot.strokeVolumeMl / t.bsaM2,
+    efPct: t.lv.efPct,
+    velocityRatio: av.velocityRatio,
+  };
+}
+
+/** Expected findings for a case, derived from its structured truth with the thresholds of the guidelines used in the app. */
+export function expectedFindings(t: StructuredEchoTruth): string[] {
+  const out = new Set<string>();
+  // the lower normal limit is 52 % in men and 54 % in women (ASE/EACVI 2015)
+  out.add(`ef-${efCategory(t.lv.efPct, t.sex)}`);
+  // the upper limits of the reference ranges for the patient's sex (decision 175): EDV index 74 (men) or 61 (women)
+  // mL/m², end-diastolic diameter 5.8 or 5.2 cm; the male limits applied to everyone
+  const edviHigh = t.sex === 'female' ? 61 : 74;
+  if (t.lv.edvMl / t.bsaM2 > edviHigh || rangeFlag('lv-edd', t.sex, t.lv.eddCm) === 'high')
+    out.add('lv-dilated');
+  if (t.lv.ivsdCm >= 1.5 && t.lv.ivsdCm / Math.max(0.5, t.lv.lvpwdCm) >= 1.3)
+    out.add('asymmetric-septal-hypertrophy');
+  // walls above the sex's upper limit (1.0 cm men, 0.9 cm women): a 1.1 cm limit for everyone missed the mild
+  // concentric hypertrophy the moderate stenosis and the AF case describe in their women
+  else if (wallThickened(t.lv.ivsdCm, t.lv.lvpwdCm, t.sex)) out.add('lvh');
+  if (t.wallMotion.abnormalSegments.length) out.add('rwma');
+  if (t.lvot.peakGradientMmHg >= 30) out.add('lvot-obstruction');
+  // integrative grading (valveGrading.ts): the flow decides a discordant stenosis, and two of three criteria the regurgitation
+  out.add(`as-${gradeAorticStenosis(aorticStenosisInput(t)).grade}`);
+  const mr = t.regurgitation.mr;
+  out.add(`mr-${mr ? gradeMitralRegurgitation(mr) : 'none'}`);
+  if (t.regurgitation.ar) out.add('ar-present');
+  if (t.rv.basalDiameterCm > 4.1) out.add('rv-dilated');
+  if (t.rightHeart.tapseCm < 1.7) out.add('rv-dysfunction');
+  if (modelPulmonaryAssessment(t).suggestive) out.add('ph-probable');
+  if ((t.regurgitation.tr?.eroaCm2 ?? 0) >= 0.2) out.add('tr-significant');
+  if (t.la.volumeIndexMlM2 > 34) out.add('la-dilated');
+  if (t.pericardium.effusionCm > 0) out.add('effusion');
+  if (t.pericardium.tamponade > 0.3) out.add('tamponade');
+  if (t.rhythm === 'atrial-fibrillation') out.add('af');
+  const diastolic = modelDiastolicAssessment(t);
+  if (diastolic.dysfunctionPresent) out.add('diastolic-dysfunction');
+  if (diastolic.fillingPressure === 'elevated') out.add('filling-pressure-elevated');
+  if (diastolic.fillingPressure === 'indeterminate') out.add('filling-pressure-indeterminate');
+  // a study with only the "normal/none" statements is a normal study
+  const abnormal = [...out].filter((id) => !['ef-normal', 'as-none', 'mr-none'].includes(id));
+  if (abnormal.length === 0) out.add('normal-study');
+  return [...out];
+}
+
+export interface ImpressionScore {
+  score: number; // 0..100 (F1)
+  correct: string[];
+  missed: string[];
+  wrong: string[];
+}
+
+/** F1 between the learner's selection and the expected findings; "normal/none" statements count like any other. */
+export function scoreImpression(
+  selected: readonly string[],
+  expected: readonly string[],
+): ImpressionScore {
+  const sel = new Set(selected);
+  const exp = new Set(expected);
+  const correct = [...sel].filter((id) => exp.has(id));
+  const wrong = [...sel].filter((id) => !exp.has(id));
+  const missed = [...exp].filter((id) => !sel.has(id));
+  if (exp.size === 0) return { score: sel.size === 0 ? 100 : 0, correct, missed, wrong };
+  const precision = sel.size ? correct.length / sel.size : 0;
+  const recall = correct.length / exp.size;
+  const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+  return { score: Math.round(f1 * 100), correct, missed, wrong };
+}

@@ -1,0 +1,781 @@
+import type { CaseDefinition } from '@/cases/schema';
+import {
+  AV_AXIS,
+  ROOT_EXCURSION,
+  classifyHeart,
+  computeHeartPose,
+  estimateStructureVolume,
+  heartAnchors,
+  heartToTorso,
+  lvCavityRadiusAt,
+  lvEpicardialRadiusAt,
+  type HeartPose,
+} from './heartModel';
+import { cross, dot, normalize, sub, type Vec3 } from '@/core/vec3';
+import { LVOT_TAPER_CM, ROOT_STJ_T } from './aorticValve';
+import type { PatientState } from './thoraxModel';
+import { skirtOffsetAt, skirtWarpScale } from './valveSkirt';
+import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
+import { buildCaseModels, REST_PATIENT } from './caseModels';
+import { makeSample, Structure, Tissue } from './tissue';
+import { createRng } from '@/core/random';
+import {
+  CT_CONDITIONAL,
+  CT_MEDIASTINUM,
+  type CtConditional,
+  type CtDistribution,
+} from '@/clinical/reference-values/ctMediastinum';
+import { measureMediastinum } from './mediastinum';
+import { IAS_FOSSA_DESCENT_SHARE, IAS_FOSSA_EDGE_TO } from './laGeometry';
+import { bsaMosteller } from '@/clinical/formulas';
+
+/**
+ * Measures the geometric model of a case the way an echocardiographer would (chamber volumes by
+ * Monte-Carlo over the SDF, chamber diameters by sampling in the standard planes, wall thickness,
+ * aortic root perpendicular to its axis, annuli, ratios) and compares each value with adult
+ * reference ranges (sex-specific where the guidelines give them). Used by `proportions.test.ts`:
+ * a case may only leave a range if it declares the deviation on purpose (`expectedDeviations`).
+ *
+ * Reference ranges: ASE/EACVI chamber quantification 2015 (LV, LA, RA, aortic root), ASE right
+ * heart 2025 (RV basal diameter, RV wall), and approximate ranges where no guideline value exists
+ * (RV volume, RV length, annuli, pulmonary artery). Approximate ranges are marked `approx`.
+ */
+export interface MeasureRow {
+  id: string;
+  label: string;
+  value: number;
+  units: string;
+  lo: number;
+  hi: number;
+  verdict: 'ok' | 'LOW' | 'HIGH';
+  approx: boolean;
+  referenceId: string;
+}
+
+export interface ModelMeasurements {
+  caseId: string;
+  bsaM2: number;
+  rows: MeasureRow[];
+}
+
+export function measureModel(
+  c: CaseDefinition,
+  patient: PatientState = REST_PATIENT,
+  mcSamples = 160000,
+): ModelMeasurements {
+  // the models the app images (decision 237)
+  const { heart, thorax, tables } = buildCaseModels(c, patient);
+  const edPose = computeHeartPose(heart, cycleStateAt(tables, 0.0));
+  const esPose = computeHeartPose(heart, cycleStateAt(tables, tables.endSystoleS / tables.rrS));
+  let maxLongPhase = 0;
+  for (let i = 0, best = -1; i < 64; i++) {
+    const st = cycleStateAt(tables, i / 64);
+    if (st.longitudinal > best) {
+      best = st.longitudinal;
+      maxLongPhase = i / 64;
+    }
+  }
+  const longPose = computeHeartPose(heart, cycleStateAt(tables, maxLongPhase));
+  const bsa = bsaMosteller(c.demographics.heightCm, c.demographics.weightKg);
+  const female = c.demographics.sexForReference === 'female';
+  const rng = createRng(42);
+  const s = makeSample();
+  const L = heart.lv.lengthCm;
+  const A = heartAnchors(heart);
+
+  const vol = (
+    pose: HeartPose,
+    structs: Structure[],
+    min: [number, number, number],
+    max: [number, number, number],
+  ) =>
+    estimateStructureVolume(heart, pose, structs, mcSamples, () => rng.next(), {
+      min: { x: min[0], y: min[1], z: min[2] },
+      max: { x: max[0], y: max[1], z: max[2] },
+    });
+
+  /** contiguous run (cm) of a structure set along an axis through p (searches the nearest inside point first) */
+  const runAt = (
+    pose: HeartPose,
+    structs: Structure[],
+    p0: [number, number, number],
+    axis: 0 | 1 | 2,
+    span = 9,
+  ): number => {
+    const step = 0.02;
+    let p: [number, number, number] = [p0[0], p0[1], p0[2]];
+    const inside = (t: number) => {
+      const q: [number, number, number] = [p[0], p[1], p[2]];
+      q[axis] += t;
+      return classifyHeart(heart, pose, q[0], q[1], q[2], s) && structs.includes(s.structure);
+    };
+    if (!inside(0)) {
+      let found = NaN;
+      for (let t = step; t <= span && Number.isNaN(found); t += step) {
+        if (inside(t)) found = t;
+        else if (inside(-t)) found = -t;
+      }
+      if (Number.isNaN(found)) return 0;
+      p = ((): [number, number, number] => {
+        const q: [number, number, number] = [p[0], p[1], p[2]];
+        q[axis] += found;
+        return q;
+      })();
+    }
+    let a = 0;
+    while (a > -span && inside(a - step)) a -= step;
+    let b = 0;
+    while (b < span && inside(b + step)) b += step;
+    return b - a;
+  };
+  /**
+   * Lumen run along an arbitrary unit direction (inner edge to inner edge): blood and leaflet tissue of the given
+   * structures count (cusps hinge on the inner surface and do not interrupt the diameter); vessel wall, fibrous
+   * tissue and anything else end the run.
+   */
+  const runAlong = (
+    pose: HeartPose,
+    structs: Structure[],
+    c0: [number, number, number],
+    d: [number, number, number],
+    span = 3,
+  ): number => {
+    const step = 0.02;
+    const inside = (u: number) =>
+      classifyHeart(heart, pose, c0[0] + d[0] * u, c0[1] + d[1] * u, c0[2] + d[2] * u, s) &&
+      structs.includes(s.structure) &&
+      (s.tissue === Tissue.Blood || s.tissue === Tissue.Valve);
+    if (!inside(0)) return 0;
+    let a = 0,
+      b = 0;
+    while (a > -span && inside(a - step)) a -= step;
+    while (b < span && inside(b + step)) b += step;
+    return b - a;
+  };
+  /** contiguous run of a structure set along a unit direction through p (nearest inside point first) */
+  const runDir = (
+    pose: HeartPose,
+    structs: Structure[],
+    p0: [number, number, number],
+    d: [number, number, number],
+    span = 4,
+  ): number => {
+    const step = 0.02;
+    const inside = (t: number) =>
+      classifyHeart(heart, pose, p0[0] + d[0] * t, p0[1] + d[1] * t, p0[2] + d[2] * t, s) &&
+      structs.includes(s.structure);
+    let t0 = NaN;
+    if (inside(0)) t0 = 0;
+    else
+      for (let t = step; t <= span && Number.isNaN(t0); t += step) {
+        if (inside(t)) t0 = t;
+        else if (inside(-t)) t0 = -t;
+      }
+    if (Number.isNaN(t0)) return 0;
+    let a = t0,
+      b = t0;
+    while (a > t0 - span && inside(a - step)) a -= step;
+    while (b < t0 + span && inside(b + step)) b += step;
+    return b - a;
+  };
+  const maxZ = (pose: HeartPose, structs: Structure[], p: [number, number, number]): number => {
+    let hi = -Infinity;
+    for (let t = -10; t <= 10; t += 0.02)
+      if (classifyHeart(heart, pose, p[0], p[1], p[2] + t, s) && structs.includes(s.structure))
+        hi = Math.max(hi, p[2] + t);
+    return hi;
+  };
+
+  const cav = [Structure.LvCavity, Structure.PapillaryMuscle];
+  const lvED = vol(edPose, cav, [-4.5, -4.5, -1], [4.5, 4.5, L + 0.6]);
+  const lvES = vol(esPose, cav, [-4.5, -4.5, -1], [4.5, 4.5, L + 0.6]);
+  const rvStructs = [Structure.RvCavity, Structure.Rvot];
+  // RV volume includes the outflow tract up to the pulmonary valve and not the trunk, whose blood is labelled apart. The box
+  // used to start at the height of the valve centre along the heart axis, a plane that cut 6-8 mL of infundibulum off every
+  // right ventricle and moved with the valve: placing the pulmonary root beside the aortic root (decision 112) took another
+  // 4-23 mL off without changing the chamber.
+  const rvED = vol(edPose, rvStructs, [-8.5, -3.5, -8.5], [1.5, 7, 8.5]);
+  // the right ventricle ends its systole at pulmonary closure, with the aortic one in this model: a regurgitant mitral
+  // valve moves the left ventricle's end-systole to mitral opening (decision 245), not the right one's
+  const rvEsPose = computeHeartPose(
+    heart,
+    cycleStateAt(tables, tables.timings.ejectionEndS / tables.rrS),
+  );
+  const rvES = vol(rvEsPose, rvStructs, [-8.5, -3.5, -8.5], [1.5, 7, 8.5]);
+  // The box reaches y 3 cm: with its AP span drawn forward from the groove (decision 330) the 98 mL atrium's anterior
+  // pole lies at y 2.2, and a box ending at 1.5 counted 89 mL of it.
+  const laMax = vol(esPose, [Structure.LaCavity], [-3.5, -7, -7], [4.5, 3, 1.5]);
+  const laMin = vol(edPose, [Structure.LaCavity], [-3.5, -7, -7], [4.5, 3, 1.5]);
+  // The box reaches the tricuspid annulus at end-systole: until decision 148 it stopped at z = 1.5 cm and cut off the
+  // atrium over the base the ventricle vacates in systole (decision 133), 22 mL in the normal case (45 of 67 mL counted)
+  const raMax = vol(esPose, [Structure.RaCavity], [-9, -4.5, -6.5], [-1, 3, 4.5]);
+  const myoStructs = [
+    Structure.LvWallSeptal,
+    Structure.LvWallLateral,
+    Structure.LvWallAnterior,
+    Structure.LvWallInferior,
+    Structure.LvApex,
+  ];
+  const myo = vol(edPose, myoStructs, [-5.5, -5.5, -1.5], [5.5, 5.5, L + 1.4]);
+
+  const zEDD = 2.0;
+  // internal diameters: thin chordae crossing the cavity do not interrupt a caliper
+  const cavRun = [...cav, Structure.Chordae];
+  const lvIDd = runAt(edPose, cavRun, [0, 0, zEDD], 0);
+  const lvIDs = runAt(esPose, cavRun, [0, 0, 3.2], 0);
+  const ivsD = runAt(
+    edPose,
+    [Structure.LvWallSeptal, Structure.LvWallAnterior],
+    [-(lvCavityRadiusAt(heart, edPose, Math.PI, zEDD) + 0.3), 0.2, zEDD],
+    0,
+    3,
+  );
+  const pwD = runAt(
+    edPose,
+    [Structure.LvWallLateral, Structure.LvWallInferior],
+    [0, -(lvCavityRadiusAt(heart, edPose, -Math.PI / 2, zEDD) + 0.3), zEDD],
+    1,
+    3,
+  );
+  // systolic septal thickness at the same material level (the base descends with the annulus)
+  const zEDS = esPose.zAnn + (zEDD / L) * esPose.lengthNow;
+  const ivsS = runAt(
+    esPose,
+    [Structure.LvWallSeptal, Structure.LvWallAnterior],
+    [-(lvCavityRadiusAt(heart, esPose, Math.PI, zEDS) + 0.3), 0.2, zEDS],
+    0,
+    3,
+  );
+  const apexT = runAt(edPose, [Structure.LvApex, ...myoStructs], [0, 0, L + 0.2], 2, 3);
+  const lvLenED = maxZ(edPose, cav, [0, 0, 4]) - edPose.zAnn;
+  const lvLenES = maxZ(longPose, cav, [0, 0, 4]) - longPose.zAnn;
+  const yA4C = -0.4;
+  // basal third, apical of the open tricuspid leaflet tips (which hang to z ≈ 2.2 in early diastole)
+  const rvBasal = runAt(
+    edPose,
+    [Structure.RvCavity],
+    [-(lvEpicardialRadiusAt(heart, edPose, Math.PI, 2.7) + 1.8), yA4C, 2.7],
+    0,
+  );
+  const rvMid = runAt(edPose, [Structure.RvCavity], [-5.0, yA4C, L * 0.5], 0);
+  // RV length in A4C: from the tricuspid annulus plane to the most apical RV cavity point in the A4C plane
+  const rvLen = ((): number => {
+    let zMax = -Infinity;
+    const structs = [...rvStructs, Structure.ModeratorBand];
+    for (let zz = A.tvCenter.z + 0.3; zz <= L; zz += 0.05) {
+      for (let xx = -8; xx <= 0; xx += 0.05) {
+        if (classifyHeart(heart, edPose, xx, yA4C, zz, s) && structs.includes(s.structure)) {
+          zMax = zz;
+          break;
+        }
+      }
+    }
+    return zMax - (A.tvCenter.z + 0.3);
+  })();
+  const lvBasalA4C =
+    lvCavityRadiusAt(heart, edPose, 0, 2.2) + lvCavityRadiusAt(heart, edPose, Math.PI, 2.2);
+  // RV free wall measured radially at the inflow (azimuth 180°, mid level) where the wall is perpendicular to x
+  const rvWall = runAt(
+    edPose,
+    [Structure.RvWall],
+    [-(lvEpicardialRadiusAt(heart, edPose, Math.PI, L * 0.4) + A.rvT + 0.2), 0, L * 0.4],
+    0,
+    2,
+  );
+  // RV anteroposterior dimension in the PLAX plane (anteroseptal direction, azimuth 120°), at the LVOT level
+  const rPlax = lvEpicardialRadiusAt(heart, edPose, 2.094, 3.0) + 0.9;
+  const rvPlax = runDir(edPose, rvStructs, [-0.5 * rPlax, 0.866 * rPlax, 3.0], [-0.5, 0.866, 0], 4);
+  // the aortoseptal angle in the PLAX plane (z and the anteroseptal direction): the septal endocardium from 1.2 to 4 cm
+  // below the annulus, fitted with a line, against the aortic root axis
+  const aortoseptalAngleDeg = ((): number => {
+    const pts: [number, number][] = [];
+    for (let z = 1.2; z <= 4.01; z += 0.2)
+      for (let u = 0; u < 5; u += 0.02)
+        if (
+          classifyHeart(heart, edPose, -0.5 * u, 0.866 * u, z, s) &&
+          s.structure === Structure.LvWallSeptal
+        ) {
+          pts.push([u, z]);
+          break;
+        }
+    const n = pts.length;
+    const mu = pts.reduce((a, p) => a + p[0], 0) / n,
+      mz = pts.reduce((a, p) => a + p[1], 0) / n;
+    const b =
+      pts.reduce((a, p) => a + (p[1] - mz) * (p[0] - mu), 0) /
+      pts.reduce((a, p) => a + (p[1] - mz) ** 2, 0);
+    const ax = A.avAxis;
+    const au = -0.5 * ax.x + 0.866 * ax.y;
+    const cos = (b * au + ax.z) / (Math.hypot(b, 1) * Math.hypot(au, ax.z));
+    return (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
+  })();
+  const laAP = runAt(esPose, [Structure.LaCavity], [A.laCenter.x, A.laCenter.y, A.laCenter.z], 1);
+  const laTr = runAt(esPose, [Structure.LaCavity], [A.laCenter.x, A.laCenter.y, A.laCenter.z], 0);
+  const laLong = runAt(
+    esPose,
+    [Structure.LaCavity],
+    [A.laCenter.x + 0.7, A.laCenter.y, A.laCenter.z],
+    2,
+  ); // lateral of the leaflet coaptation
+  // the minor axis is taken at mid-atrium, halfway along the end-systolic long axis through the atrial centre (ASE): at the
+  // fixed height of the atrial anchor it read the atrium near its roof once the roof follows the annulus (decision 149)
+  const raMidZ = ((): number => {
+    const step = 0.02;
+    const inRa = (z: number) =>
+      classifyHeart(heart, esPose, A.raCenter.x, A.raCenter.y, z, s) &&
+      s.structure === Structure.RaCavity;
+    let z0 = A.raCenter.z;
+    for (let t = 0; t <= 4 && !inRa(z0); t += step)
+      z0 = inRa(A.raCenter.z + t) ? A.raCenter.z + t : A.raCenter.z - t;
+    if (!inRa(z0)) return A.raCenter.z;
+    let top = z0,
+      bottom = z0;
+    while (inRa(top - step)) top -= step;
+    while (inRa(bottom + step)) bottom += step;
+    return (top + bottom) / 2;
+  })();
+  const raTr = runAt(esPose, [Structure.RaCavity], [A.raCenter.x, A.raCenter.y, raMidZ], 0);
+  const raLong = runAt(esPose, [Structure.RaCavity], [A.raCenter.x, A.raCenter.y, A.raCenter.z], 2);
+  // interatrial septum: its thickness where the two atria face each other across it, on the muscular septum (decision
+  // 369): along x at the points of a grid behind the annulus where the line meets right atrial blood, then the septum,
+  // then left atrial blood, each within 1.5 cm, leaving out the fossa and its edge. The median of nine fixed points read
+  // the 7 mm limbus where it ran, and where the atria are small the veins and the pericardium beside the septum.
+  const iasT = ((): number => {
+    const runs: number[] = [];
+    const zF = A.fossaZ + IAS_FOSSA_DESCENT_SHARE * edPose.zAnn;
+    for (let yy = -2.6; yy <= 0.6; yy += 0.4)
+      for (let zz = -3.4; zz <= -0.6; zz += 0.4) {
+        if (Math.hypot((yy - A.fossaY) / 0.6, (zz - zF) / 0.7) < IAS_FOSSA_EDGE_TO) continue;
+        let ra = NaN,
+          x0 = NaN,
+          x1 = NaN,
+          la = NaN;
+        for (let x = A.iasX - 1.5; x <= A.iasX + 1.5; x += 0.02) {
+          if (!classifyHeart(heart, edPose, x + edPose.swingX, yy, zz, s)) continue;
+          if (s.structure === Structure.RaCavity && Number.isNaN(x0)) ra = x;
+          else if (s.structure === Structure.InteratrialSeptum && !Number.isNaN(ra)) {
+            if (Number.isNaN(x0)) x0 = x;
+            x1 = x;
+          } else if (s.structure === Structure.LaCavity && !Number.isNaN(x0)) {
+            la = x;
+            break;
+          }
+        }
+        if (!Number.isNaN(la)) runs.push(x1 - x0 + 0.02);
+      }
+    if (!runs.length) return 0;
+    runs.sort((a, b) => a - b);
+    return runs[Math.floor(runs.length / 2)]!;
+  })();
+  const ax = A.avAxis,
+    e1 = A.avE1;
+  const rootAt = (t: number, pose: HeartPose) => {
+    const cz = A.avCenter.z + pose.zAnn * ROOT_EXCURSION;
+    return runAlong(
+      pose,
+      // below the annulus the lumen between the septum and the anterior leaflet is labelled LV cavity where a dilated
+      // ventricle reaches the base (the HFrEF case at 0.5 cm): it is the same tract, bounded by the same walls
+      t < 0
+        ? [Structure.AorticRoot, Structure.Lvot, Structure.AorticValve, Structure.LvCavity]
+        : [Structure.AorticRoot, Structure.AscendingAorta, Structure.Lvot, Structure.AorticValve],
+      [A.avCenter.x + ax.x * t, A.avCenter.y + ax.y * t, cz + ax.z * t],
+      [e1.x, e1.y, e1.z],
+    );
+  };
+  // at the protocol's level, 0.5 cm proximal to the annulus, where the tract reaches its own diameter (decision 161)
+  const lvotD = rootAt(-LVOT_TAPER_CM, esPose);
+  const annulusD = rootAt(0.05, esPose);
+  // the sinus at its widest and the sinotubular junction at its waist, searched along the root rather than read at
+  // fixed levels: the levels move with the root profile (ROOT_SINUS_T, ROOT_STJ_T), the landmarks do not
+  let sinusD = 0,
+    stjD = Infinity;
+  for (let t = 0.5; t <= 1.6; t += 0.1) sinusD = Math.max(sinusD, rootAt(t, edPose));
+  for (let t = 1.5; t <= ROOT_STJ_T; t += 0.1) stjD = Math.min(stjD, rootAt(t, edPose));
+  // Measure normal to the actual ascending centreline, not an extension of the root axis.
+  const path = edPose.aorta.geometry.arch;
+  const centre = path[16]!.p;
+  const tangent = normalize(sub(path[17]!.p, path[15]!.p));
+  const radial = normalize(cross(tangent, A.avE1));
+  const ascD = runAlong(
+    edPose,
+    [Structure.AscendingAorta, Structure.AorticArch],
+    [centre.x, centre.y, centre.z],
+    [radial.x, radial.y, radial.z],
+  );
+  const rvotD = 2 * A.rvotRa;
+  const paDir = A.paDir;
+  const paPerp: [number, number, number] = [-paDir.y, paDir.x, 0];
+  const pl = Math.hypot(paPerp[0], paPerp[1]) || 1;
+  // Sample along the trunk and keep the widest cut, the way a sonographer slides until the vessel looks
+  // widest: measuring at one fixed point made the value depend on whether that point happened to fall on the
+  // infundibular junction — it read 1.22 cm in severe aortic stenosis and 2.28 cm with a thicker septum in
+  // HOCM, which is a property of the sampling, not of the anatomy.
+  let paD = 0;
+  for (let t = 1.0; t <= 2.2; t += 0.2)
+    paD = Math.max(
+      paD,
+      runAlong(
+        edPose,
+        [Structure.PulmonaryArtery],
+        [A.rvotB.x + paDir.x * t, A.rvotB.y + paDir.y * t, A.rvotB.z + paDir.z * t],
+        [paPerp[0] / pl, paPerp[1] / pl, 0],
+      ),
+    );
+  const mvAnn = 2 * A.mvR;
+  const tvAnn = 2 * A.tvR;
+
+  const rows: MeasureRow[] = [];
+  const add = (
+    id: string,
+    label: string,
+    value: number,
+    units: string,
+    lo: number,
+    hi: number,
+    referenceId: string,
+    approx = false,
+  ) =>
+    rows.push({
+      id,
+      label,
+      value,
+      units,
+      lo,
+      hi,
+      verdict: value < lo - 1e-3 ? 'LOW' : value > hi + 1e-3 ? 'HIGH' : 'ok',
+      approx,
+      referenceId,
+    });
+  const CQ = 'ase-eacvi-chamber-2015';
+  const RH = 'ase-right-heart-2025';
+  add('lv-edv', 'LV EDV', lvED, 'mL', female ? 46 : 62, female ? 106 : 150, CQ);
+  add('lv-esv', 'LV ESV', lvES, 'mL', female ? 14 : 21, female ? 42 : 61, CQ);
+  add(
+    'lv-ef',
+    'LVEF (geometric)',
+    ((lvED - lvES) / lvED) * 100,
+    '%',
+    female ? 54 : 52,
+    female ? 74 : 72,
+    CQ,
+  );
+  add('lv-edvi', 'LV EDV index', lvED / bsa, 'mL/m²', female ? 29 : 34, female ? 61 : 74, CQ);
+  add('lv-idd', 'LVIDd', lvIDd, 'cm', female ? 3.8 : 4.2, female ? 5.2 : 5.8, CQ);
+  add('lv-ids', 'LVIDs', lvIDs, 'cm', female ? 2.2 : 2.5, female ? 3.5 : 4.0, CQ);
+  add('lv-length', 'LV length ED (annulus→apex)', lvLenED, 'cm', 7.0, 9.8, CQ, true);
+  add('lv-shortening', 'LV longitudinal shortening', lvLenED - lvLenES, 'cm', 0.9, 1.7, CQ, true);
+  add('ivsd', 'IVS diastolic thickness', ivsD, 'cm', 0.6, female ? 0.9 : 1.0, CQ);
+  add('lvpwd', 'PW diastolic thickness', pwD, 'cm', 0.6, female ? 0.9 : 1.0, CQ);
+  add('ivs-thickening', 'IVS systolic thickening', (ivsS / ivsD - 1) * 100, '%', 30, 75, CQ, true);
+  add('apex-thickness', 'Apex wall thickness', apexT, 'cm', 0.5, 0.9, CQ, true);
+  add(
+    'lv-mass',
+    'LV mass (myocardial volume × 1.05)',
+    myo * 1.05,
+    'g',
+    female ? 67 : 88,
+    female ? 162 : 224,
+    CQ,
+  );
+  add('rv-edv', 'RV EDV', rvED, 'mL', female ? 60 : 80, female ? 150 : 190, RH, true);
+  add('rv-edvi', 'RV EDV index (3D)', rvED / bsa, 'mL/m²', female ? 32 : 35, female ? 74 : 87, CQ);
+  add(
+    'rv-ef',
+    'RV EF (geometric)',
+    ((rvED - rvES) / Math.max(1, rvED)) * 100,
+    '%',
+    45,
+    65,
+    RH,
+    true,
+  );
+  add('rv-basal', 'RV basal diameter (A4C)', rvBasal, 'cm', 2.5, 4.1, RH);
+  add('rv-mid', 'RV mid diameter (A4C)', rvMid, 'cm', 1.9, 3.7, RH, true);
+  add('rv-length', 'RV length (A4C)', rvLen, 'cm', 5.6, 8.3, RH, true);
+  add(
+    'rv-lv-basal-ratio',
+    'RV/LV basal ratio (A4C)',
+    rvBasal / lvBasalA4C,
+    '',
+    0.45,
+    0.8,
+    RH,
+    true,
+  );
+  add('rv-wall', 'RV free wall thickness', rvWall, 'cm', 0.2, 0.5, RH);
+  add('rv-plax', 'RV AP dimension (PLAX)', rvPlax, 'cm', 1.7, 3.2, RH, true);
+  // The aortoseptal angle (decision 315): in the end-diastolic long axis, between the LV septal surface running toward
+  // the apex and the aorta running out of the heart; 180° would be an aorta in line with the septum. In 77 healthy
+  // adults it measures 134 ± 13° and closes with age (r = −0.64 at 43 ± 14 years: −0.60° a year; Okada et al., J Clin
+  // Ultrasound 2014;42:341), as the ascending aorta lengthens. The range is that regression's 10th–90th percentiles for
+  // the case's age (residual SD 13·√(1 − 0.64²) = 10.0°).
+  {
+    const age = c.demographics.ageYears;
+    const expected = 134 - 0.603 * (age - 43.2);
+    add(
+      'aortoseptal-angle',
+      "Aortoseptal angle (PLAX, for the case's age)",
+      aortoseptalAngleDeg,
+      '°',
+      expected - 12.8,
+      expected + 12.8,
+      'okada-asa-2014',
+    );
+  }
+  add('la-ap', 'LA AP diameter (PLAX)', laAP, 'cm', female ? 2.7 : 3.0, female ? 3.8 : 4.0, CQ);
+  add('la-transverse', 'LA transverse (A4C)', laTr, 'cm', 3.4, 5.0, CQ, true);
+  add('la-long', 'LA long axis (A4C)', laLong, 'cm', 4.0, 5.8, CQ, true);
+  add('lavi', 'LA volume index (max)', laMax / bsa, 'mL/m²', 16, 34, CQ);
+  add('la-emptying', 'LA emptying fraction', (1 - laMin / laMax) * 100, '%', 35, 65, CQ, true);
+  add('ravi', 'RA volume index (max)', raMax / bsa, 'mL/m²', 12, female ? 27 : 32, CQ);
+  add('ra-transverse', 'RA transverse', raTr, 'cm', 2.6, 4.4, CQ, true);
+  add('ra-long', 'RA long axis', raLong, 'cm', 3.5, 5.6, CQ, true);
+  add('la-ao', 'LA/Ao ratio', laAP / sinusD, '', 0.85, 1.25, CQ, true);
+  add('ias', 'Interatrial septum thickness', iasT, 'cm', 0.2, 0.7, CQ, true);
+  add('lvot', 'LVOT diameter (systole)', lvotD, 'cm', 1.8, 2.4, 'ase-tte-2019', true);
+  add('ao-annulus', 'Aortic annulus', annulusD, 'cm', female ? 2.0 : 2.3, female ? 2.6 : 2.9, CQ);
+  add('ao-sinus', 'Sinus of Valsalva', sinusD, 'cm', female ? 2.7 : 3.1, female ? 3.3 : 3.7, CQ);
+  add('ao-stj', 'Sinotubular junction', stjD, 'cm', female ? 2.3 : 2.6, female ? 2.9 : 3.2, CQ);
+  add('ao-ascending', 'Ascending aorta', ascD, 'cm', female ? 2.3 : 2.6, female ? 3.1 : 3.4, CQ);
+  add('rvot', 'RVOT proximal diameter', rvotD, 'cm', 1.8, 3.0, RH, true);
+  add('pa', 'Main pulmonary artery', paD, 'cm', 1.5, 2.7, RH, true);
+  add('mv-annulus', 'Mitral annulus diameter', mvAnn, 'cm', 2.7, 3.5, CQ, true);
+  add('tv-annulus', 'Tricuspid annulus diameter', tvAnn, 'cm', 2.8, 4.0, RH);
+  add('tv-mv-ratio', 'TV/MV annulus ratio', tvAnn / mvAnn, '', 1.0, 1.3, RH, true);
+  add('rv-lv-length', 'RV/LV length ratio', rvLen / lvLenED, '', 0.65, 0.95, RH, true);
+
+  // ---- spatial relations between the valve rings (the fibrous skeleton) ----
+  // Sizes alone never catch a structure placed in the wrong spot. The pulmonary valve sat 5.30 cm from the
+  // aortic one — nearly twice the adult distance — for twenty iterations without a single measure
+  // complaining, and the result was a parasternal short axis of the great vessels holding no pulmonary
+  // valve, no trunk and no outflow tract at all (decision 59). These ranges are approximate: no guideline
+  // tabulates them, they come from the anatomy literature (the pulmonary annulus sits ~1.5 cm above the
+  // aortic one, the subpulmonary infundibulum crosses the front of the aortic root, and the anterior mitral
+  // leaflet is in fibrous continuity with the aortic valve) and from what the standard views require.
+  const FS = 'cardiac-fibrous-skeleton';
+  const dist = (p: Vec3, q: Vec3): number => Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z);
+  // Decision 112 moved the pulmonary root out of the aortic root, where these ranges had been set: with the centres 2.3 cm
+  // apart the aortic sinus and the anterior LV wall filled a quarter to two fifths of the pulmonary root. Placed by the least
+  // distance that clears it, the centres are 3.0-3.2 cm apart over ventricles of normal size and 3.6-3.7 cm over a dilated
+  // or thickened one, 1.8-2.2 cm cranial, 1.9-2.4 cm anterior and 1.4-1.8 cm to the left. The lower bound of the distance
+  // is now what two roots of adult size need; the upper bounds are plausibility bounds widened to what the placement
+  // gives, which still catch the valve twice as far away or on the wrong side of the aorta.
+  add(
+    'av-pv-distance',
+    'Aortic–pulmonary valve centres',
+    dist(A.avCenter, A.rvotB),
+    'cm',
+    2.6,
+    3.8,
+    FS,
+    true,
+  );
+  // «Higher» is craniocaudal in the BODY, so this is measured in the torso frame (+y superior). Written
+  // first as a difference along the heart's base-apex axis, it accused correct anatomy of being wrong: that
+  // axis is tilted with respect to the body, and a measure in the wrong frame is worse than no measure.
+  const avTorso = heartToTorso(heart.frame, A.avCenter);
+  const pvTorso = heartToTorso(heart.frame, A.rvotB);
+  add(
+    'pv-above-av',
+    'Pulmonary annulus above aortic',
+    pvTorso.y - avTorso.y,
+    'cm',
+    1.0,
+    2.5,
+    FS,
+    true,
+  );
+  add(
+    'pv-anterior-av',
+    'Pulmonary annulus anterior to aortic',
+    pvTorso.z - avTorso.z,
+    'cm',
+    0.8,
+    2.6,
+    FS,
+    true,
+  );
+  add(
+    'pv-left-av',
+    'Pulmonary annulus left of aortic',
+    pvTorso.x - avTorso.x,
+    'cm',
+    0.4,
+    2.0,
+    FS,
+    true,
+  );
+  // The tricuspid ring meets the aortic one at the membranous septum, which its septal leaflet crosses just below the
+  // commissure between the right and non-coronary sinuses: the gap between the two hinge lines is at most the length of
+  // that septum, 9.0-11.4 mm (means by sex and age group in 107 adult hearts, Folia Morphol 2008;67:259-264). Until
+  // decision 306 this read the distance between the centres, 3.0-4.5 cm by an approximate range with no source, which a
+  // tricuspid annulus prolonged toward the root (decisions 224 and 226) can exceed while its hinge reaches the root.
+  {
+    const tv = edPose.valves.tv;
+    const ring: Vec3[] = [];
+    for (let k = 0; k < 180; k++) {
+      const a = (k / 180) * 2 * Math.PI,
+        cs = Math.cos(a),
+        sn = Math.sin(a);
+      const rho = tv.R / skirtWarpScale(tv, cs, sn);
+      const x = tv.cx + rho * cs,
+        y = tv.cy + rho * sn;
+      ring.push({ x, y, z: A.tvCenter.z + edPose.tvZ + skirtOffsetAt(tv, x, y) });
+    }
+    let gap = Infinity;
+    const avZ = A.avCenter.z + edPose.zAnn * ROOT_EXCURSION;
+    for (let k = 0; k < 180; k++) {
+      const a = (k / 180) * 2 * Math.PI,
+        cs = Math.cos(a) * A.avR,
+        sn = Math.sin(a) * A.avR;
+      const p = {
+        x: A.avCenter.x + A.avE1.x * cs + A.avE2.x * sn,
+        y: A.avCenter.y + A.avE1.y * cs + A.avE2.y * sn,
+        z: avZ + A.avE1.z * cs + A.avE2.z * sn,
+      };
+      for (const q of ring) gap = Math.min(gap, dist(p, q));
+    }
+    add(
+      'av-tv-hinge-gap',
+      'Aortic–tricuspid hinge gap',
+      gap,
+      'cm',
+      0,
+      1.15,
+      'membranous-septum',
+      true,
+    );
+  }
+  add(
+    'av-mv-distance',
+    'Aortic–mitral valve centres',
+    dist(A.avCenter, A.mvCenter),
+    'cm',
+    1.5,
+    2.8,
+    FS,
+    true,
+  );
+  // The base of the heart and the mediastinum against chest CT volumes (decision 307, TotalSegmentator dataset): the
+  // same measures, with the same definitions, as tools/clinical/ct-mediastinum.ts takes on CT, each between the CT's
+  // 10th and 90th percentiles. The axial sections are taken at the CT's median height of the carina above the root. The
+  // sternum-to-aorta distance of decision 306 (27.3 mm by CT in 100 controls) is now this one: the CT's median is 26 mm.
+  {
+    const ct = CT_MEDIASTINUM;
+    const mm = measureMediastinum(
+      heart,
+      thorax,
+      edPose,
+      ct.rootToArchApexHeight.median - ct.carinaBelowArchApex.median,
+    );
+    const CT = 'totalsegmentator-ct';
+    const row = (id: string, label: string, value: number, d: CtDistribution, units = 'cm') =>
+      add(id, label, value, units, d.p10, d.p90, CT);
+    row(
+      'sternum-aorta',
+      'Sternum to ascending aorta',
+      mm.sternumToAscendingAorta,
+      ct.sternumToAscendingAorta,
+    );
+    row('ascending-depth', 'Ascending aorta depth', mm.ascendingDepth, ct.ascendingDepth);
+    row(
+      'ascending-forward-tilt',
+      'Ascending aorta forward tilt',
+      mm.ascendingForwardTiltDeg,
+      ct.ascendingForwardTiltDeg,
+      '°',
+    );
+    row(
+      'ascending-right-tilt',
+      'Ascending aorta rightward tilt',
+      mm.ascendingRightTiltDeg,
+      ct.ascendingRightTiltDeg,
+      '°',
+    );
+    row('arch-width', 'Arch width (ascending to descending)', mm.archWidth, ct.archWidth);
+    row(
+      'notch-arch-apex',
+      'Suprasternal notch to arch apex',
+      mm.notchToArchApex,
+      ct.notchToArchApex,
+    );
+    row(
+      'arch-apex-below-notch',
+      'Arch apex below the notch',
+      mm.archApexBelowNotch,
+      ct.archApexBelowNotch,
+    );
+    row(
+      'arch-apex-behind-notch',
+      'Arch apex behind the notch',
+      mm.archApexBehindNotch,
+      ct.archApexBehindNotch,
+    );
+    row('root-depth', 'Aortic root depth', mm.rootDepth, ct.rootDepth);
+    // The root's height is compared with what the CT predicts for the case's own diaphragm, age and sex (decision 314):
+    // across the 77 subjects it follows the liver dome (the CT is taken at deep inspiration, the model in expiration),
+    // grows with age and is greater in men, while the arch apex, the notch and the heart's apex keep their heights.
+    const conditional = (id: string, label: string, value: number, k: CtConditional) => {
+      const predicted =
+        k.intercept +
+        k.perDomeCm * mm.liverDomeBelowNotch +
+        k.perYear * c.demographics.ageYears +
+        (c.demographics.sexForReference === 'male' ? k.male : 0);
+      add(id, label, value, 'cm', predicted + k.residualP10, predicted + k.residualP90, CT);
+    };
+    conditional(
+      'root-arch-apex-height',
+      "Aortic root to arch apex (height, for the case's diaphragm, age and sex)",
+      mm.rootToArchApexHeight,
+      CT_CONDITIONAL.rootToArchApexHeight,
+    );
+    conditional(
+      'root-notch-height',
+      "Aortic root to notch (height, for the case's diaphragm, age and sex)",
+      mm.rootToNotchHeight,
+      CT_CONDITIONAL.rootToNotchHeight,
+    );
+    row('descending-depth', 'Descending aorta depth', mm.descendingDepth, ct.descendingDepth);
+    row('vertebra-depth', 'Vertebral body depth', mm.vertebraDepth, ct.vertebraDepth);
+  }
+  // The parasternal short axis of the great vessels shows a ROUND aorta surrounded by the other two valves,
+  // which is only possible if the plane through the three valve centres is close to perpendicular to the
+  // aortic root axis. Measured at 62° when this check was written: that single number explains why the view
+  // could not show the aorta and the pulmonary valve at the same time, whatever the probe did.
+  const valvePlane = normalize(cross(sub(A.rvotB, A.tvCenter), sub(A.avCenter, A.tvCenter)));
+  const tilt =
+    (Math.acos(Math.min(1, Math.abs(dot(valvePlane, normalize(AV_AXIS))))) * 180) / Math.PI;
+  add('valve-plane-tilt', 'Three-valve plane vs aortic axis', tilt, '°', 0, 30, FS, true);
+  // The great arteries cross, which lets the great-vessel short axis show a round aorta with the trunk running away from
+  // the pulmonary valve along the plane. The range is fetal (78 ± 10°, 59–97° between ascending aorta and main pulmonary
+  // artery by spatiotemporal image correlation; the angle falls with gestational age) because no adult measurement was
+  // found: a plausibility bound, marked approximate. It measured 46° until decision 86.
+  const crossing =
+    (Math.acos(Math.min(1, Math.abs(dot(normalize(A.paDir), normalize(AV_AXIS))))) * 180) / Math.PI;
+  add(
+    'great-artery-crossing',
+    'Pulmonary trunk vs aortic root axis',
+    crossing,
+    '°',
+    59,
+    97,
+    FS,
+    true,
+  );
+  return { caseId: c.id, bsaM2: bsa, rows };
+}
+
+/** Format a measurement report as a text table (used by the CLI tool). */
+export function formatMeasurements(m: ModelMeasurements): string {
+  const lines = [
+    `Case ${m.caseId} · BSA ${m.bsaM2.toFixed(2)} m²`,
+    `${'Measure'.padEnd(40)} ${'model'.padStart(9)}   ${'range'.padEnd(18)} verdict`,
+  ];
+  for (const r of m.rows) {
+    const val = Math.abs(r.value) >= 10 ? r.value.toFixed(0) : r.value.toFixed(2);
+    lines.push(
+      `${r.label.padEnd(40)} ${(val + (r.units ? ' ' + r.units : '')).padStart(9)}   ${`${r.lo}–${r.hi}${r.approx ? ' ≈' : ''}`.padEnd(18)} ${r.verdict}`,
+    );
+  }
+  return lines.join('\n');
+}

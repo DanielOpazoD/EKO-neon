@@ -1,0 +1,116 @@
+import type { CaseDefinitionInput } from './schema';
+import { normalExcellentCase } from './normal-excellent';
+
+/** Case 11 — Atrial fibrillation: irregular RR, no A wave (E-only filling), dilated LA, mild LVH; multiparametric filling-pressure assessment; no A wave. */
+export const afDiastolicCase: CaseDefinitionInput = {
+  ...normalExcellentCase,
+  id: 'af-diastolic',
+  title: 'Fibrilación auricular — limitaciones de la evaluación diastólica',
+  seed: 1111,
+  history:
+    'Paciente sintética de 74 años con FA persistente e hipertensión; evaluación de presiones de llenado. Sin datos reales de paciente.',
+  demographics: { ageYears: 74, sexForReference: 'female', heightCm: 158, weightKg: 71 },
+  bodyHabitus: {
+    chestWallThicknessCm: 2.6,
+    chestWidthCm: 32,
+    chestDepthCm: 22,
+    ribSpacingCm: 2.4,
+    intercostalWidthCm: 1.4,
+  },
+  rhythm: {
+    type: 'atrial-fibrillation',
+    heartRateBpm: 92,
+    rrVariabilityPct: 22,
+    pvcProbability: 0,
+  },
+  anatomy: {
+    ...normalExcellentCase.anatomy,
+    lv: {
+      eddCm: 4.6,
+      lengthEdCm: 8.0,
+      ivsdCm: 1.1,
+      lvpwdCm: 1.0,
+      sphericity: 0.5,
+      apexWallThicknessCm: 0.7,
+    },
+    la: { apDiameterCm: 4.6, volumeMl: 92 },
+    rv: { basalDiameterCm: 3.2, lengthCm: 7.2, freeWallThicknessCm: 0.35, septalFlattening: 0 },
+    ra: { volumeMl: 60 },
+    aorta: { lvotDiameterCm: 1.9, annulusCm: 2.2, sinusCm: 3.0, ascendingCm: 2.9 },
+    mitral: { ...normalExcellentCase.anatomy.mitral, annulusDiameterCm: 3.2, calcification: 0.3 },
+    tricuspid: { annulusDiameterCm: 3.3 },
+  },
+  physiology: {
+    ...normalExcellentCase.physiology,
+    edvMl: 100,
+    esvMl: 38,
+    mapseCm: 1.2,
+    ePeakMps: 0.95,
+    aPeakMps: 0,
+    decelerationTimeMs: 170,
+    ivrtMs: 70,
+    ePrimeSeptalCmps: 5.5,
+    ePrimeLateralCmps: 7.5,
+  },
+  hemodynamics: {
+    systolicBpMmHg: 138,
+    diastolicBpMmHg: 82,
+    rapMmHg: 5,
+    paspMmHg: 40,
+    avEffectiveAreaCm2: 2.6,
+    trPresent: true,
+    lvotPeakGradientMmHg: 0,
+    regurgitation: { mr: { eroaCm2: 0.1, jetDirectionDeg: 0 } },
+  },
+  flowPrimitives: [
+    ...normalExcellentCase.flowPrimitives,
+    { id: 'mr', site: 'mr-jet', enabled: true, turbulence: 0.3 },
+  ],
+  learningObjectives: [
+    'Reconocer la variabilidad latido a latido del llenado y del volumen sistólico en FA: promediar ≥ 5 latidos (o usar latidos de RR similar).',
+    'Entender qué parámetros no son aplicables sin onda A (E/A, duración de A); integrar E/e′, desaceleración e IT. La dilatación de la AI en FA no demuestra por sí sola presión elevada.',
+    'Integrar E, E/e′ septal, IT/PASP y desaceleración; reconocer una presión de llenado indeterminada si los criterios adicionales no son concluyentes.',
+  ],
+  requiredViews: [
+    { viewId: 'a4c', minScore: 65 },
+    { viewId: 'plax', minScore: 65 },
+  ],
+  requiredMeasurements: [
+    { measurementId: 'mitral-e', tolerancePct: 15 },
+    { measurementId: 'e-prime-septal', tolerancePct: 15 },
+    { measurementId: 'e-prime-lateral', tolerancePct: 15 },
+    { measurementId: 'la-ap', tolerancePct: 10 },
+  ],
+  difficulty: 3,
+  references: [
+    {
+      referenceId: 'ase-diastolic-2025',
+      usage: 'evaluación diastólica en fibrilación auricular',
+    },
+  ],
+  impressionTruth: [
+    'Fibrilación auricular con respuesta ventricular controlada; llenado mitral con onda E única y variable.',
+    'Hipertrofia concéntrica leve; función sistólica conservada.',
+    'Aurícula izquierda severamente dilatada, insuficiencia mitral leve y disfunción diastólica; presión de llenado indeterminada por el algoritmo multiparamétrico de FA (ASE 2025); hipertensión pulmonar posible por la IT.',
+  ],
+  expectedDeviations: [
+    'ivsd',
+    'lvpwd',
+    // the annulus recoils at the case's e′ of 5.5 cm/s, and at 92 bpm without atrial contraction it has not returned by
+    // the next beat: the long axis shortens 0.8 cm between end-diastole and end-systole (decision 162)
+    'lv-shortening',
+    'la-ap',
+    // (its transverse axis, 5.16 cm, came inside at 4.94 when the fossa ovalis moved to where both atria meet the septum
+    // and the measuring line crossed muscular septum instead, decision 319; its long axis when the atrium met the
+    // septum flat and the volume normalisation took the rest, decision 327)
+    'lavi',
+    'la-emptying',
+    'ravi',
+    // the right atrial long axis (5.0-5.5 cm since the septal tricuspid hinge descends with the mitral one, decision 220)
+    // stays inside its range; the dilated atrium shows in its volume index
+    'la-ao',
+    // without atrial contraction the right ventricle fills less by end-diastole with the same systole: its geometric
+    // ejection fraction reads 51.6 % against 57.8 in the sinus-rhythm normal heart it shares its physiology with (decision
+    // 220; 44.8 against 48.9 before), lower but inside the normal range, so it is no longer declared
+  ],
+};

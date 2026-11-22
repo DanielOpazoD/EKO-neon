@@ -1,0 +1,488 @@
+import { viewLabel } from '@/simulator/windows/viewLabels';
+import { modalityLabel } from '@/simulator/renderer/modality';
+import { useSimStore } from '@/app/store';
+import { examSummaryOf, impressionCorrected } from '@/app/examSummary';
+import { useShallow } from 'zustand/shallow';
+import { formatClinical } from '@/clinical/reference-values';
+import { buildEducationalReport } from '@/education/report';
+import { scoreAcquisition } from '@/education/scoring/scoring';
+import { loadCaseById } from '@/cases';
+import { EXAM_CASE_NAME, showsCaseIdentity } from '@/app/modePolicy';
+import { useState } from 'react';
+import {
+  expectedFindings,
+  FINDINGS,
+  getFinding,
+  scoreImpression,
+  type FindingDomain,
+} from '@/education/impression';
+
+/** Educational structured report (spec 26) + exam summary (spec 28.4). Learning mode shows ground truth; exam mode hides it until finished. */
+/**
+ * Finishing the exam cannot be undone (the image freezes and the score is recorded): one click on the wrong button used
+ * to end it. The first press asks, naming what is still missing; the second finishes.
+ */
+function FinishExam({ onFinish }: { onFinish: () => void }) {
+  const [asking, setAsking] = useState(false);
+  const blankImpression = useSimStore((s) => s.impressionSelection.length === 0);
+  if (!asking)
+    return (
+      <p>
+        <button onClick={() => setAsking(true)}>Finalizar examen y ver puntuación</button>
+      </p>
+    );
+  return (
+    <div className="finish-exam-confirm" role="alertdialog" aria-labelledby="finish-exam-q">
+      <p id="finish-exam-q">
+        ¿Finalizar el examen? No podrás adquirir, medir ni cambiar la impresión.
+        {blankImpression && ' No has marcado ninguna impresión: cuenta 0 (20 % del total).'}
+      </p>
+      <button onClick={onFinish}>Sí, finalizar</button>{' '}
+      <button onClick={() => setAsking(false)} autoFocus>
+        Seguir con el examen
+      </button>
+    </div>
+  );
+}
+
+export function ReportScreen() {
+  const s = useSimStore(
+    useShallow((st) => ({
+      caseId: st.caseId,
+      examFinished: st.examFinished,
+      examResult: st.examResult,
+      finishExam: st.finishExam,
+      checkImpression: st.checkImpression,
+      impressionChecked: st.impressionChecked,
+      impressionSelection: st.impressionSelection,
+      measurements: st.measurements,
+      mode: st.mode,
+      redoImpression: st.redoImpression,
+      toggleFinding: st.toggleFinding,
+      truth: st.truth,
+      viewProgress: st.viewProgress,
+    })),
+  );
+  // one predicate for everything the exam keeps back until it is finished: the case, the truth and the scores
+  const revealed = showsCaseIdentity(s.mode, s.examFinished);
+  const report = buildEducationalReport(s.measurements, s.truth, !revealed);
+  const caseDef = loadCaseById(s.caseId);
+  const acquisition = scoreAcquisition(caseDef, s.viewProgress);
+  const expected = s.truth ? expectedFindings(s.truth) : [];
+  const impression = s.impressionSelection.length
+    ? scoreImpression(s.impressionSelection, expected)
+    : null;
+  // the exam shows the summary recorded when it was finished (decision 236); practice, the live one
+  const summary = s.mode === 'exam' ? s.examResult : examSummaryOf(s);
+  // nothing says which findings are right until the impression is corrected (decision 257); then the sheet closes
+  const corrected = impressionCorrected(s);
+  const sheetClosed = corrected;
+  const domains: { id: FindingDomain; label: string }[] = [
+    { id: 'global', label: 'Global' },
+    { id: 'lv', label: 'Ventrículo izquierdo' },
+    { id: 'valves', label: 'Válvulas y TSVI' },
+    { id: 'right', label: 'Corazón derecho' },
+    { id: 'atria', label: 'Aurículas' },
+    { id: 'pericardium', label: 'Pericardio' },
+    { id: 'rhythm-diastole', label: 'Ritmo y diástole' },
+  ];
+  return (
+    <div className="screen">
+      <p className="small">
+        Simulador educacional con pacientes sintéticos. No utilizar para diagnóstico ni toma de
+        decisiones clínicas reales.
+      </p>
+      {s.mode === 'exam' && !s.examFinished && <FinishExam onFinish={() => s.finishExam()} />}
+      {/* the report as an echocardiography lab writes it: identification, technique and quality, measurements against
+          their reference ranges, derived values and a conclusion; the teaching evaluation follows it (design review of
+          2026-10-12) */}
+      <article className="clinical-report" aria-label="Informe ecocardiográfico">
+        <header className="cr-head">
+          <h2>Informe ecocardiográfico transtorácico</h2>
+          <dl className="cr-meta">
+            <div>
+              <dt>Paciente</dt>
+              <dd>{revealed ? caseDef.title : EXAM_CASE_NAME} · sintético</dd>
+            </div>
+            <div>
+              <dt>Edad / sexo</dt>
+              <dd>
+                {caseDef.demographics.ageYears} años ·{' '}
+                {caseDef.demographics.sexForReference === 'female' ? 'mujer' : 'hombre'}
+              </dd>
+            </div>
+            <div>
+              <dt>Talla / peso / SC</dt>
+              <dd>
+                {caseDef.demographics.heightCm} cm · {caseDef.demographics.weightKg} kg
+                {s.truth ? ` · ${s.truth.bsaM2.toFixed(2).replace('.', ',')} m²` : ''}
+              </dd>
+            </div>
+            <div>
+              <dt>Ritmo / FC</dt>
+              <dd>
+                {caseDef.rhythm.type === 'atrial-fibrillation'
+                  ? 'Fibrilación auricular'
+                  : 'Sinusal'}{' '}
+                · {caseDef.rhythm.heartRateBpm} lpm
+              </dd>
+            </div>
+            <div>
+              <dt>Fecha</dt>
+              <dd>{new Date().toLocaleDateString('es')}</dd>
+            </div>
+            <div className="cr-meta-wide">
+              <dt>Calidad del estudio</dt>
+              <dd>{report.studyQuality}</dd>
+            </div>
+          </dl>
+        </header>
+        <section className="cr-section">
+          {report.derived.length > 0 && (
+            <>
+              <h3>Cálculos derivados</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Cálculo</th>
+                    <th>Valor</th>
+                    <th>Fórmula</th>
+                    <th>Entradas</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.derived.map((d) => (
+                    <tr key={d.id} data-derived={d.id}>
+                      <td>{d.label}</td>
+                      <td>{d.value}</td>
+                      <td>
+                        <code>{d.formula}</code>
+                      </td>
+                      <td className="small">{d.inputs}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+          <h3>Mediciones</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Medición</th>
+                <th>Valor</th>
+                <th>Rango normal</th>
+                <th>{!revealed ? 'Modalidad' : 'Modalidad / vista'}</th>
+                {revealed && <th>Calidad vista</th>}
+                {revealed && <th>Técnica</th>}
+                {s.mode !== 'exam' && <th>Modelo (verdad)</th>}
+                {s.mode !== 'exam' && <th>Desviación</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {report.rows.map((r) => (
+                <tr key={r.id} data-technique={r.technique?.level ?? 'free'}>
+                  <td>{r.label}</td>
+                  <td>{r.value}</td>
+                  <td data-range-flag={r.rangeFlag ?? 'none'}>
+                    {r.range ? (
+                      <>
+                        {r.range}{' '}
+                        {r.rangeFlag === 'normal' ? (
+                          <span className="pill ok">normal</span>
+                        ) : (
+                          <span className="pill warn">
+                            {r.rangeFlag === 'high' ? 'alto' : 'bajo'}
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td>
+                    {modalityLabel(r.modality)}
+                    {r.view ? ` / ${viewLabel(r.view)}` : ''}
+                  </td>
+                  {revealed && <td>{r.viewScore ?? '—'}</td>}
+                  {revealed && (
+                    <td>
+                      {r.technique ? (
+                        <>
+                          <span
+                            className={`pill ${r.technique.level === 'ok' ? 'ok' : r.technique.level === 'warn' ? 'warn' : 'bad'}`}
+                          >
+                            {r.technique.score}/100
+                          </span>
+                          {r.technique.notes.length > 0 && (
+                            <ul className="small technique-notes">
+                              {r.technique.notes.map((n, i) => (
+                                <li key={i}>{n}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
+                      ) : (
+                        <span className="small">libre</span>
+                      )}
+                    </td>
+                  )}
+                  {s.mode !== 'exam' && <td>{r.truth ?? '—'}</td>}
+                  {s.mode !== 'exam' && <td>{r.deviation ?? '—'}</td>}
+                </tr>
+              ))}
+              {report.rows.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="small">
+                    Sin mediciones todavía.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+        <section className="cr-section cr-conclusion">
+          <h3>Conclusión</h3>
+          {s.impressionSelection.length ? (
+            <ol>
+              {s.impressionSelection.map((id) => (
+                <li key={id}>{getFinding(id)?.label ?? id}</li>
+              ))}
+            </ol>
+          ) : (
+            <p className="small">
+              Sin conclusión todavía: márcala en «Tu impresión estructurada», más abajo.
+            </p>
+          )}
+        </section>
+      </article>
+      <section className="cr-eval" aria-label="Evaluación docente">
+        <h2>Evaluación docente</h2>
+        <h3>Vistas requeridas</h3>
+        {/* the views a case requires name its diagnosis (aortic valve short axis and A5C for a stenosis, the RV-focused view
+          for pulmonary hypertension): during the exam the learner is asked for a complete study (decision 234) */}
+        {!revealed ? (
+          <p className="small" data-exam-views="hidden">
+            Adquiere un estudio transtorácico completo; la puntuación cuenta las vistas que el caso
+            necesita y se muestran al finalizar.
+          </p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Vista</th>
+                <th>Mínimo</th>
+                {/* the best score of each view would say which view the image showed (decision 154) */}
+                {revealed && <th>Mejor puntuación</th>}
+                {revealed && <th>Estado</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {acquisition.perView.map((v) => (
+                <tr key={v.viewId}>
+                  <td>{viewLabel(v.viewId)}</td>
+                  <td>{v.required}</td>
+                  {revealed && <td>{v.achieved}</td>}
+                  {revealed && (
+                    <td>
+                      <span className={`pill ${v.ok ? 'ok' : 'warn'}`}>
+                        {v.ok ? 'ok' : v.achieved ? 'incompleta' : 'no adquirida'}
+                      </span>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <h3>Tu impresión estructurada</h3>
+        <p className="small">
+          Marca los hallazgos que sustentan tu impresión. Se comparan con los que el modelo del caso
+          implica (umbrales de las guías); la puntuación es la F1 entre ambos conjuntos.
+        </p>
+        <div
+          className="impression-form"
+          data-impression-score={corrected ? (impression?.score ?? '') : ''}
+        >
+          {domains.map((d) => (
+            <fieldset key={d.id}>
+              <legend className="small">{d.label}</legend>
+              {FINDINGS.filter((f) => f.domain === d.id).map((f) => {
+                const checked = s.impressionSelection.includes(f.id);
+                const isExpected = expected.includes(f.id);
+                const cls =
+                  corrected && s.impressionSelection.length
+                    ? checked && isExpected
+                      ? 'ok'
+                      : checked && !isExpected
+                        ? 'bad'
+                        : !checked && isExpected
+                          ? 'missed'
+                          : ''
+                    : '';
+                return (
+                  <label key={f.id} className={`finding ${cls}`} data-finding={f.id}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={sheetClosed}
+                      onChange={() => s.toggleFinding(f.id)}
+                    />
+                    {f.label}
+                  </label>
+                );
+              })}
+            </fieldset>
+          ))}
+        </div>
+        {s.mode !== 'exam' && (
+          <p className="impression-actions">
+            {corrected ? (
+              <button className="ghost" onClick={() => s.redoImpression()}>
+                Rehacer
+              </button>
+            ) : (
+              <button onClick={() => s.checkImpression()} disabled={!s.impressionSelection.length}>
+                Corregir
+              </button>
+            )}
+          </p>
+        )}
+        {impression && corrected && (
+          <p data-impression-result="1">
+            Impresión: <b>{impression.score}/100</b> · correctos {impression.correct.length} ·
+            omitidos {impression.missed.length} · sobrantes {impression.wrong.length}
+            {impression.missed.length > 0 && (
+              <span className="small">
+                {' '}
+                — omitidos: {impression.missed.map((id) => getFinding(id)?.label ?? id).join('; ')}
+              </span>
+            )}
+          </p>
+        )}
+        {impression && !revealed && (
+          <p className="small">
+            Impresión registrada ({s.impressionSelection.length} hallazgos); se evalúa al finalizar
+            el examen.
+          </p>
+        )}
+        {/* the model's summary and impression are the answer key: in practice they wait for «Corregir» (decision 257) */}
+        {s.mode !== 'exam' && corrected && s.truth && (
+          <>
+            <h3>Resumen del modelo (solo aprendizaje)</h3>
+            <ul>
+              <li>
+                VI: DTD {formatClinical(s.truth.lv.eddCm, 'linearCm')}, SIV{' '}
+                {formatClinical(s.truth.lv.ivsdCm, 'linearCm')}, PP{' '}
+                {formatClinical(s.truth.lv.lvpwdCm, 'linearCm')}, FEVI{' '}
+                {formatClinical(s.truth.lv.efPct, 'percent')}, VS{' '}
+                {formatClinical(s.truth.lv.strokeVolumeMl, 'volumeMl')}
+              </li>
+              <li>
+                TSVI {formatClinical(s.truth.lvot.diameterCm, 'linearCm')} · VTI{' '}
+                {formatClinical(s.truth.lvot.vtiCm, 'vtiCm')} · VAo Vmax{' '}
+                {formatClinical(s.truth.aorticValve.vmaxMps, 'velocityMps')} · ΔP medio{' '}
+                {formatClinical(s.truth.aorticValve.meanGradientMmHg, 'gradientMmHg')} · AVA{' '}
+                {formatClinical(s.truth.aorticValve.continuityAvaCm2, 'areaCm2')}
+              </li>
+              <li>
+                Mitral E {formatClinical(s.truth.mitral.ePeakMps, 'velocityMps')} · A{' '}
+                {formatClinical(s.truth.mitral.aPeakMps, 'velocityMps')} · DT{' '}
+                {formatClinical(s.truth.mitral.decelerationTimeMs, 'timeMs')} · E/e′{' '}
+                {s.truth.mitral.eOverEPrimeAvg.toFixed(1)}
+              </li>
+              <li>
+                Derecho: TAPSE {formatClinical(s.truth.rightHeart.tapseCm, 'linearCm')} · TR Vmax{' '}
+                {s.truth.rightHeart.trVmaxMps
+                  ? formatClinical(s.truth.rightHeart.trVmaxMps, 'velocityMps')
+                  : '—'}{' '}
+                · RVSP{' '}
+                {s.truth.rightHeart.rvspMmHg
+                  ? formatClinical(s.truth.rightHeart.rvspMmHg, 'gradientMmHg')
+                  : '—'}
+              </li>
+            </ul>
+          </>
+        )}
+        {(s.mode === 'exam' || corrected) && (
+          <>
+            <h3>Impresión</h3>
+            <ul data-model-impression>
+              {report.impression.map((l, i) => (
+                <li key={i}>{l}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        {summary && (
+          <>
+            <h3>
+              Puntuación {s.mode === 'exam' ? 'del examen' : '(progreso)'}: {summary.total}/100
+            </h3>
+            <p className="small">
+              Adquisición {summary.acquisition.total}/100 · Mediciones {summary.measurements.total}
+              /100{summary.impression !== null ? ` · Impresión ${summary.impression}/100` : ''}.
+              Tolerancias y pesos en <code>src/education/scoring</code>.
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Medición requerida</th>
+                  <th>Medida</th>
+                  <th>Modelo</th>
+                  <th>Error</th>
+                  <th>Vista</th>
+                  <th>Puntos</th>
+                  <th>Comentario</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.measurements.rows.map((r) => (
+                  <tr key={r.measurementId}>
+                    <td>{r.label}</td>
+                    <td>{r.measured === null ? '—' : `${r.measured.toFixed(2)} ${r.units}`}</td>
+                    <td>{`${r.truth.toFixed(2)} ${r.units}`}</td>
+                    <td>{r.errorPct === null ? '—' : `${r.errorPct.toFixed(0)} %`}</td>
+                    <td>{r.viewScore ?? '—'}</td>
+                    <td>{r.points}</td>
+                    <td className="small">{r.comment}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {summary.strengths.length > 0 && (
+              <>
+                <h4>Fortalezas</h4>
+                <ul>
+                  {summary.strengths.map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {summary.mainErrors.length > 0 && (
+              <>
+                <h4>Errores principales</h4>
+                <ul>
+                  {summary.mainErrors.map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {summary.recommendations.length > 0 && (
+              <>
+                <h4>Recomendaciones de práctica</h4>
+                <ul>
+                  {summary.recommendations.map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
+        )}
+      </section>
+    </div>
+  );
+}

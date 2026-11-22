@@ -1,0 +1,6 @@
+{
+  "name": "EcoCardio Sim",
+  "description": "Simulador de ecocardiograma transtorácico de alta fidelidad con física acústica en tiempo real, Modo B, Doppler Color, Modo M, Doppler espectral PW/CW, ECG sincronizado y patologías clínicas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

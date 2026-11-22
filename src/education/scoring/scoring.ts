@@ -1,0 +1,260 @@
+import { viewLabel } from '@/simulator/windows/viewLabels';
+import type { Measurement } from '@/simulator/measurements/types';
+import { getMeasurementSpec } from '@/simulator/measurements/protocol';
+import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import type { CaseDefinition } from '@/cases/schema';
+
+/**
+ * Transparent, modular scoring (spec 28). Acquisition scores come from the ViewQualityEngine
+ * (best score reached per required view during the session); measurement scores compare each
+ * user measurement with the model truth using per-measurement tolerances and penalise technique
+ * (low view quality) even when the number happens to be right. Deterministic and auditable.
+ */
+export interface ViewProgress {
+  [viewId: string]: number; // best score 0..100 reached in the session
+}
+
+export interface AcquisitionScore {
+  total: number; // 0..100
+  perView: { viewId: string; required: number; achieved: number; ok: boolean }[];
+}
+
+export function scoreAcquisition(
+  caseDef: CaseDefinition,
+  progress: ViewProgress,
+): AcquisitionScore {
+  const perView = caseDef.requiredViews.map((rv) => {
+    const achieved = progress[rv.viewId] ?? 0;
+    return { viewId: rv.viewId, required: rv.minScore, achieved, ok: achieved >= rv.minScore };
+  });
+  if (perView.length === 0) return { total: 100, perView };
+  const total =
+    perView.reduce((s, v) => s + Math.min(100, (v.achieved / Math.max(1, v.required)) * 100), 0) /
+    perView.length;
+  return { total: Math.round(Math.min(100, total)), perView };
+}
+
+/**
+ * Map a required measurement id to the truth value and the measurement kind that can capture it. The protocol registry
+ * is the single source: a hand-kept list here once dropped seven required measurements from every score (Simpson
+ * volumes, TAPSE, e′, LA AP, PW thickness, LVOT velocity) without a trace.
+ */
+export function truthFor(
+  id: string,
+  t: StructuredEchoTruth,
+): { value: number; units: string; kind: Measurement['kind']; label: string } | null {
+  const spec = getMeasurementSpec(id);
+  if (!spec) return null;
+  const value = spec.truth(t);
+  // a truth that does not exist in this case (no TR jet, for instance) cannot be scored
+  if (value === null || !Number.isFinite(value) || value <= 0) return null;
+  return { value, units: spec.units, kind: spec.kind, label: spec.label };
+}
+
+export interface MeasurementScoreRow {
+  measurementId: string;
+  label: string;
+  truth: number;
+  units: string;
+  measured: number | null;
+  errorPct: number | null;
+  tolerancePct: number;
+  viewScore: number | null;
+  technicallyValid: boolean;
+  points: number; // 0..100
+  comment: string;
+}
+
+export interface MeasurementScore {
+  total: number;
+  rows: MeasurementScoreRow[];
+}
+
+const MIN_VIEW_SCORE_FOR_VALID = 50;
+
+export interface MeasurementScoringOptions {
+  /** Free measurements may stand for required ones (`modePolicy(mode).freeMeasurementsScored`); default true. */
+  freeMeasurements?: boolean;
+}
+
+export interface ExamScoringOptions extends MeasurementScoringOptions {
+  /** A blank impression scores 0 and keeps its 20 % (`modePolicy(mode).impressionRequired`); default false. */
+  impressionRequired?: boolean;
+}
+
+/**
+ * Matching user measurement: by semantic id when the protocol panel was used (the last one taken
+ * wins, as on a real machine); otherwise, when free measurements are scored, the closest free
+ * measurement of the right kind.
+ */
+function bestMatch(
+  id: string,
+  kind: Measurement['kind'],
+  truth: number,
+  ms: Measurement[],
+  freeMeasurements: boolean,
+): Measurement | null {
+  const semantic = ms.filter((m) => m.measurementId === id);
+  if (semantic.length) return semantic[semantic.length - 1]!;
+  if (!freeMeasurements) return null;
+  let best: Measurement | null = null;
+  for (const m of ms) {
+    if (m.kind !== kind || m.measurementId) continue;
+    if (!best || Math.abs(m.value - truth) < Math.abs(best.value - truth)) best = m;
+  }
+  return best;
+}
+
+export function scoreMeasurements(
+  caseDef: CaseDefinition,
+  truth: StructuredEchoTruth,
+  measurements: Measurement[],
+  { freeMeasurements = true }: MeasurementScoringOptions = {},
+): MeasurementScore {
+  const rows: MeasurementScoreRow[] = [];
+  for (const req of caseDef.requiredMeasurements) {
+    const t = truthFor(req.measurementId, truth);
+    if (!t) continue;
+    const m = bestMatch(req.measurementId, t.kind, t.value, measurements, freeMeasurements);
+    if (!m) {
+      rows.push({
+        measurementId: req.measurementId,
+        label: t.label,
+        truth: t.value,
+        units: t.units,
+        measured: null,
+        errorPct: null,
+        tolerancePct: req.tolerancePct,
+        viewScore: null,
+        technicallyValid: false,
+        points: 0,
+        comment: freeMeasurements
+          ? 'No medida.'
+          : 'No medida desde la lista del protocolo (en el examen una medición libre no cuenta).',
+      });
+      continue;
+    }
+    const errorPct = (Math.abs(m.value - t.value) / t.value) * 100;
+    let points =
+      errorPct <= req.tolerancePct ? 100 : Math.max(0, 100 - (errorPct - req.tolerancePct) * 3);
+    let comment =
+      errorPct <= req.tolerancePct
+        ? 'Dentro de tolerancia.'
+        : `Error ${errorPct.toFixed(0)} % (tolerancia ${req.tolerancePct} %).`;
+    let technicallyValid: boolean;
+    if (m.technique) {
+      // technique-graded measurement: the number only counts as much as the technique allows
+      technicallyValid = !m.technique.findings.some((f) => f.level === 'invalid');
+      points *= m.technique.score;
+      const problems = m.technique.findings.filter((f) => f.level !== 'ok').map((f) => f.message);
+      if (problems.length) comment += ' Técnica: ' + problems.join(' ');
+    } else {
+      technicallyValid = (m.viewScore ?? 0) >= MIN_VIEW_SCORE_FOR_VALID;
+      if (!technicallyValid) {
+        points *= 0.4;
+        comment +=
+          ' Medición tomada con una vista de baja calidad: técnicamente inválida aunque el número coincida.';
+      }
+    }
+    rows.push({
+      measurementId: req.measurementId,
+      label: t.label,
+      truth: t.value,
+      units: t.units,
+      measured: m.value,
+      errorPct,
+      tolerancePct: req.tolerancePct,
+      viewScore: m.viewScore,
+      technicallyValid,
+      points: Math.round(points),
+      comment,
+    });
+  }
+  const total = rows.length
+    ? Math.round(rows.reduce((s, r) => s + r.points, 0) / rows.length)
+    : 100;
+  return { total, rows };
+}
+
+export interface ExamSummary {
+  total: number;
+  acquisition: AcquisitionScore;
+  measurements: MeasurementScore;
+  /** structured impression score (0..100) when the learner submitted one; null otherwise */
+  impression: number | null;
+  strengths: string[];
+  mainErrors: string[];
+  omittedViews: string[];
+  invalidMeasurements: string[];
+  recommendations: string[];
+}
+
+export function buildExamSummary(
+  caseDef: CaseDefinition,
+  truth: StructuredEchoTruth,
+  progress: ViewProgress,
+  measurements: Measurement[],
+  submittedImpression: number | null = null,
+  options: ExamScoringOptions = {},
+): ExamSummary {
+  const acquisition = scoreAcquisition(caseDef, progress);
+  const ms = scoreMeasurements(caseDef, truth, measurements, options);
+  // in the exam a blank impression is a wrong one: 0 of its 20 %, never a reweighting that rewards not answering
+  const impressionMissing = submittedImpression === null && options.impressionRequired === true;
+  const impression = impressionMissing ? 0 : submittedImpression;
+  // acquisition 40 % · measurements 40 % · impression 20 % (50/50 in practice when no impression was corrected)
+  const total =
+    impression === null
+      ? Math.round(acquisition.total * 0.5 + ms.total * 0.5)
+      : Math.round(acquisition.total * 0.4 + ms.total * 0.4 + impression * 0.2);
+  const strengths: string[] = [];
+  const mainErrors: string[] = [];
+  const recommendations: string[] = [];
+  for (const v of acquisition.perView) {
+    if (v.ok) strengths.push(`Vista ${viewLabel(v.viewId)} adquirida con ${v.achieved}/100.`);
+    else if (v.achieved > 0)
+      mainErrors.push(`Vista ${viewLabel(v.viewId)} incompleta (${v.achieved}/${v.required}).`);
+  }
+  const omittedViews = acquisition.perView.filter((v) => v.achieved === 0).map((v) => v.viewId);
+  if (omittedViews.length)
+    recommendations.push(`Practica la adquisición de: ${omittedViews.map(viewLabel).join(', ')}.`);
+  const invalidMeasurements = ms.rows
+    .filter((r) => r.measured !== null && !r.technicallyValid)
+    .map((r) => r.label);
+  if (invalidMeasurements.length)
+    recommendations.push(
+      'Optimiza la vista (score ≥ 50) antes de medir: una medición sobre un plano oblicuo no es válida aunque el número parezca correcto.',
+    );
+  for (const r of ms.rows) {
+    if (r.measured === null) mainErrors.push(`${r.label} no fue medida.`);
+    else if (r.points >= 90) strengths.push(`${r.label} dentro de tolerancia.`);
+    else mainErrors.push(`${r.label}: ${r.comment}`);
+  }
+  if (ms.rows.some((r) => r.measured === null))
+    recommendations.push(
+      'Completa las mediciones requeridas por el caso antes de cerrar el informe.',
+    );
+  if (impressionMissing) {
+    mainErrors.push('Impresión diagnóstica no entregada: cuenta 0 (20 % del total).');
+    recommendations.push(
+      'Cierra siempre el estudio con una impresión: un juicio con dudas puntúa más que ninguno.',
+    );
+  } else if (impression !== null) {
+    if (impression >= 80) strengths.push(`Impresión estructurada concordante (${impression}/100).`);
+    else
+      mainErrors.push(
+        `Impresión estructurada con discrepancias (${impression}/100): revisa hallazgos omitidos y sobrantes en el informe.`,
+      );
+  }
+  return {
+    total,
+    acquisition,
+    measurements: ms,
+    impression,
+    strengths,
+    mainErrors,
+    omittedViews,
+    invalidMeasurements,
+    recommendations,
+  };
+}

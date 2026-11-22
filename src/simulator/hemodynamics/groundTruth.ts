@@ -1,0 +1,341 @@
+import type { CaseDefinition } from '@/cases/schema';
+import {
+  computeWmsi,
+  type SegmentAssessment,
+  type WallMotionScore,
+} from '@/clinical/segmentation/wallMotion';
+import type { WallMotionId } from '@/clinical/segmentation/catalog';
+import { buildBeatTables, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
+import { lvGeometryFromVolume } from '@/simulator/anatomy/heartModel';
+import { lvProfileG } from '@/simulator/anatomy/lvShape';
+import { caseLvotObstruction, caseOutflow } from '@/simulator/cardiac-cycle/outflow';
+import { lvotNarrowing, pulmonaryVeinPeaks } from '@/simulator/doppler/flow-primitives/flowField';
+import {
+  bsaMosteller,
+  cardiacOutput,
+  continuityAva,
+  ejectionFraction,
+  meanGradientFromEnvelope,
+  rvspFromTr,
+  simplifiedBernoulli,
+  velocityRatio,
+} from '@/clinical/formulas';
+
+/**
+ * StructuredEchoTruth: the ground truth that scoring/report compare against. Every value derives
+ * from the same beat tables + anatomy that drive rendering and Doppler (spec 15, 32, 67).
+ */
+export interface StructuredEchoTruth {
+  /** The sex the reference ranges are read for (decision 175). */
+  sex: 'male' | 'female';
+  /** Optional for older saved reports; current synthetic cases always provide it. */
+  ageYears?: number;
+  bmiKgM2?: number;
+  bsaM2: number;
+  heartRateBpm: number;
+  rhythm: string;
+  lv: {
+    eddCm: number;
+    esdCm: number;
+    ivsdCm: number;
+    lvpwdCm: number;
+    edvMl: number;
+    esvMl: number;
+    efPct: number;
+    strokeVolumeMl: number;
+    cardiacOutputLpm: number;
+    mapseCm: number;
+  };
+  lvot: {
+    diameterCm: number;
+    areaCm2: number;
+    vtiCm: number;
+    vmaxMps: number;
+    strokeVolumeMl: number;
+    peakGradientMmHg: number;
+    dynamicObstruction: boolean;
+  };
+  regurgitation: {
+    mr: {
+      eroaCm2: number;
+      regurgitantVolumeMl: number;
+      regurgitantFractionPct: number;
+      vmaxMps: number;
+      vtiCm: number;
+      jetDirectionDeg: number;
+    } | null;
+    ar: {
+      eroaCm2: number;
+      regurgitantVolumeMl: number;
+      regurgitantFractionPct: number;
+      vmaxMps: number;
+      phtMs: number;
+    } | null;
+    tr: {
+      eroaCm2: number;
+      /** Optional for compatibility with archived reports predating the right-heart ledger. */
+      regurgitantVolumeMl?: number;
+      vtiCm?: number;
+      vmaxMps?: number;
+    } | null;
+  };
+  wallMotion: {
+    /** 16-segment ids the case scores 2 or worse (its declared scores, never the simulation amplitude). */
+    abnormalSegments: number[];
+    /** Declared score of segments 1–16 (index 0 = segment 1); a segment the case leaves alone is 1, or 2 under global hypokinesis. */
+    scores: WallMotionScore[];
+    /** Wall-motion score index of the synthetic ground truth, where every segment is scored. */
+    wmsi: number;
+    description: string;
+  };
+  pulmonaryVein: { sMps: number; dMps: number; arMps: number; sdRatio: number };
+  rv: { basalDiameterCm: number; freeWallThicknessCm: number; septalFlattening: number };
+  aorticValve: {
+    effectiveAreaCm2: number;
+    vmaxMps: number;
+    vtiCm: number;
+    peakGradientMmHg: number;
+    meanGradientMmHg: number;
+    continuityAvaCm2: number;
+    velocityRatio: number;
+  };
+  mitral: {
+    ePeakMps: number;
+    aPeakMps: number;
+    eOverA: number | null;
+    decelerationTimeMs: number;
+    ivrtMs: number;
+    ePrimeSeptalCmps: number;
+    ePrimeLateralCmps: number;
+    eOverEPrimeAvg: number;
+    effectiveAreaCm2: number;
+  };
+  rightHeart: {
+    tapseCm: number;
+    sPrimeCmps: number;
+    trVmaxMps: number | null;
+    rvspMmHg: number | null;
+    rapMmHg: number;
+    ivcCm: number;
+    ivcCollapsePct: number;
+    rvotAccelerationTimeMs: number;
+  };
+  la: { volumeMl: number; volumeIndexMlM2: number; apDiameterCm: number };
+  aorta: { annulusCm: number; sinusCm: number; ascendingCm: number };
+  pericardium: { effusionCm: number; tamponade: number };
+}
+
+/** LV internal diameter (cm) of the geometric model at end diastole, 2 cm below the annulus on the lateral axis (what the image shows). */
+export function geometricEdd(c: CaseDefinition, edvMl: number): number {
+  const g = lvGeometryFromVolume(
+    edvMl,
+    c.anatomy.lv.lengthEdCm,
+    c.anatomy.lv.sphericity,
+    c.anatomy.lv,
+  );
+  return 2 * g.rMax * lvProfileG(g.shape, 2.0 / g.lengthCm);
+}
+
+export function computeGroundTruth(c: CaseDefinition, tables?: BeatTables): StructuredEchoTruth {
+  const rr = 60 / c.rhythm.heartRateBpm;
+  const t =
+    tables ??
+    buildBeatTables(rr, c.physiology, c.rhythm, c.hemodynamics, { outflow: caseOutflow(c) });
+  const bsa = bsaMosteller(c.demographics.heightCm, c.demographics.weightKg);
+  const lvotArea = caseOutflow(c).lvotAreaCm2;
+  const dt = t.rrS / t.n;
+  // LVOT and AV velocity envelopes from the SAME ejection flow curve
+  const lvotEnv: number[] = [];
+  const avEnv: number[] = [];
+  let lvotVmax = 0,
+    avVmax = 0,
+    lvotVti = 0,
+    avVti = 0;
+  for (let i = 0; i < t.n; i++) {
+    const q = t.aorticFlowMlps[i] ?? 0;
+    if (q <= 0) continue;
+    const vL = q / lvotArea / 100; // m/s
+    const vA = q / c.hemodynamics.avEffectiveAreaCm2 / 100;
+    lvotEnv.push(vL);
+    avEnv.push(vA);
+    lvotVmax = Math.max(lvotVmax, vL);
+    avVmax = Math.max(avVmax, vA);
+    lvotVti += vL * 100 * dt;
+    avVti += vA * 100 * dt;
+  }
+  const sv = t.strokeVolumeMl; // total (EDV − ESV)
+  const ef = ejectionFraction(t.edvMl, t.esvMl);
+  // LVOT peak with a subaortic/dynamic obstruction (same solver as the flow field)
+  const obs = caseLvotObstruction(c, t);
+  let lvotPeakV = lvotVmax;
+  if (obs) {
+    lvotPeakV = 0;
+    for (let i = 0; i < t.n; i++) {
+      const q = t.aorticFlowMlps[i] ?? 0;
+      if (q <= 0) continue;
+      const u =
+        (((i + 0.5) / t.n) * t.rrS - t.timings.ejectionStartS) /
+        (t.timings.ejectionEndS - t.timings.ejectionStartS);
+      lvotPeakV = Math.max(
+        lvotPeakV,
+        q / Math.max(0.05, lvotArea * (1 - lvotNarrowing(obs.fMax, obs.dynamic, u))) / 100,
+      );
+    }
+  }
+  const rg = t.regurgitation;
+  const mrCfg = c.hemodynamics.regurgitation.mr;
+  const arCfg = c.hemodynamics.regurgitation.ar;
+  // the case's declared scores (decision 152): the amplitude is the mechanics, the score the reading it intends. A ventricle
+  // with no regional abnormality and an EF under 40 % contracts uniformly weakly: every segment reads hypokinetic (global
+  // hypokinesis, WMSI 2.0), not normal as the HFrEF case did at EF 24 %, and none is a regional abnormality
+  const globalHypokinesis = c.anatomy.wallMotion.length === 0 && ef < 40;
+  const scores = Array.from({ length: 16 }, (_, i): WallMotionScore => {
+    const w = c.anatomy.wallMotion.find((x) => x.segment === i + 1);
+    return w?.score ?? (globalHypokinesis ? 2 : 1);
+  });
+  const abnormal = globalHypokinesis ? [] : scores.flatMap((s, i) => (s >= 2 ? [i + 1] : []));
+  // every segment is scored in the synthetic ground truth: the index of the tested consolidation, never a sum of our own
+  const assessments = scores.map((s, i): SegmentAssessment => ({
+    model: 'LV_16',
+    segmentId: (i + 1) as WallMotionId,
+    source: 'synthetic_ground_truth',
+    score: s,
+    views: [],
+    scores: [s],
+    discrepant: false,
+  }));
+  const wmsi = computeWmsi(assessments).value ?? 1;
+  const pvPeaks = pulmonaryVeinPeaks(c);
+  // ESD from EDD and contraction geometry (radial fractional shortening ~ derived from volumes)
+  const esd = geometricEdd(c, t.edvMl) * Math.cbrt(t.esvMl / t.edvMl) * 0.93;
+  const tr = c.hemodynamics.trPresent
+    ? Math.sqrt(Math.max(0, (c.hemodynamics.paspMmHg - c.hemodynamics.rapMmHg) / 4))
+    : null;
+  const eOverA =
+    t.timings.hasAWave && c.physiology.aPeakMps > 0
+      ? c.physiology.ePeakMps / c.physiology.aPeakMps
+      : null;
+  const ePrimeAvg = (c.physiology.ePrimeSeptalCmps + c.physiology.ePrimeLateralCmps) / 2;
+  return {
+    sex: c.demographics.sexForReference,
+    ageYears: c.demographics.ageYears,
+    bmiKgM2: c.demographics.weightKg / (c.demographics.heightCm / 100) ** 2,
+    bsaM2: bsa,
+    heartRateBpm: c.rhythm.heartRateBpm,
+    rhythm: c.rhythm.type,
+    lv: {
+      eddCm: geometricEdd(c, t.edvMl),
+      esdCm: esd,
+      ivsdCm: c.anatomy.lv.ivsdCm,
+      lvpwdCm: c.anatomy.lv.lvpwdCm,
+      edvMl: t.edvMl,
+      esvMl: t.esvMl,
+      efPct: ef,
+      strokeVolumeMl: sv,
+      // what reaches the aorta, not what leaves the ventricle: with mitral regurgitation the total stroke volume overstated
+      // the output by the regurgitant volume and hid a forward flow that had collapsed (decision 297)
+      cardiacOutputLpm: cardiacOutput(sv - t.regurgitation.mrVolumeMl, c.rhythm.heartRateBpm),
+      mapseCm: c.physiology.mapseCm,
+    },
+    lvot: {
+      diameterCm: c.anatomy.aorta.lvotDiameterCm,
+      areaCm2: lvotArea,
+      vtiCm: lvotVti,
+      vmaxMps: lvotPeakV,
+      strokeVolumeMl: lvotArea * lvotVti,
+      peakGradientMmHg: simplifiedBernoulli(lvotPeakV),
+      dynamicObstruction: Boolean(obs?.dynamic),
+    },
+    regurgitation: {
+      mr:
+        mrCfg && mrCfg.eroaCm2 > 0
+          ? {
+              eroaCm2: mrCfg.eroaCm2,
+              regurgitantVolumeMl: rg.mrVolumeMl,
+              regurgitantFractionPct: (rg.mrVolumeMl / Math.max(sv, 1)) * 100,
+              vmaxMps: rg.mrVmaxMps,
+              vtiCm: rg.mrVtiCm,
+              jetDirectionDeg: mrCfg.jetDirectionDeg,
+            }
+          : null,
+      ar:
+        arCfg && arCfg.eroaCm2 > 0
+          ? {
+              eroaCm2: arCfg.eroaCm2,
+              regurgitantVolumeMl: rg.arVolumeMl,
+              regurgitantFractionPct: (rg.arVolumeMl / Math.max(sv, 1)) * 100,
+              vmaxMps: rg.arVmaxMps,
+              phtMs: rg.arPhtMs,
+            }
+          : null,
+      tr: c.hemodynamics.regurgitation.tr
+        ? {
+            eroaCm2: c.hemodynamics.regurgitation.tr.eroaCm2,
+            regurgitantVolumeMl: rg.trVolumeMl,
+            vtiCm: rg.trVtiCm,
+            vmaxMps: rg.trVmaxMps,
+          }
+        : null,
+    },
+    pulmonaryVein: { ...pvPeaks, sdRatio: pvPeaks.dMps > 0 ? pvPeaks.sMps / pvPeaks.dMps : 0 },
+    wallMotion: {
+      abnormalSegments: abnormal,
+      scores,
+      wmsi,
+      description: globalHypokinesis
+        ? `Hipocinesia global; índice de motilidad ${wmsi.toFixed(2).replace('.', ',')}`
+        : abnormal.length
+          ? `Alteración segmentaria en ${abnormal.length} segmento(s) del modelo de 16: ${abnormal.join(', ')}; índice de motilidad ${wmsi.toFixed(2).replace('.', ',')}`
+          : 'Motilidad segmentaria normal',
+    },
+    rv: {
+      basalDiameterCm: c.anatomy.rv.basalDiameterCm,
+      freeWallThicknessCm: c.anatomy.rv.freeWallThicknessCm,
+      septalFlattening: c.anatomy.rv.septalFlattening,
+    },
+    aorticValve: {
+      effectiveAreaCm2: c.hemodynamics.avEffectiveAreaCm2,
+      vmaxMps: avVmax,
+      vtiCm: avVti,
+      peakGradientMmHg: simplifiedBernoulli(avVmax),
+      meanGradientMmHg: meanGradientFromEnvelope(avEnv),
+      continuityAvaCm2: continuityAva(c.anatomy.aorta.lvotDiameterCm, lvotVti, avVti),
+      velocityRatio: velocityRatio(lvotVti, avVti),
+    },
+    mitral: {
+      ePeakMps: c.physiology.ePeakMps,
+      aPeakMps: t.timings.hasAWave ? c.physiology.aPeakMps : 0,
+      eOverA,
+      decelerationTimeMs: c.physiology.decelerationTimeMs,
+      ivrtMs: c.physiology.ivrtMs,
+      ePrimeSeptalCmps: c.physiology.ePrimeSeptalCmps,
+      ePrimeLateralCmps: c.physiology.ePrimeLateralCmps,
+      eOverEPrimeAvg: (c.physiology.ePeakMps * 100) / ePrimeAvg,
+      effectiveAreaCm2: t.mvEffectiveAreaCm2,
+    },
+    rightHeart: {
+      tapseCm: c.physiology.tapseCm,
+      sPrimeCmps: c.physiology.sPrimeTricuspidCmps,
+      trVmaxMps: tr,
+      rvspMmHg: tr !== null ? rvspFromTr(tr, c.hemodynamics.rapMmHg) : null,
+      rapMmHg: c.hemodynamics.rapMmHg,
+      ivcCm: c.anatomy.ivc.diameterCm,
+      ivcCollapsePct: c.anatomy.ivc.collapsePct,
+      rvotAccelerationTimeMs: t.pulmonaryAccelerationS * 1000,
+    },
+    la: {
+      volumeMl: c.anatomy.la.volumeMl,
+      volumeIndexMlM2: c.anatomy.la.volumeMl / bsa,
+      apDiameterCm: c.anatomy.la.apDiameterCm,
+    },
+    aorta: {
+      annulusCm: c.anatomy.aorta.annulusCm,
+      sinusCm: c.anatomy.aorta.sinusCm,
+      ascendingCm: c.anatomy.aorta.ascendingCm,
+    },
+    pericardium: {
+      effusionCm: c.anatomy.pericardium.effusionCm,
+      tamponade: c.anatomy.pericardium.tamponade,
+    },
+  };
+}

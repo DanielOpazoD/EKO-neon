@@ -1,0 +1,647 @@
+import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import type { ImagingModality } from '@/simulator/renderer/types';
+import { Structure } from '@/simulator/anatomy/tissue';
+import type { MeasurementKind } from './types';
+
+/**
+ * Measurement protocol (spec 16, 26, 28): every clinically meaningful measurement the simulator can
+ * capture, with the technique it requires — modality, views, cardiac phase, placement (which
+ * structure the gate/segment must sit on), beam–flow alignment — and how it maps to the model truth.
+ * The technique engine (`education/technique.ts`) grades measurements against these specs; the
+ * report and the exam scorer match measurements by `id`, never by "closest number".
+ */
+export type MeasurementTool =
+  'caliper' | 'velocity' | 'vti' | 'auto-vti' | 'time' | 'slope' | 'simpson' | 'tapse';
+export type PhaseRequirement =
+  'ed' | 'es' | 'mid-systole' | 'early-diastole' | 'late-diastole' | 'systole' | 'any';
+
+export interface PlacementRule {
+  /** Structures the gate / segment midpoint / cursor line must touch. */
+  structures: number[];
+  /** For caliper measurements: 'cavity' = segment inside the cavity with tissue at both ends (inner edge); 'wall' = segment inside the wall. */
+  segment?: 'cavity' | 'wall';
+  label: string;
+}
+
+export interface MeasurementSpec {
+  id: string;
+  label: string;
+  shortLabel: string;
+  kind: MeasurementKind;
+  units: string;
+  tool: MeasurementTool;
+  modalities: ImagingModality[];
+  views: string[];
+  phase: PhaseRequirement;
+  placement?: PlacementRule;
+  /** Maximum beam–flow (or beam–motion) angle in degrees for velocity-type measurements. */
+  maxAngleDeg?: number;
+  instruction: string;
+  truth: (t: StructuredEchoTruth) => number | null;
+  tolerancePct: number;
+  referenceIds: string[];
+  /** Group in the panel. */
+  group: 'lv' | 'lvot-av' | 'diastole' | 'right' | 'atria';
+}
+
+const LV_CAVITY = [Structure.LvCavity];
+
+export const MEASUREMENT_SPECS: MeasurementSpec[] = [
+  {
+    id: 'lvot-diameter',
+    label: 'Diámetro del TSVI',
+    shortLabel: 'TSVI ⌀',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d'],
+    views: ['plax', 'a5c', 'a3c'],
+    phase: 'mid-systole',
+    placement: {
+      structures: [Structure.Lvot, Structure.AorticRoot],
+      segment: 'cavity',
+      label: 'TSVI, 0,5 cm proximal al anillo, borde interno a borde interno',
+    },
+    instruction:
+      'PLAX, zoom sobre el TSVI, cuadro de mesosístole (válvula abierta): caliper de borde interno a borde interno paralelo al anillo.',
+    truth: (t) => t.lvot.diameterCm,
+    tolerancePct: 8,
+    referenceIds: ['ase-tte-2019', 'ase-eacvi-aortic-stenosis-2017'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'lv-edd',
+    label: 'Diámetro telediastólico del VI (DTDVI)',
+    shortLabel: 'DTDVI',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['plax', 'psax-pm', 'psax-mv'],
+    phase: 'ed',
+    placement: {
+      structures: LV_CAVITY,
+      segment: 'cavity',
+      label: 'cavidad del VI a nivel de las puntas mitrales, perpendicular al eje largo',
+    },
+    instruction:
+      'PLAX en telediástole (inicio del QRS): caliper del endocardio septal al endocardio posterior, perpendicular al eje largo, a nivel de las puntas de la mitral.',
+    truth: (t) => t.lv.eddCm,
+    tolerancePct: 8,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'lv-esd',
+    label: 'Diámetro telesistólico del VI (DTSVI)',
+    shortLabel: 'DTSVI',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['plax', 'psax-pm', 'psax-mv'],
+    phase: 'es',
+    placement: { structures: LV_CAVITY, segment: 'cavity', label: 'cavidad del VI en telesístole' },
+    instruction:
+      'PLAX en telesístole (cavidad mínima): mismo nivel y perpendicularidad que el DTDVI.',
+    truth: (t) => t.lv.esdCm,
+    tolerancePct: 10,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'ivsd',
+    label: 'Septum interventricular en diástole',
+    shortLabel: 'SIVd',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['plax', 'psax-pm', 'psax-mv'],
+    phase: 'ed',
+    placement: {
+      structures: [Structure.LvWallSeptal, Structure.LvWallAnterior],
+      segment: 'wall',
+      label: 'grosor del septo, borde a borde',
+    },
+    instruction:
+      'PLAX en telediástole: caliper a través del septo (del endocardio derecho al endocardio izquierdo), al mismo nivel que el DTDVI.',
+    truth: (t) => t.lv.ivsdCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'lvpwd',
+    label: 'Pared posterior en diástole',
+    shortLabel: 'PPd',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['plax', 'psax-pm', 'psax-mv'],
+    phase: 'ed',
+    placement: {
+      structures: [Structure.LvWallLateral, Structure.LvWallInferior],
+      segment: 'wall',
+      label: 'grosor de la pared inferolateral',
+    },
+    instruction:
+      'PLAX en telediástole: caliper del endocardio al epicardio de la pared inferolateral, excluyendo el pericardio.',
+    truth: (t) => t.lv.lvpwdCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'la-ap',
+    label: 'Diámetro anteroposterior de la AI',
+    shortLabel: 'AI AP',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['plax'],
+    phase: 'es',
+    placement: {
+      structures: [Structure.LaCavity],
+      segment: 'cavity',
+      label: 'AI de pared anterior a posterior, a nivel de los senos de Valsalva',
+    },
+    instruction:
+      'PLAX en telesístole (AI máxima): caliper perpendicular a la pared posterior aórtica, de borde interno a borde interno.',
+    truth: (t) => t.la.apDiameterCm,
+    tolerancePct: 10,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'atria',
+  },
+  {
+    // decision 180: the AP diameter underestimates an atrium that grows along its long axis; the volume is the measure
+    id: 'la-volume',
+    label: 'Volumen máximo de la AI (discos)',
+    shortLabel: 'Vol AI',
+    kind: 'volume',
+    units: 'mL',
+    tool: 'simpson',
+    modalities: ['2d'],
+    views: ['a4c', 'a2c'],
+    phase: 'es',
+    placement: {
+      structures: [Structure.LaCavity],
+      label: 'trazado del borde de la AI de anillo a anillo, sin orejuela ni venas pulmonares',
+    },
+    instruction:
+      'A4C y A2C centrados en la AI, en telesístole (AI máxima, justo antes de abrirse la mitral): traza el borde interno de la AI desde un lado del anillo mitral hasta el otro, excluyendo la orejuela y las venas pulmonares; doble clic para cerrar. Con los dos planos el informe da el volumen biplano y su índice.',
+    truth: (t) => t.la.volumeMl,
+    tolerancePct: 18,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'atria',
+  },
+  {
+    // decision 175
+    id: 'aortic-root',
+    label: 'Raíz aórtica (senos de Valsalva)',
+    shortLabel: 'Raíz Ao',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d'],
+    views: ['plax'],
+    phase: 'ed',
+    placement: {
+      structures: [Structure.AorticRoot],
+      segment: 'cavity',
+      label: 'raíz aórtica en los senos de Valsalva, perpendicular a su eje',
+    },
+    instruction:
+      'PLAX en telediástole, zoom sobre la raíz: caliper en la parte más ancha de los senos de Valsalva, perpendicular al eje de la aorta.',
+    truth: (t) => t.aorta.sinusCm,
+    tolerancePct: 8,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'lv-edv-simpson',
+    label: 'Volumen telediastólico del VI (Simpson)',
+    shortLabel: 'VTD Simpson',
+    kind: 'volume',
+    units: 'mL',
+    tool: 'simpson',
+    modalities: ['2d'],
+    views: ['a4c', 'a2c'],
+    phase: 'ed',
+    placement: {
+      structures: LV_CAVITY,
+      label: 'trazado del endocardio del VI de anillo a anillo pasando por el ápex',
+    },
+    instruction:
+      'A4C (y A2C para biplano) en telediástole: traza el endocardio desde un lado del anillo mitral hasta el otro pasando por el ápex, sin acortamiento; doble clic para cerrar.',
+    truth: (t) => t.lv.edvMl,
+    tolerancePct: 15,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'lv-esv-simpson',
+    label: 'Volumen telesistólico del VI (Simpson)',
+    shortLabel: 'VTS Simpson',
+    kind: 'volume',
+    units: 'mL',
+    tool: 'simpson',
+    modalities: ['2d'],
+    views: ['a4c', 'a2c'],
+    phase: 'es',
+    placement: { structures: LV_CAVITY, label: 'trazado del endocardio del VI en telesístole' },
+    instruction:
+      'A4C (y A2C) en telesístole (cavidad mínima, justo antes de abrirse la mitral): traza el endocardio como en telediástole.',
+    truth: (t) => t.lv.esvMl,
+    tolerancePct: 18,
+    referenceIds: ['ase-eacvi-chamber-2015'],
+    group: 'lv',
+  },
+  {
+    id: 'lvot-vti',
+    label: 'VTI del TSVI',
+    shortLabel: 'VTI TSVI',
+    kind: 'vti',
+    units: 'cm',
+    tool: 'auto-vti',
+    modalities: ['pw'],
+    views: ['a5c', 'a3c'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.Lvot],
+      label: 'volumen de muestra en el TSVI, 0,5 cm proximal a la válvula aórtica',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A5C, Doppler pulsado con el volumen de muestra en el TSVI justo proximal a la válvula (espectro limpio con clic de cierre): traza la envolvente de un latido.',
+    truth: (t) => t.lvot.vtiCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-tte-2019'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'av-vti',
+    label: 'VTI transaórtico',
+    shortLabel: 'VTI VAo',
+    kind: 'vti',
+    units: 'cm',
+    tool: 'auto-vti',
+    modalities: ['cw'],
+    views: ['a5c', 'a3c'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.AorticValve, Structure.AorticRoot, Structure.Lvot],
+      label: 'línea de Doppler continuo a través de la válvula aórtica',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A5C, Doppler continuo alineado con el chorro aórtico: traza la envolvente de la señal más densa.',
+    truth: (t) => t.aorticValve.vtiCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-eacvi-aortic-stenosis-2017'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'av-vmax',
+    label: 'Velocidad máxima transaórtica',
+    shortLabel: 'Vmax VAo',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['cw'],
+    views: ['a5c', 'a3c'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.AorticValve, Structure.AorticRoot, Structure.Lvot],
+      label: 'línea de Doppler continuo a través de la válvula aórtica',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A5C, Doppler continuo a través de la válvula aórtica: marca el pico de la envolvente.',
+    truth: (t) => t.aorticValve.vmaxMps,
+    tolerancePct: 8,
+    referenceIds: ['ase-eacvi-aortic-stenosis-2017'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'lvot-peak-velocity',
+    label: 'Velocidad máxima en el TSVI (obstrucción)',
+    shortLabel: 'Vmax TSVI',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['cw', 'pw'],
+    views: ['a5c', 'a3c'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.Lvot, Structure.LvCavity, Structure.AorticValve, Structure.AorticRoot],
+      label: 'línea de Doppler continuo a través del TSVI',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A5C/A3C, Doppler continuo a través del TSVI: marca el pico de la envolvente (en la obstrucción dinámica la envolvente es en daga, de pico tardío).',
+    truth: (t) => t.lvot.vmaxMps,
+    tolerancePct: 10,
+    referenceIds: ['ase-tte-2019'],
+    group: 'lvot-av',
+  },
+  {
+    id: 'mitral-e',
+    label: 'Onda E mitral',
+    shortLabel: 'E',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['pw'],
+    views: ['a4c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [Structure.LvCavity, Structure.MitralAnterior, Structure.MitralPosterior],
+      label: 'volumen de muestra en las puntas de las valvas mitrales',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C, Doppler pulsado con el volumen de muestra (1–3 mm) en las puntas de las valvas mitrales: marca el pico de la onda E.',
+    truth: (t) => t.mitral.ePeakMps,
+    tolerancePct: 8,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'mitral-a',
+    label: 'Onda A mitral',
+    shortLabel: 'A',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['pw'],
+    views: ['a4c'],
+    phase: 'late-diastole',
+    placement: {
+      structures: [Structure.LvCavity, Structure.MitralAnterior, Structure.MitralPosterior],
+      label: 'volumen de muestra en las puntas de las valvas mitrales',
+    },
+    maxAngleDeg: 20,
+    instruction: 'Mismo registro que la onda E: marca el pico de la onda A (tras la P del ECG).',
+    truth: (t) => t.mitral.aPeakMps,
+    tolerancePct: 8,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'mitral-dt',
+    label: 'Tiempo de desaceleración de la onda E',
+    shortLabel: 'TD E',
+    kind: 'time',
+    units: 'ms',
+    tool: 'slope',
+    modalities: ['pw'],
+    views: ['a4c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [Structure.LvCavity, Structure.MitralAnterior, Structure.MitralPosterior],
+      label: 'volumen de muestra en las puntas de las valvas mitrales',
+    },
+    instruction:
+      'Sobre la onda E: primer clic en el pico, segundo clic sobre la pendiente de desaceleración; el tiempo se extrapola hasta la línea de base.',
+    truth: (t) => t.mitral.decelerationTimeMs,
+    tolerancePct: 15,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'ivrt',
+    label: 'Tiempo de relajación isovolumétrica',
+    shortLabel: 'TRIV',
+    kind: 'time',
+    units: 'ms',
+    tool: 'time',
+    modalities: ['pw', 'cw'],
+    views: ['a5c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [Structure.Lvot, Structure.LvCavity, Structure.MitralAnterior],
+      label: 'entre el tracto de salida y el flujo de entrada mitral',
+    },
+    instruction:
+      'A5C, Doppler pulsado (o continuo) con el volumen de muestra entre el tracto de salida y el flujo de entrada mitral: mide el intervalo desde el clic de cierre aórtico, al final de la eyección, hasta el clic de apertura mitral, al comienzo de la onda E.',
+    truth: (t) => t.mitral.ivrtMs,
+    tolerancePct: 15,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'e-prime-septal',
+    label: 'e′ septal (Doppler tisular)',
+    shortLabel: 'e′ sept',
+    kind: 'velocity',
+    units: 'cm/s',
+    tool: 'velocity',
+    modalities: ['tdi'],
+    views: ['a4c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [Structure.LvWallSeptal, Structure.MitralAnnulus, Structure.InteratrialSeptum],
+      label: 'volumen de muestra en el anillo mitral septal',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C, Doppler tisular con el volumen de muestra en el anillo mitral septal, alineado con el movimiento longitudinal: marca el pico de e′.',
+    truth: (t) => t.mitral.ePrimeSeptalCmps,
+    tolerancePct: 12,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'e-prime-lateral',
+    label: 'e′ lateral (Doppler tisular)',
+    shortLabel: 'e′ lat',
+    kind: 'velocity',
+    units: 'cm/s',
+    tool: 'velocity',
+    modalities: ['tdi'],
+    views: ['a4c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [Structure.LvWallLateral, Structure.MitralAnnulus],
+      label: 'volumen de muestra en el anillo mitral lateral',
+    },
+    maxAngleDeg: 20,
+    instruction: 'A4C, Doppler tisular en el anillo mitral lateral: marca el pico de e′.',
+    truth: (t) => t.mitral.ePrimeLateralCmps,
+    tolerancePct: 12,
+    referenceIds: ['ase-eacvi-diastolic-2016'],
+    group: 'diastole',
+  },
+  {
+    id: 'tapse',
+    label: 'TAPSE',
+    shortLabel: 'TAPSE',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'tapse',
+    modalities: ['m-mode', 'cmm'],
+    views: ['a4c', 'rv-focused'],
+    phase: 'any',
+    placement: {
+      structures: [
+        Structure.TricuspidAnnulus,
+        Structure.RvWall,
+        Structure.TricuspidValve,
+        Structure.RaWall,
+      ],
+      label: 'cursor de modo M a través del anillo tricuspídeo lateral',
+    },
+    instruction:
+      'A4C, cursor de modo M sobre el anillo tricuspídeo lateral, lo más paralelo posible al movimiento longitudinal: caliper vertical entre la posición telediastólica y la telesistólica del anillo.',
+    truth: (t) => t.rightHeart.tapseCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    // decision 175
+    id: 'rv-basal',
+    label: 'Diámetro basal del VD',
+    shortLabel: 'VD basal',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d'],
+    views: ['rv-focused', 'a4c'],
+    phase: 'ed',
+    placement: {
+      structures: [Structure.RvCavity],
+      segment: 'cavity',
+      label: 'tercio basal del VD, de la pared libre al septo',
+    },
+    instruction:
+      'Apical enfocada en el VD, telediástole: caliper en el tercio basal, de la pared libre al septo, paralelo al anillo tricuspídeo.',
+    truth: (t) => t.rv.basalDiameterCm,
+    tolerancePct: 10,
+    referenceIds: ['ase-eacvi-chamber-2015', 'ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    // decision 175
+    id: 'ivc-diameter',
+    label: 'Diámetro de la vena cava inferior',
+    shortLabel: 'VCI',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['subcostal-ivc'],
+    phase: 'any',
+    placement: {
+      structures: [Structure.Ivc],
+      segment: 'cavity',
+      label: 'VCI 1–2 cm antes de su unión con la AD, perpendicular a su eje',
+    },
+    instruction:
+      'Subcostal, VCI en su eje largo: caliper de borde interno a borde interno, 1–2 cm antes de la desembocadura de las venas hepáticas, en espiración.',
+    truth: (t) => t.rightHeart.ivcCm,
+    tolerancePct: 12,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    // decision 233: with the expiratory diameter it gives the collapse the right atrial pressure is estimated from
+    id: 'ivc-diameter-inspiration',
+    label: 'Diámetro de la vena cava inferior en inspiración',
+    shortLabel: 'VCI insp',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['2d', 'm-mode'],
+    views: ['subcostal-ivc'],
+    phase: 'any',
+    placement: {
+      structures: [Structure.Ivc],
+      segment: 'cavity',
+      label: 'VCI en el mismo sitio que en espiración, con el paciente en inspiración',
+    },
+    instruction:
+      'Subcostal, VCI en su eje largo, con la respiración en «Insp» (inspiración brusca, olfateo): caliper de borde interno a borde interno en el mismo sitio que el diámetro en espiración.',
+    truth: (t) => t.rightHeart.ivcCm * (1 - t.rightHeart.ivcCollapsePct / 100),
+    tolerancePct: 15,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    id: 'rv-s-prime',
+    label: 'S′ tricuspídea (Doppler tisular)',
+    shortLabel: 'S′ VD',
+    kind: 'velocity',
+    units: 'cm/s',
+    tool: 'velocity',
+    modalities: ['tdi'],
+    views: ['a4c', 'rv-focused'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.RvWall, Structure.TricuspidAnnulus],
+      label: 'volumen de muestra en el anillo tricuspídeo lateral (pared libre del VD)',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C centrado en el VD, Doppler tisular con el volumen de muestra en el anillo tricuspídeo lateral, alineado con el movimiento longitudinal: marca el pico sistólico de S′.',
+    truth: (t) => t.rightHeart.sPrimeCmps,
+    tolerancePct: 12,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    id: 'rvot-acceleration-time',
+    label: 'Tiempo de aceleración pulmonar',
+    shortLabel: 'TAc pulm',
+    kind: 'time',
+    units: 'ms',
+    tool: 'time',
+    modalities: ['pw'],
+    views: ['psax-av'],
+    phase: 'systole',
+    placement: {
+      structures: [Structure.Rvot, Structure.PulmonaryArtery, Structure.PulmonaryValve],
+      label: 'volumen de muestra en el tracto de salida del VD, proximal a la válvula pulmonar',
+    },
+    instruction:
+      'Eje corto a nivel de la válvula aórtica, Doppler pulsado en el tracto de salida del VD justo proximal a la válvula pulmonar: mide desde el comienzo del flujo sistólico hasta su pico de velocidad. Por debajo de 105 ms apoya hipertensión pulmonar.',
+    truth: (t) => t.rightHeart.rvotAccelerationTimeMs,
+    tolerancePct: 15,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+  {
+    id: 'tr-vmax',
+    label: 'Velocidad máxima de la insuficiencia tricuspídea',
+    shortLabel: 'Vmax IT',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['cw'],
+    views: ['a4c', 'rv-focused', 'psax-av'],
+    phase: 'systole',
+    placement: {
+      structures: [
+        Structure.TricuspidValve,
+        Structure.RaCavity,
+        Structure.RvCavity,
+        Structure.TricuspidAnnulus,
+      ],
+      label: 'línea de Doppler continuo a través de la válvula tricúspide',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C (o enfocada en VD), Doppler continuo alineado con el chorro de IT: marca el pico de la envolvente sistólica.',
+    truth: (t) => t.rightHeart.trVmaxMps,
+    tolerancePct: 8,
+    referenceIds: ['ase-right-heart-2025'],
+    group: 'right',
+  },
+];
+
+export function getMeasurementSpec(id: string): MeasurementSpec | undefined {
+  return MEASUREMENT_SPECS.find((s) => s.id === id);
+}

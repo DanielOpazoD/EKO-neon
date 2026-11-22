@@ -1,0 +1,330 @@
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useHudStore, useSimStore } from './store';
+import { modePolicy } from './modePolicy';
+import { correctedImpressionScore } from './examSummary';
+import { useSimulation } from './useSimulation';
+import { useShortcuts } from './shortcuts';
+import { DisplayCanvas } from '@/ui/DisplayCanvas';
+import { ConsolePanel } from '@/ui/ConsolePanel';
+import { TopBar } from '@/ui/TopBar';
+import { ModeBar } from '@/ui/ModeBar';
+import { ExamNotice, GuidancePanel } from '@/ui/GuidancePanel';
+import { ErrorBoundary, firstLine } from '@/ui/ErrorBoundary';
+import { SegmentPanel } from '@/ui/SegmentPanel';
+import { evaluateTasks, type LearnerSnapshot } from '@/education/curriculum';
+import { DevPanel } from '@/ui/DevPanel';
+import { IconChevronRight } from '@/ui/icons';
+import { ShortcutsDialog } from '@/ui/ShortcutsDialog';
+import { Tutorial } from '@/ui/Tutorial';
+import { TooltipLayer } from '@/ui/Tooltip';
+import { Splash } from '@/ui/Splash';
+import { isReportSection, ReportSections, type ReportSectionId } from '@/ui/ReportSections';
+import type { SimOutput } from '@/simulator/core/protocol';
+import { DopplerAudio } from '@/simulator/doppler/audio/dopplerAudio';
+import { frameBus } from './frameBus';
+import { isSpectralModality } from '@/simulator/renderer/modality';
+
+// Loaded on demand (engineering audit, B4): the 3D navigator carries three.js (540 kB) and the secondary
+// screens are not part of imaging. The entry chunk holds only what the first frame needs.
+const TorsoView = lazy(() => import('@/ui/TorsoView').then((m) => ({ default: m.TorsoView })));
+const ReferencesScreen = lazy(() =>
+  import('@/ui/ReferencesScreen').then((m) => ({ default: m.ReferencesScreen })),
+);
+const ReportScreen = lazy(() =>
+  import('@/ui/ReportScreen').then((m) => ({ default: m.ReportScreen })),
+);
+const CurriculumScreen = lazy(() =>
+  import('@/ui/CurriculumScreen').then((m) => ({ default: m.CurriculumScreen })),
+);
+const ProgressScreen = lazy(() =>
+  import('@/ui/ProgressScreen').then((m) => ({ default: m.ProgressScreen })),
+);
+const screenFallback = <div className="screen small">Cargando…</div>;
+const SECTION_LABEL: Record<ReportSectionId, string> = {
+  report: 'El informe',
+  curriculum: 'El currículo',
+  progress: 'El progreso',
+};
+
+export function App() {
+  const [size, setSize] = useState({ width: 640, height: 520 });
+  const [mobilePanel, setMobilePanel] = useState<'navigation' | 'console' | null>('console');
+  const audioRef = useRef<DopplerAudio | null>(null);
+  const setHud = useHudStore((s) => s.setHud);
+  const lastHudRef = useRef(0);
+  const ui = useSimStore((s) => s.ui);
+  const mode = useSimStore((s) => s.mode);
+  const error = useSimStore((s) => s.error);
+  const spectral = useSimStore((s) => s.spectral);
+  const modality = useSimStore((s) => s.modality);
+  useShortcuts();
+
+  const onFrame = useCallback(
+    (out: SimOutput) => {
+      frameBus.latest = out;
+      frameBus.emit(out);
+      const now = performance.now();
+      if (now - lastHudRef.current > 120) {
+        lastHudRef.current = now;
+        setHud(out);
+        const st = useSimStore.getState();
+        if (out.view?.bestViewId && !out.frozen)
+          st.recordViewScore(out.view.bestViewId, out.view.score);
+        // curriculum: evaluate the automatic task checks against the learner's current state (≈ 8 Hz)
+        if (modePolicy(st.mode).evaluateCurriculum) {
+          const snapshot: LearnerSnapshot = {
+            caseId: st.caseId,
+            mode: st.mode,
+            viewProgress: st.viewProgress,
+            handViewProgress: st.handViewProgress,
+            bestView: out.view?.bestViewId
+              ? { id: out.view.bestViewId, score: out.view.score }
+              : null,
+            modality: st.modality,
+            colorScaleMps: st.color.scaleMps,
+            colorGainDb: st.color.gainDb,
+            gateStructure: out.gate?.structure ?? null,
+            gateFlowAngleDeg: out.gate?.flowAngleDeg ?? null,
+            measurements: st.measurements,
+            impressionScore: correctedImpressionScore(st),
+            settings: {
+              depthCm: st.settings.depthCm,
+              gainDb: st.settings.gainDb,
+              frequencyMHz: st.settings.frequencyMHz,
+              harmonics: st.settings.harmonics,
+            },
+          };
+          // a task completes only after the ones it builds on (decision 260)
+          const done = evaluateTasks(snapshot, st.progress.completedTasks);
+          if (done.length) st.completeTasks(done);
+        }
+      }
+      const audio = audioRef.current;
+      if (audio && isSpectralModality(modality))
+        audio.update(
+          out.frozen || out.strip.kind !== 'spectral' ? null : out.spectrumColumn,
+          out.spectralRange.vMin,
+          out.spectralRange.vMax,
+          (out.strip.frequencyMHz ?? 0) * 1e6,
+        );
+    },
+    [setHud, modality],
+  );
+  useSimulation(size, onFrame);
+
+  useEffect(() => {
+    const wantAudio = spectral.audioOn && isSpectralModality(modality);
+    if (wantAudio && !audioRef.current) {
+      audioRef.current = new DopplerAudio();
+      audioRef.current.start();
+    }
+    if (audioRef.current) {
+      if (!wantAudio) {
+        audioRef.current.stop();
+        audioRef.current = null;
+      } else audioRef.current.setVolume(spectral.volume);
+    }
+  }, [spectral.audioOn, spectral.volume, modality]);
+
+  // Clean interface: the whole left rail hides. The exam keeps it, with a torso of skin and ribs and no guide
+  // (decision 256): where the probe sits on the chest is the learner's own reference, not a hint.
+  const railVisible = ui.showTorso && !ui.minimal;
+  const hints = modePolicy(mode).hintsEnabled;
+  return (
+    <div
+      data-mobile-panel={mobilePanel ?? 'none'}
+      className={`app ${railVisible ? '' : 'no-torso'} ${railVisible && ui.railMini ? 'rail-mini' : ''}${ui.roomMode ? ' room' : ''}`}
+    >
+      <Splash />
+      <TopBar />
+      {/* one key per screen: the same boundary type in the same place would otherwise carry one screen's error
+          into the next (decision 154) */}
+      {ui.screen === 'references' ? (
+        <ErrorBoundary key="references" label="La pantalla de referencias">
+          <Suspense fallback={screenFallback}>
+            <ReferencesScreen />
+          </Suspense>
+        </ErrorBoundary>
+      ) : isReportSection(ui.screen) ? (
+        // the case report, the curriculum and the progress: sections of one tab (decision 244)
+        <ReportSections>
+          <ErrorBoundary key={ui.screen} label={SECTION_LABEL[ui.screen]}>
+            <Suspense fallback={screenFallback}>
+              {ui.screen === 'report' ? (
+                <ReportScreen />
+              ) : ui.screen === 'curriculum' ? (
+                <CurriculumScreen />
+              ) : (
+                <ProgressScreen />
+              )}
+            </Suspense>
+          </ErrorBoundary>
+        </ReportSections>
+      ) : (
+        <>
+          <div className="mobile-panels" role="group" aria-label="Paneles de adquisición">
+            <button
+              aria-expanded={mobilePanel === 'navigation' && railVisible}
+              aria-controls="navigation-panel"
+              disabled={ui.minimal}
+              onClick={() => {
+                if (!railVisible) useSimStore.getState().setUi({ showTorso: true });
+                setMobilePanel(mobilePanel === 'navigation' && railVisible ? null : 'navigation');
+              }}
+            >
+              Navegación
+            </button>
+            <button
+              aria-expanded={mobilePanel === 'console'}
+              aria-controls="console-panel"
+              onClick={() => setMobilePanel(mobilePanel === 'console' ? null : 'console')}
+            >
+              Consola
+            </button>
+          </div>
+          <div
+            id="navigation-panel"
+            className="left"
+            style={{ display: railVisible ? 'flex' : 'none' }}
+          >
+            <button
+              className="rail-collapse"
+              onClick={() => useSimStore.getState().setUi({ railMini: !ui.railMini })}
+              aria-expanded={!ui.railMini}
+              aria-label={
+                ui.railMini ? 'Expandir panel de navegación' : 'Colapsar panel de navegación'
+              }
+              data-tip={
+                ui.railMini
+                  ? 'Expandir el torso 3D y la guía'
+                  : 'Colapsar a una tira con la puntuación'
+              }
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'inline-flex',
+                  transform: ui.railMini ? 'none' : 'rotate(180deg)',
+                }}
+              >
+                <IconChevronRight size={14} />
+              </span>
+            </button>
+            {/* the torso stays mounted while mini so its mesh worker is not rebuilt on expand */}
+            <div className="rail-main" style={{ display: ui.railMini ? 'none' : 'flex' }}>
+              {railVisible && (
+                <ErrorBoundary label="El navegador 3D">
+                  <Suspense fallback={<div className="torso small">Cargando torso 3D…</div>}>
+                    <TorsoView />
+                  </Suspense>
+                </ErrorBoundary>
+              )}
+              {/* LV segments of the plane (decision 152): a learning aid, hidden like the guide until asked for */}
+              {railVisible && hints && (
+                <button
+                  className="rail-head"
+                  onClick={() => useSimStore.getState().setUi({ segmentsOpen: !ui.segmentsOpen })}
+                  aria-expanded={ui.segmentsOpen}
+                  aria-controls="lv-segments"
+                  data-tip="Mapa polar de los segmentos del VI, qué muestra el corte y ficha de cada segmento"
+                >
+                  <span className="chev" aria-hidden="true">
+                    <IconChevronRight size={13} />
+                  </span>
+                  Segmentos del VI
+                </button>
+              )}
+              {railVisible && ui.segmentsOpen && (
+                <div id="lv-segments">
+                  <SegmentPanel />
+                </div>
+              )}
+              {/* the view guide stays hidden until asked for: the learner reads the image first (decision 141); it
+                  sits at the rail's bottom edge, in a smaller header (decision 242) */}
+              {railVisible && hints && (
+                <button
+                  className="rail-head guide-head"
+                  onClick={() => useSimStore.getState().setUi({ guidanceOpen: !ui.guidanceOpen })}
+                  aria-expanded={ui.guidanceOpen}
+                  aria-controls="view-guidance"
+                  data-tip="Puntuación de la vista, referencias que faltan y explicaciones"
+                >
+                  <span className="chev" aria-hidden="true">
+                    <IconChevronRight size={13} />
+                  </span>
+                  Guía de la vista
+                  <RailScore />
+                </button>
+              )}
+              {railVisible && hints && ui.guidanceOpen && (
+                <div id="view-guidance">
+                  <GuidancePanel />
+                </div>
+              )}
+            </div>
+            {ui.railMini && <RailMini />}
+          </div>
+          <div className="center">
+            {/* the exam notice sits over the image, where it is never silently lost — the E2E flow caught it hidden
+                in the rail after commit 93d30b0; the rail keeps no guide in the exam (decision 256) */}
+            {mode === 'exam' && <ExamNotice />}
+            {error && (
+              <div className="error" role="alert">
+                {firstLine(error)}
+                <div>
+                  <button onClick={() => useSimStore.getState().setError(null)}>cerrar</button>
+                </div>
+              </div>
+            )}
+            <DisplayCanvas onSize={setSize} />
+            <DevPanel />
+            {ui.screen === 'simulator' && <Tutorial />}
+          </div>
+          <div id="console-panel" className="right">
+            <ConsolePanel />
+          </div>
+        </>
+      )}
+      <ModeBar />
+      <TooltipLayer />
+      <ShortcutsDialog />
+    </div>
+  );
+}
+
+/** The view score beside the guide's header, so it is glanceable while the guide is closed. */
+function RailScore() {
+  const hud = useHudStore((h) => h.hud);
+  const mode = useSimStore((s) => s.mode);
+  const v = hud?.view;
+  if (!modePolicy(mode).hintsEnabled || !v) return null;
+  const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
+  return (
+    <span className="rail-head-score" style={{ color }} aria-hidden="true">
+      {v.score}
+    </span>
+  );
+}
+
+/** Collapsed left rail: the view score stays glanceable while torso and guidance are tucked away. */
+function RailMini() {
+  const hud = useHudStore((h) => h.hud);
+  const mode = useSimStore((s) => s.mode);
+  const v = hud?.view;
+  if (!modePolicy(mode).hintsEnabled || !v) return <div className="rail-strip" />;
+  const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
+  return (
+    <div className="rail-strip">
+      <div
+        className="rail-strip-score"
+        style={{ color }}
+        data-tip={`${v.score}/100 — ${v.bestViewName}`}
+      >
+        {v.score}
+      </div>
+      <div className="rail-strip-bar">
+        <i style={{ height: `${v.score}%`, background: color }} />
+      </div>
+    </div>
+  );
+}

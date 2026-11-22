@@ -1,0 +1,320 @@
+import type { EchoSourceId } from '@/simulator/renderer/scenePhysics';
+import type { ProbeControl } from '@/simulator/probe/pose';
+import type { PatientState } from '@/simulator/anatomy/thoraxModel';
+import type { AcquisitionSettings, ImagingModality } from '@/simulator/renderer/types';
+import type { ColorSettings } from '@/simulator/doppler/color/colorDoppler';
+import type { SpectralSettings } from '@/simulator/doppler/spectral/spectrum';
+import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
+import type { SectorMapping } from '@/simulator/renderer/scanConvert';
+import type { CaseDefinition } from '@/cases/schema';
+import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+
+/**
+ * The backend the user selects (Dev panel). `atlas` wraps the GPU port when available and the CPU tracer
+ * otherwise; `procedural` forces the CPU reference; `webgl2` asks for the port directly. One list for the
+ * protocol, the store and the panel (engineering audit, B3).
+ */
+export const RENDERER_BACKEND_CHOICES = ['atlas', 'procedural', 'webgl2'] as const;
+export type RendererBackendChoice = (typeof RENDERER_BACKEND_CHOICES)[number];
+/**
+ * The heart the frames draw (decision 352): the analytic model, or the experimental mean heart of Rodero et al. 2021
+ * moved by the case's cycle (decision 350), read by the CPU tracer and the GPU port (decision 353).
+ */
+export const ANATOMY_CHOICES = ['analytic', 'rodero'] as const;
+export type AnatomyChoice = (typeof ANATOMY_CHOICES)[number];
+/**
+ * How the frames form the image (decision 354): the lattice phasor in two looks (decisions 52 and 145), or the
+ * experimental convolution of point scatterers anchored in tissue with the kernels of a delay-and-sum array (decision
+ * 351), in the CPU tracer and the GPU port.
+ */
+export const IMAGE_FORMATION_CHOICES = ['lattice', 'cole'] as const;
+export type ImageFormationChoice = (typeof IMAGE_FORMATION_CHOICES)[number];
+
+export type QualityTier = 'low' | 'medium' | 'high';
+/**
+ * What the learner picks: a fixed tier, or «auto», the default, which the core resolves to the calibrated tier when the
+ * GPU forms the image and to medium on the CPU tracer, ten times slower (`quality.ts`, decision 154).
+ */
+export type QualityChoice = QualityTier | 'auto';
+export const DEFAULT_QUALITY: QualityChoice = 'auto';
+
+/** Everything the UI can change, sent to the simulator every animation frame. */
+export interface SimInput {
+  probe: ProbeControl;
+  patient: PatientState;
+  settings: AcquisitionSettings;
+  modality: ImagingModality;
+  frozen: boolean;
+  /** When frozen: 0 = latest frame, negative = older frames. */
+  cineOffset: number;
+  color: ColorSettings;
+  spectral: SpectralSettings;
+  /** Doppler / M-mode cursor: angle within the sector (rad) and gate depth (cm, PW/TDI). */
+  cursorThetaRad: number;
+  gateDepthCm: number;
+  quality: QualityChoice;
+  display: { width: number; height: number };
+  rendererBackend: RendererBackendChoice;
+  /** The heart the frames draw; the analytic one when absent. */
+  anatomy?: AnatomyChoice;
+  /** How the frames form the image; the lattice when absent. */
+  imageFormation?: ImageFormationChoice;
+  /** Artifact laboratory: live overrides of the case artifacts (0..1 each); null = as defined by the case. */
+  artifactOverrides: {
+    sideLobe: number;
+    mirror: number;
+    beamWidth: number;
+    clutter: number;
+  } | null;
+}
+
+/** Acquisition controls and model versions that produced one image, independent of pending console changes. */
+export interface FrameAcquisition {
+  modality: ImagingModality;
+  probe: ProbeControl;
+  patient: PatientState;
+  settings: AcquisitionSettings;
+  color: ColorSettings;
+  spectral: SpectralSettings;
+  cursorThetaRad: number;
+  gateDepthCm: number;
+  modelVersion: number;
+  tablesVersion: number;
+  phaseMarks: PhaseMarks;
+  stripAcquisitionId: number | null;
+  colorTimeS: number | null;
+}
+
+export interface EcgPoint {
+  t: number;
+  v: number;
+}
+
+export interface StripInfo {
+  /** Interval between spectral estimates. Not transmit PRF or IQ packet duration. */
+  estimatorIntervalS?: number;
+  /** Bounded strip history identity and acquisition time of its newest column centre. */
+  acquisitionId?: number;
+  headTimeS?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Seconds per pixel column. */
+  secondsPerColumn: number;
+  /** Acquisition readouts of a populated strip, independent of pending console controls. */
+  sweepSpeedMmPerS?: number;
+  wallFilterMps?: number;
+  /** Transmitted fundamental of the spectral acquisition (not the harmonic receive frequency). */
+  frequencyMHz?: number;
+  /**
+   * The strip is written as a sweep (decision 231): `headColumn` is the column the next sample goes into, where the
+   * sweep marker stands, of `columns`; the newest written column is the one before it. 0 without a strip.
+   */
+  headColumn: number;
+  columns: number;
+  /** Spectral: velocity (m/s) at top/bottom rows. M-mode: depth (cm) at top/bottom. */
+  topValue: number;
+  bottomValue: number;
+  kind: 'spectral' | 'm-mode' | null;
+}
+
+/** What sits at the Doppler/M-mode cursor this frame (for technique evaluation of measurements). */
+export interface GateInfo {
+  thetaRad: number;
+  depthCm: number;
+  /** structure/tissue ids at the PW/TDI sample volume */
+  structure: number;
+  tissue: number;
+  flowPresent: boolean;
+  /** beam–flow angle at the gate (deg) when flow is present */
+  flowAngleDeg: number | null;
+  /** distinct structure ids crossed by the cursor line (CW, M-mode) */
+  lineStructures: number[];
+}
+
+export interface SimOutput {
+  /** Present on current acquisitions; optional for saved reports from earlier versions. */
+  acquisition?: FrameAcquisition;
+  /** Acquisition identity; reviewing cine returns the selected frame, not a new delivery ID. */
+  frameId: number;
+  width: number;
+  height: number;
+  /** Composite RGBA, row-major. Empty when the GPU formed the image and it travels as `bitmap`. */
+  rgba: ArrayBuffer;
+  /** The composite drawn by the GPU present pass (decision 54); the display draws it once and closes it. */
+  bitmap?: ImageBitmap | null;
+  sector: SectorMapping & { x: number; y: number };
+  strip: StripInfo;
+  /** Polar geometry of the frame and its per-sample structure map (line-major), for measurement technique checks. */
+  polar: { lines: number; samples: number; sectorRad: number; depthCm: number };
+  structure: Uint8Array;
+  /**
+   * Per-sample LV segment code of the same frame (decision 152, `anatomy/lvSegments.ts`): 1–16 AHA, 17–20 the apical cap
+   * by quadrant, 0 elsewhere. It is the tissue the beam crosses, never inferred from the view.
+   */
+  segment: Uint8Array;
+  gate: GateInfo | null;
+  /** Acquisition time/phase/beat of the selected cine frame when frozen. */
+  timeS: number;
+  phase: number;
+  beatIndex: number;
+  heartRateBpm: number;
+  rrS: number;
+  /** The scanner's frame rate for the console (decision 178): the same in the three quality tiers. */
+  simulatedFps: number;
+  /**
+   * How often the simulator forms a frame (Hz): at most `simulatedFps`, and bounded by the work of the tier. The worker
+   * paces itself at it.
+   */
+  cadenceHz: number;
+  /**
+   * The ECG of the last seconds as interleaved (time s, amplitude) pairs: a typed array travels to the main thread
+   * transferred, where 1200 point objects were cloned in every frame (decision 173).
+   */
+  ecg: Float64Array;
+  ecgHead: number;
+  view: ViewAnalysis | null;
+  spectrumColumn: Float32Array | null;
+  spectralRange: { vMin: number; vMax: number };
+  frozen: boolean;
+  cineLength: number;
+  cineOffset: number;
+  cineFramePhase: number;
+  /**
+   * The cine buffer on the ECG's clock (decision 190): the times of its oldest and newest frames and of the frame
+   * shown, so the ECG strip draws where the frozen frame sits in the beat and the learner can scrub along it.
+   */
+  cineWindow: { startS: number; endS: number; frameS: number };
+  stats: Record<string, number | string>;
+  colorFps: number;
+  probeBeam: {
+    origin: [number, number, number];
+    forward: [number, number, number];
+    lateral: [number, number, number];
+    normal: [number, number, number];
+  };
+}
+
+/** Cardiac phase landmarks (fractions of RR) sent with the ready message. */
+export interface PhaseMarks {
+  ejectionStart: number;
+  ejectionEnd: number;
+  /** The least left ventricular volume (decision 245): aortic closure, or later with mitral regurgitation. */
+  endSystole: number;
+  mitralOpen: number;
+  eEnd: number;
+  aStart: number;
+  aEnd: number;
+  hasAWave: boolean;
+}
+
+/** On-demand requests answered by the simulator (rare events, not per frame). */
+export type SimRequest =
+  | { kind: 'autoTrace'; x0: number; x1: number }
+  /** The probe control that reaches a canonical view from the window, computed on the worker's own models (B7). */
+  | { kind: 'canonicalControl'; viewId: string }
+  /** What the model holds at one point of the displayed frame — polar in the image, or a torso point of the 3D
+   *  navigator (review mode, decisions 134 and 135). */
+  | {
+      kind: 'probePoint';
+      rCm?: number;
+      thetaRad?: number;
+      torso?: { x: number; y: number; z: number };
+    }
+  /** Where the echo at one point of the displayed frame comes from (review mode, decision 340). */
+  | { kind: 'explainPoint'; rCm: number; thetaRad: number };
+export type SimResponse =
+  | {
+      kind: 'autoTrace';
+      velocitiesMps: number[];
+      secondsPerColumn: number;
+      /** Display position and spacing of the original acquisition columns. */
+      x0: number;
+      pixelsPerColumn: number;
+    }
+  | { kind: 'canonicalControl'; control: ProbeControl }
+  | { kind: 'probePoint'; point: ProbePointInfo }
+  | { kind: 'explainPoint'; explain: PointExplanation };
+
+export type { EchoSourceId };
+
+/**
+ * Where the echo at one point of the image comes from (decision 340): the displayed frame re-formed by the CPU tracer in a
+ * narrow wedge around the point, once as shown and once without each switchable source; what each one takes away is its
+ * share of the echo energy there. Shadowing and the lung are read from the same trace: the two-way transmission down the
+ * line and the tissue at the point.
+ */
+export interface PointExplanation {
+  rCm: number;
+  thetaRad: number;
+  structure: number;
+  tissue: number;
+  /** The point lies in the lung, behind the pleura: what is drawn there is the pleura's reverberation, not tissue. */
+  behindPleura: boolean;
+  /** Two-way amplitude transmission reaching the point (dB, 0 = none lost; soft-tissue attenuation included). */
+  transmissionDb: number;
+  /** The steepest loss on the way down the line, if it shadows the point (≥ 3 dB within 5 mm). */
+  shadow: { structure: number; tissue: number; atCm: number; dropDb: number } | null;
+  /** Share of the echo energy at the point each switchable source supplies (0–1), and its level in dB. */
+  sources: { id: EchoSourceId; share: number; db: number }[];
+  /** What is left: the tissue's own echo (backscatter, specular, pleural reverberation, blurred by the PSF). */
+  ownShare: number;
+  /** The console's mirror artifact is added after the tracer (its level, 0 when off): not measured here. */
+  mirrorLevel: number;
+}
+
+/** The model at one point of the image: classification and the coordinates the anatomy code reasons in. */
+export interface ProbePointInfo {
+  /** Polar position relative to the beam (a torso point is projected onto the image plane). */
+  rCm: number;
+  thetaRad: number;
+  /** Distance from the imaging plane (cm, along the elevation normal); 0 for a point of the image. */
+  offPlaneCm: number;
+  /** Cardiac phase of the frame the point was read on. */
+  phase: number;
+  torso: { x: number; y: number; z: number };
+  /** Heart-frame point (cm). */
+  heart: { x: number; y: number; z: number };
+  inHeart: boolean;
+  structure: number;
+  tissue: number;
+  /** Signed distance to the structure's interface (cm, negative inside). */
+  sdfCm: number;
+  /** Azimuth around the LV long axis (rad) and level fraction (0 base → 1 apex), inside the heart. */
+  azRad: number | null;
+  levelFrac: number | null;
+  /** Aortic root coordinates (cm along the axis from the annulus, radial distance) when the point is near the root. */
+  rootT: number | null;
+  rootR: number | null;
+}
+
+export type MainToWorker =
+  | { type: 'init'; caseDef: CaseDefinition; input: SimInput }
+  | { type: 'input'; input: SimInput }
+  | { type: 'recycle'; buffer: ArrayBuffer }
+  | { type: 'loadCase'; caseDef: CaseDefinition; input: SimInput }
+  | { type: 'request'; id: number; req: SimRequest };
+
+export type WorkerToMain =
+  | {
+      type: 'ready';
+      truth: StructuredEchoTruth;
+      caseId: string;
+      phaseMarks: PhaseMarks;
+      lvLengthCm: number;
+    }
+  | { type: 'frame'; output: SimOutput }
+  | { type: 'response'; id: number; res: SimResponse | null }
+  | { type: 'error'; message: string };
+
+/**
+ * The buffers of a frame that travel to the main thread transferred rather than cloned (decision 173): the image, the
+ * bitmap the GPU drew, the per-sample structure and segment maps and the ECG. Each is the frame's own copy. With the
+ * two maps and the ECG cloned, 73 KiB were copied per frame at medium quality.
+ */
+export function frameTransferList(out: SimOutput): Transferable[] {
+  const list: Transferable[] = [out.rgba, out.structure.buffer, out.segment.buffer, out.ecg.buffer];
+  if (out.bitmap) list.push(out.bitmap);
+  return list;
+}

@@ -1,0 +1,532 @@
+import { Tissue } from '@/simulator/anatomy/tissue';
+
+/**
+ * Acoustic constants shared by the CPU tracer and its WebGL2 port (acoustic image formation, decision 52).
+ * GLSL receives them as #defines from `acousticDefinesGlsl`, so both backends read the same numbers.
+ */
+
+/** Scatterer lattice frequency (cells per cm): 0.4 mm, finer than the PSF, so the speckle cell comes from the PSF. */
+export const SCATTER_FREQ = 25;
+/** Second lattice term runs at a slightly different scale so the 128-cell lattices never repeat visibly. */
+export const SCATTER_FREQ_RATIO = 1.137;
+/**
+ * (n₁ + n₂ − 1)·PHASOR_NORM has variance ½ when n is 3D smoothstep value noise on uniform bytes:
+ * Var(n) = Var(U)·(1 − 2·E[u(1−u)])³ = 0.08399·0.74286³ = 0.034430, so PHASOR_NORM = √(½ / (2·0.034430)).
+ * Real and imaginary parts together give E|z|² = 1.
+ */
+export const PHASOR_NORM = Math.sqrt(0.5 / (2 * 0.03443));
+/**
+ * Myocardial angular response is set by the beam·fibre alignment, not the wall normal: the mid-wall
+ * helix runs ~circumferentially around the LV long axis, so backscatter is strongest with the beam
+ * across the fibres and drops to the floor (≈ −16 dB) when the beam runs along them — the PSAX
+ * lateral-wall dropout — while apical walls in long-axis views stay lit because the circumferential
+ * fibres lie out of the image plane.
+ */
+export const MYO_ANISO_FLOOR = 0.15;
+/** Below this radius from the long axis the circumferential direction is undefined: no fibre response. */
+export const MYO_ANISO_RADIAL_EPS = 1e-3;
+
+/**
+ * Fibre helix of the LV wall (decision 144): the helix angle from the circumferential direction runs from
+ * MYO_HELIX_ENDO_DEG at the endocardium to MYO_HELIX_EPI_DEG at the epicardium (Streeter's ≈ +60° → −60°), so the
+ * subendocardial and subepicardial layers are longitudinal and the mid-wall circumferential. Seen from the apex, the
+ * beam runs along the fibres of the two edges and across those of the middle, which is why a clinical apical wall is
+ * brightest in its middle (CAMUS Good: the endocardial fifth at 0.80–0.84 of the mid-wall grey) where one
+ * circumferential direction for the whole wall gave a flat band.
+ */
+export const MYO_HELIX_ENDO_DEG = 60;
+export const MYO_HELIX_EPI_DEG = -60;
+/**
+ * Angular gain of an LV wall sample: `dphi` is the beam's component along the circumferential direction at the
+ * sample (signed), `dz` its component along the long axis and `u` the depth across the wall (0 endocardium,
+ * 1 epicardium). Beam across the local fibre → 1; beam along it → the floor.
+ */
+export function myoHelixGain(dphi: number, dz: number, u: number): number {
+  const alpha =
+    ((MYO_HELIX_ENDO_DEG + (MYO_HELIX_EPI_DEG - MYO_HELIX_ENDO_DEG) * u) * Math.PI) / 180;
+  const c = Math.cos(alpha) * dphi + Math.sin(alpha) * dz;
+  return MYO_ANISO_FLOOR + (1 - MYO_ANISO_FLOOR) * (1 - c * c);
+}
+/**
+ * Angular gain of a papillary muscle (decision 265): its fibres run along the muscle, from the ventricular wall to the
+ * chordae, roughly along the long axis (heart-frame z), so `dz` (the beam's component along it) sets the response —
+ * across the fibres in the short axes, along them from the apex. Until then the muscles took the surface-normal
+ * response of tissue without a known fibre direction.
+ */
+export function papillaryFibreGain(dz: number): number {
+  return MYO_ANISO_FLOOR + (1 - MYO_ANISO_FLOOR) * (1 - dz * dz);
+}
+/** Backscatter heterogeneity: spatial frequency (cycles/cm) and peak-to-peak depth (dB) per tissue. */
+export const HETERO_FREQ = 1.6;
+export const HETERO_DB_MYO = 6;
+export const HETERO_DB_LIVER = 4;
+export const HETERO_DB_MUSCLE = 4;
+/** Coherent (specular) echo at the interface sample: specular coefficient × |n·d|⁴ × gain. */
+export const SPECULAR_GAIN = 1.0;
+/** Harmonic imaging factor on the specular echo. */
+export const SPECULAR_HARMONIC = 1.1;
+/** Lower bound of |n·d| in the interface window, so grazing interfaces still occupy one sample. */
+export const SPECULAR_WINDOW_MIN = 0.15;
+
+export const REVERB_PERIOD_MIN_CM = 0.4;
+export const REVERB_WIDTH_CM = 0.12;
+export const REVERB_DECAY = 0.55;
+export const REVERB_GAIN = 0.9;
+/**
+ * Diffuse reverberation behind the pleura (decision 144): brightest right behind the pleural line and fading with the
+ * distance into the lung, as the haze of a real lung does (CAMUS Good: the band 3–9 mm outside the lateral wall at
+ * 98, the far background beyond 8 mm from the heart at 79). Until then the floor followed the A-line period, which for
+ * a pleura 8 cm deep meant a flat 0.011 for the whole far field: a black band beside the lateral wall.
+ */
+export const REVERB_DIFFUSE = 0.35;
+export const REVERB_DIFFUSE_DECAY_CM = 1.5;
+/** Noise that modulates the diffuse reverberation floor: base + amplitude · lattice(line·f, r·f, z). */
+export const REVERB_MOD_BASE = 0.4;
+export const REVERB_MOD_AMP = 0.6;
+export const REVERB_MOD_LINE_FREQ = 0.7;
+export const REVERB_MOD_DEPTH_FREQ = 4;
+export const REVERB_MOD_Z = 3.1;
+/** Reverberation energy is incoherent: a phasor tied to the line (line·f) and the depth (r·SCATTER_FREQ). */
+export const REVERB_PHASOR_LINE_FREQ = 0.9;
+export const REVERB_PHASOR_RE_A_Z = 17.3;
+export const REVERB_PHASOR_RE_B: readonly [number, number, number] = [5.1, 2.3, 29.9];
+export const REVERB_PHASOR_IM_A: readonly [number, number, number] = [9.7, 13.1, 41.3];
+export const REVERB_PHASOR_IM_B: readonly [number, number, number] = [3.3, 7.7, 53.9];
+/** The pleural line itself: a strong coherent reflector, base + amplitude · lattice(line·f, r·f, z). */
+/**
+ * Incidence on the pleura (decision 221). The pleural line and its A-line reverberations are specular: they return to the
+ * transducer when the beam meets the pleura square on, and the A-lines are the same echo bouncing between pleura and
+ * probe. Both used to be drawn at full strength on every line that entered lung, whatever the angle, so where the lung
+ * surface ran along the beam each line's entry depth stepped from the next one's and the replicas at two and three
+ * times that depth drew staircases («square-wave zigzags» to a reviewing echocardiographer). The coherent part now
+ * follows the renderer's specular law, |n·d|⁴, with the incidence taken from the entry depths of the neighbouring lines;
+ * a rough pleura keeps PLEURA_DIFFUSE_FLOOR of its line at grazing incidence, and the diffuse reverberation (the dirty
+ * shadow behind the lung) does not depend on it.
+ */
+export const PLEURA_DIFFUSE_FLOOR = 0.25;
+/** Search window (cm) for a neighbouring line's lung entry around this line's: beyond it the surface is a cliff. */
+export const PLEURA_SLOPE_WINDOW_CM = 1.5;
+/**
+ * Cosine of the incidence on the pleura from the change of entry depth `dEntryCm` over the arc `arcCm` between the lines
+ * it was taken on (a surface square to the beam changes its depth by nothing across the lines).
+ */
+export function pleuralIncidenceCos(dEntryCm: number, arcCm: number): number {
+  return arcCm / Math.sqrt(arcCm * arcCm + dEntryCm * dEntryCm);
+}
+/** Coherent share of the pleural echo and its reverberations at incidence cosine `c`: the specular law |n·d|⁴. */
+export function pleuralCoherence(c: number): number {
+  return c * c * c * c;
+}
+export const PLEURA_BASE = 1.2;
+export const PLEURA_AMP = 0.4;
+export const PLEURA_LINE_FREQ = 0.8;
+export const PLEURA_DEPTH_FREQ = 3;
+export const PLEURA_Z = 1;
+
+/** Blood backscatter with harmonic imaging (fundamental suppressed). */
+export const BLOOD_HARMONIC_SIGMA = 0.6;
+/** Lattice offsets of the heterogeneity noise (material coordinates · HETERO_FREQ + offset). */
+export const HETERO_OFFSET: readonly [number, number, number] = [5.3, 1.7, 9.1];
+/**
+ * Calcified tissue adds bright, grainy backscatter: gain · (base + amp · lattice(m · freq + offset)). Soft tissue against
+ * hydroxyapatite reflects far more than against fibrous tissue; with 1.5 the closed severely stenotic valve read darker
+ * than a healthy one (decision 266).
+ */
+export const CALCIUM_GAIN = 7.8;
+export const CALCIUM_BASE = 0.6;
+export const CALCIUM_AMP = 0.8;
+export const CALCIUM_FREQ = 6;
+export const CALCIUM_OFFSET: readonly [number, number, number] = [3.3, 1.1, 9.2];
+/** Elevational slice half-width (cm) at depth r: base + slope · |r − elevation focus| (decisions 48 and 250). */
+export const SLICE_HALF_BASE_CM = 0.2;
+export const SLICE_HALF_SLOPE = 0.04;
+/**
+ * The strong scatterers of parenchyma (decision 356): the fraction of the cubes that hold one, and its amplitude over a
+ * weak scatterer's. Fitted on the four-chamber view of the normal case against CAMUS Good over six realizations: with
+ * the moving Rodero heart the residual grey of the myocardium reads skewness 0.54, excess kurtosis 1.31, std 19.8 and a
+ * median of 105 (CAMUS 0.53, 0.95, 19.6 and 100); with the analytic heart 0.38, 0.95, 19.4 and 101.
+ */
+export const STRONG_SCATTERER_FRACTION = 0.002;
+export const STRONG_SCATTERER_GAIN = 22;
+/** The slice's elevation profile as a Gaussian: its standard deviation over the slice's half-width (2 / FWHM in σ). */
+export const ELEVATION_SIGMA_PER_HALF_WIDTH = 2 / (2 * Math.sqrt(2 * Math.log(2)));
+/**
+ * Compounding (decision 145): the frame is formed from COMPOUND_LOOKS independent speckle realizations — the same
+ * scene, the same coherent echoes, a different scatterer phasor per look — and their envelopes are averaged after
+ * detection, as a scanner's spatial or frequency compounding averages looks whose speckle differs. A single look is a
+ * Rayleigh envelope with its long tail of dark nulls (log-residual skewness −0.2…−0.35 against +0.1…+0.3 in CAMUS
+ * Good); the mean of a few looks keeps the bright grains and fills the nulls. Each look shifts the scatterer lattice by
+ * LOOK_SHIFT[k] (lattice units), which decorrelates it fully; the M-mode line keeps one look.
+ */
+export const COMPOUND_LOOKS = 2;
+export const LOOK_SHIFT: readonly (readonly [number, number, number])[] = [
+  [0, 0, 0],
+  [61.7, 23.9, 47.3],
+  [29.3, 79.1, 13.7],
+  [83.9, 41.3, 67.9],
+];
+/**
+ * Flowing blood (decision 163): its scatterers travel with the flow, 1–20 mm between two frames at 50 Hz where the
+ * speckle cell is 0.4 mm deep, so its speckle does not persist from one frame (or M-mode pulse) to the next while the
+ * tissue's does, and the scanner's persistence averages it. Each frame shifts the blood's scatterer lattice by
+ * BLOOD_DECORRELATION_CELLS lattice units: value noise is uncorrelated beyond two cells.
+ */
+export const BLOOD_DECORRELATION_CELLS = 2.7;
+/** Lattice shift of the blood's scatterers in frame `frame` (the lattice repeats every 128 units, `core/noise.ts`). */
+export function bloodShiftCells(frame: number): number {
+  return (frame * BLOOD_DECORRELATION_CELLS) % 128;
+}
+/**
+ * Bright grains (decision 145): a sparse coherent component of the parenchyma — bundles and sheets that reflect as a
+ * unit — on top of the diffuse scatterers. A fully developed speckle is a Rayleigh envelope whose log-residuals skew
+ * negative (dark nulls); the clinical myocardium skews positive (+0.1…+0.3 in CAMUS Good) with bright grains over a
+ * smoother ground and its variance sits at the 2–4 mm scale (21 against a 5×5 window's 10). The grain field is a
+ * lattice at each tissue's grain frequency (`TISSUE_PROPS.grain`, cycles/cm): where it rises above GRAIN_THRESHOLD a
+ * coherent echo of up to GRAIN_GAIN × σ is added, the same in every compounding look.
+ */
+export const GRAIN_GAIN = 4.8;
+export const GRAIN_THRESHOLD = 0.72;
+export const GRAIN_OFFSET: readonly [number, number, number] = [43.1, 17.7, 61.3];
+/** Lattice offsets of the two-term complex scatterer phasor (decision 52); the M-mode line uses the same. */
+export const PHASOR_RE_B: readonly [number, number, number] = [37.3, 11.9, 23.7];
+export const PHASOR_IM_A: readonly [number, number, number] = [71.1, 53.5, 5.3];
+export const PHASOR_IM_B: readonly [number, number, number] = [17.9, 91.1, 43.3];
+/** Two-way amplitude loss: 0.23 Np per dB·cm⁻¹·MHz⁻¹ of one-way attenuation, integrated over the sample (decision 89). */
+export const ATTEN_NP_PER_DB = 0.23;
+/**
+ * Harmonic imaging raises the attenuation along the path by this factor: the echo returns at twice the frequency over
+ * part of it (a declared value, as the other harmonic factors).
+ */
+export const HARMONIC_ATTEN_FACTOR = 1.2;
+/** The attenuation of average soft tissue (dB/cm/MHz, one way) against which shadows and depth are judged. */
+export const SOFT_TISSUE_ATTEN_DB = 0.5;
+/** Frequency (MHz) the attenuation of an acquisition scales with: the transmit frequency, ×1.2 with harmonics. */
+export function attenuationFrequencyMHz(frequencyMHz: number, harmonics: boolean): number {
+  return frequencyMHz * (harmonics ? HARMONIC_ATTEN_FACTOR : 1);
+}
+/**
+ * Two-way transmission (amplitude) that average soft tissue leaves at a depth for an acquisition: what depth alone does,
+ * against which a sample is judged shadowed (decisions 87 and 96).
+ */
+export function softTissueTransmission(
+  depthCm: number,
+  frequencyMHz: number,
+  harmonics: boolean,
+): number {
+  return Math.exp(
+    -ATTEN_NP_PER_DB *
+      SOFT_TISSUE_ATTEN_DB *
+      attenuationFrequencyMHz(frequencyMHz, harmonics) *
+      depthCm,
+  );
+}
+/** Calcification (a sample's extraReflect) below which a leaflet is fibrous and above which it holds calcium. */
+export const CALCIUM_ATTEN_THRESHOLD = 0.4;
+/** Attenuation of calcium (dB·cm⁻¹·MHz⁻¹, one way): the model's own `Tissue.Calcium` (decision 251). */
+export const CALCIUM_ATTEN_DB = 25;
+
+/**
+ * Attenuation (dB·cm⁻¹·MHz⁻¹, one way) that a sample's calcification adds (decision 251): the share of the sample that
+ * is calcium, rising from none at CALCIUM_ATTEN_THRESHOLD to all of it at 1, takes calcium's attenuation. It used to add
+ * a fixed ≈ 4.4 dB·cm⁻¹·MHz⁻¹ (0.09 Np per 0.07 cm at 2.5 MHz), a sixth of calcium's: the severely stenotic valve cast
+ * a 5–8 dB shadow on the image, where a calcified valve shadows what lies behind it.
+ */
+export function calciumAttenDb(extraReflect: number): number {
+  const share = Math.max(
+    0,
+    (extraReflect - CALCIUM_ATTEN_THRESHOLD) / (1 - CALCIUM_ATTEN_THRESHOLD),
+  );
+  return Math.min(1, share) * CALCIUM_ATTEN_DB;
+}
+/** Transmission floor: nothing below it is drawn, and the march never underflows. */
+export const TRANSMISSION_FLOOR = 1e-4;
+/** Near-field clutter: reverberation in the chest wall under the footprint, incoherent, fixed to the probe. */
+export const CLUTTER_MAX_CM = 4.5;
+export const CLUTTER_DECAY_CM = 0.8;
+export const CLUTTER_BASE = 0.15;
+export const CLUTTER_AMP = 0.5;
+export const CLUTTER_MOD_FREQ = 6;
+export const CLUTTER_MOD_LINE_FREQ = 0.7;
+export const CLUTTER_MOD_DEPTH_FREQ = 5;
+/**
+ * Diffuse chest-wall clutter amplitude (decision 296). Its incoherent phasors pass through the receive PSF;
+ * do not multiply them by a second, coarse image-plane noise envelope. That envelope made stationary
+ * 3 mm bright/dark islands in normal blood, unrelated to scatterers, interfaces or the beam response.
+ * The existing relative RMS scale is retained; case level, harmonics, frequency and propagation still apply.
+ * This is a reduced diffuse reverberation model, not resolved multipath or spontaneous echo contrast.
+ * 0.05 until decision 312, which stopped the haze recovering through blood and dimming behind myocardium (it carries the
+ * wall's loss to the heart's surface and the soft-tissue loss beyond); recalibrated against the four-chamber
+ * end-diastolic cavity contrast of CAMUS Good (49 against 33-47).
+ */
+export const CLUTTER_HAZE = 0.07;
+export const CLUTTER_FREQ = 25;
+export const CLUTTER_LINE_FREQ = 0.9;
+export const CLUTTER_RE_A_X = 3.1;
+export const CLUTTER_RE_B: readonly [number, number] = [8.3, 1.9];
+export const CLUTTER_IM_A: readonly [number, number, number] = [61.7, 5.5, 3.3];
+export const CLUTTER_IM_B: readonly [number, number, number] = [21.1, 44.4, 9.9];
+/**
+ * On-axis two-way sensitivity of the beam at depth r relative to its transmit focus (decision 144). The energy a
+ * pulse carries spreads over the beam's width: near the face a focused aperture is as wide as the aperture itself
+ * (lateral) and as tall as the element (elevation), and only at the focus does it narrow to its diffraction waist,
+ * so the same scatterer sends back less from the near field than from the focus; beyond the focus the beam widens
+ * again. Widths are the geometric taper of the aperture towards the focus combined in quadrature with the waist,
+ * the two-way amplitude the square root of the width ratio in each direction (energy conserved across the beam,
+ * receive focusing following transmit). A scanner's default TGC restores the far side (`consoleCompensation`) and
+ * leaves the near side to fall, as the images do: CAMUS Good shows the chest wall at 119–138 with the first 2.5 mm
+ * at 152 where the renderer, with a beam of constant sensitivity, saturated the first centimetre.
+ */
+export const FOCUS_HALF_APERTURE_MM = 7;
+export const FOCUS_HALF_ELEVATION_MM = 6.5;
+export const FOCUS_WAIST_LATERAL_MM = 2;
+export const FOCUS_WAIST_ELEVATION_MM = 2;
+/**
+ * Depth (cm) of the elevation focus (decision 252). A one-dimensional phased array steers and focuses only in the image
+ * plane; across it the slice is focused by the cylindrical lens on the face, at one depth whatever the console's
+ * transmit focus. Both the slice thickness and the beam's elevation taper followed the transmit focus, so moving the
+ * focus marker thinned the slice where it went. 9 cm, the console's default focus: an adult cardiac lens focuses in
+ * the mid field, and the default image does not change (the depth is an assumption; no figure for a given probe here).
+ */
+export const ELEVATION_FOCUS_CM = 9;
+/** Lateral half-width of the transmit beam at depth r (cm): the aperture tapering to the waist at the focus. */
+export function beamHalfWidthCm(rCm: number, focusCm: number): number {
+  const taper = 1 - rCm / Math.max(1, focusCm);
+  return (
+    Math.sqrt(
+      FOCUS_HALF_APERTURE_MM * FOCUS_HALF_APERTURE_MM * taper * taper +
+        FOCUS_WAIST_LATERAL_MM * FOCUS_WAIST_LATERAL_MM,
+    ) / 10
+  );
+}
+export function focusingGain(rCm: number, focusCm: number): number {
+  const wl = beamHalfWidthCm(rCm, focusCm) * 10;
+  // across the plane the lens focuses at its own depth (decision 252)
+  const taper = 1 - rCm / ELEVATION_FOCUS_CM;
+  const we = Math.sqrt(
+    FOCUS_HALF_ELEVATION_MM * FOCUS_HALF_ELEVATION_MM * taper * taper +
+      FOCUS_WAIST_ELEVATION_MM * FOCUS_WAIST_ELEVATION_MM,
+  );
+  return Math.sqrt((FOCUS_WAIST_LATERAL_MM / wl) * (FOCUS_WAIST_ELEVATION_MM / we));
+}
+/**
+ * Thickness of a valve leaflet as the slice sees it (cm; aortic cusps 0.8–1 mm, mitral leaflets 1–2 mm). A leaflet is a
+ * membrane thinner than the slice: where the beam meets it edge-on it fills the slice across its whole width and reads
+ * as tissue, but where the imaging plane runs along it (its normal along the plane normal) only MEMBRANE_CM of the slice
+ * thickness holds tissue and the rest is blood. Point classification cannot tell the two apart: a coaptation surface
+ * lying in the long-axis plane read as a bright mass filling the root (decision 147). `membraneWeight` scales the
+ * backscatter and interface echo of valve tissue by the fraction of the slice the membrane occupies.
+ */
+export const MEMBRANE_CM = 0.1;
+/**
+ * A chorda tendinea is a cord thinner than the slice and than the beam (decision 227): its diameter (cm; primary chordae
+ * 0.5-1.5 mm) is the classifier's capsule. The classifier gives its samples the cord's axis in place of a surface normal.
+ */
+export const CORD_CM = 0.09;
+/**
+ * Fraction of the slice a cord fills: 1 where it crosses the plane (its axis along the plane normal) and its diameter
+ * over the slice thickness where it lies in the plane.
+ */
+export function cordWeight(axisDotPlane: number, sliceHalfWidthCm: number): number {
+  const inPlane = Math.sqrt(Math.max(0, 1 - axisDotPlane * axisDotPlane));
+  return CORD_CM / (CORD_CM + 2 * sliceHalfWidthCm * inPlane);
+}
+/**
+ * Alignment of a cord's interface echo with the beam: a cylinder reflects back along its surface normal, which is
+ * radial, so the echo is strongest with the beam across the cord and none with the beam along it — the sine of the angle
+ * between beam and axis, in place of the |n·beam| of a flat interface.
+ */
+export function cordAlignment(axisDotBeam: number): number {
+  return Math.sqrt(Math.max(0, 1 - axisDotBeam * axisDotBeam));
+}
+/** Pressure reflection coefficient of a plane interface between two impedances. */
+export function interfaceReflection(z1: number, z2: number): number {
+  return Math.abs(z1 - z2) / (z1 + z2);
+}
+/**
+ * An interface echo against tissue of impedance `zBacking` over the same tissue's echo against lung, the interface the
+ * specular scale of 1.0 stands for (decision 333): the ratio of their pressure reflection coefficients.
+ */
+export function echoOverLung(z: number, zBacking: number, zLung: number): number {
+  return Math.min(1, interfaceReflection(z, zBacking) / interfaceReflection(z, zLung));
+}
+/**
+ * Fraction of the slice a membrane fills: 1 when it stands across the plane (|n·N| = 0) and its thickness over the
+ * slice thickness (2 × half width) when it lies in the plane.
+ */
+export function membraneWeight(normalDotPlane: number, sliceHalfWidthCm: number): number {
+  const along = Math.abs(normalDotPlane);
+  return MEMBRANE_CM / (MEMBRANE_CM + 2 * sliceHalfWidthCm * along);
+}
+/**
+ * Widest half-angle of the beam-attenuation window (rad): near the face the beam is wider than the sector. Until decision
+ * 215 the cap was 24 lines, which gave the window a physical width that depended on the line grid — at 1 cm, 0.37 cm in
+ * the low tier and 0.21 cm in the high one — so the edge of a rib crossed obliquely by the apical plane shadowed 13 dB
+ * more in the high tier at the same path through bone. 0.208 rad is those 24 lines on the calibrated grid (high tier,
+ * medium line density, 115 lines per radian), whose images do not change.
+ */
+export const BEAM_ATTEN_MAX_HALF_ANGLE_RAD = 0.208;
+/** Lines the GPU window loop visits on either side: the cap above on the densest grid (high tier, high density: 34). */
+export const BEAM_ATTEN_MAX_LINES = 36;
+/** Half-width of the beam-attenuation window in lines at depth r (cm), for lines dTheta (rad) apart. */
+export function beamAttenWindowLines(rCm: number, focusCm: number, dTheta: number): number {
+  return Math.min(
+    BEAM_ATTEN_MAX_LINES,
+    Math.floor(BEAM_ATTEN_MAX_HALF_ANGLE_RAD / dTheta + 0.5),
+    Math.floor(beamHalfWidthCm(rCm, focusCm) / Math.max(BEAM_ATTEN_MIN_ARC_CM, rCm * dTheta) + 0.5),
+  );
+}
+/** Floor of the arc one line spans (cm), so the window at the apex sample stays finite. */
+export const BEAM_ATTEN_MIN_ARC_CM = 1e-6;
+
+/** Transducer ring-down in the first samples: gain · (1 − r / extent). */
+export const RINGDOWN_CM = 0.35;
+export const RINGDOWN_GAIN = 0.05;
+
+export function pleuralReverberation(
+  rCm: number,
+  entryCm: number,
+  transmission: number,
+  modulation: number,
+  coherence: number,
+  attenFrequencyMHz: number,
+): number {
+  if (rCm <= entryCm) return 0;
+  const d = rCm - entryCm;
+  const period = Math.max(entryCm, REVERB_PERIOD_MIN_CM);
+  const k = d / period;
+  const first = Math.max(0, Math.floor(k) - 1);
+  let decay = Math.pow(REVERB_DECAY, first + 1);
+  let band = 0;
+  for (let j = 0; j < 4; j++) {
+    const offset = (d - (first + j) * period) / REVERB_WIDTH_CM;
+    band += decay * Math.exp(-offset * offset);
+    decay *= REVERB_DECAY;
+  }
+  const diffuse = REVERB_DIFFUSE * Math.exp(-d / REVERB_DIFFUSE_DECAY_CM) * modulation;
+  // an echo seen d past the pleura has travelled d further through tissue, as any echo from that depth (decision 250): the
+  // console's depth gain gives that back and leaves the loss per bounce. Drawn without it, the gain lifted each order
+  // over the one before it relative to the tissue around it. The diffuse reverberation travels the same path (decision
+  // 271): without the loss, behind the posterior pleura of the parasternal views it stayed as bright as the myocardium
+  // for 5 cm
+  const path = Math.exp(-ATTEN_NP_PER_DB * SOFT_TISSUE_ATTEN_DB * attenFrequencyMHz * d);
+  return transmission * path * (REVERB_GAIN * band * coherence + diffuse);
+}
+
+export function heteroDb(tissue: number): number {
+  return tissue === Tissue.Myocardium
+    ? HETERO_DB_MYO
+    : tissue === Tissue.Liver
+      ? HETERO_DB_LIVER
+      : tissue === Tissue.Muscle
+        ? HETERO_DB_MUSCLE
+        : 0;
+}
+
+/**
+ * Every acoustic constant the GLSL passes read, by its GLSL name. `acousticDefinesGlsl` emits one `#define` per
+ * entry, so a constant added here reaches the shader without editing a second list; `glslParity.test.ts` checks
+ * that each define is used by some pass and that no numeric literal is written on both sides.
+ */
+export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
+  Record<string, number | readonly [number, number] | readonly [number, number, number]>
+> = {
+  SCATTER_FREQ,
+  SCATTER_FREQ_RATIO,
+  PHASOR_NORM,
+  LOOK_SHIFT_1: LOOK_SHIFT[1]!,
+  GRAIN_GAIN,
+  GRAIN_THRESHOLD,
+  GRAIN_OFFSET,
+  MEMBRANE_CM,
+  CORD_CM,
+  MYO_ANISO_FLOOR,
+  MYO_ANISO_RADIAL_EPS,
+  MYO_HELIX_ENDO_DEG,
+  MYO_HELIX_EPI_DEG,
+  HETERO_FREQ,
+  HETERO_DB_MYO,
+  HETERO_DB_LIVER,
+  HETERO_DB_MUSCLE,
+  HETERO_OFFSET,
+  SPECULAR_GAIN,
+  SPECULAR_HARMONIC,
+  SPECULAR_WINDOW_MIN,
+  REVERB_PERIOD_MIN_CM,
+  REVERB_WIDTH_CM,
+  REVERB_DECAY,
+  REVERB_GAIN,
+  REVERB_DIFFUSE,
+  REVERB_DIFFUSE_DECAY_CM,
+  REVERB_MOD_BASE,
+  REVERB_MOD_AMP,
+  REVERB_MOD_LINE_FREQ,
+  REVERB_MOD_DEPTH_FREQ,
+  REVERB_MOD_Z,
+  REVERB_PHASOR_LINE_FREQ,
+  REVERB_PHASOR_RE_A_Z,
+  REVERB_PHASOR_RE_B,
+  REVERB_PHASOR_IM_A,
+  REVERB_PHASOR_IM_B,
+  PLEURA_BASE,
+  PLEURA_AMP,
+  PLEURA_DIFFUSE_FLOOR,
+  PLEURA_SLOPE_WINDOW_CM,
+  PLEURA_LINE_FREQ,
+  PLEURA_DEPTH_FREQ,
+  PLEURA_Z,
+  BLOOD_HARMONIC_SIGMA,
+  CALCIUM_GAIN,
+  CALCIUM_BASE,
+  CALCIUM_AMP,
+  CALCIUM_FREQ,
+  CALCIUM_OFFSET,
+  SLICE_HALF_BASE_CM,
+  SLICE_HALF_SLOPE,
+  PHASOR_RE_B,
+  PHASOR_IM_A,
+  PHASOR_IM_B,
+  ATTEN_NP_PER_DB,
+  SOFT_TISSUE_ATTEN_DB,
+  CALCIUM_ATTEN_THRESHOLD,
+  CALCIUM_ATTEN_DB,
+  TRANSMISSION_FLOOR,
+  CLUTTER_MAX_CM,
+  CLUTTER_DECAY_CM,
+  CLUTTER_BASE,
+  CLUTTER_AMP,
+  CLUTTER_MOD_FREQ,
+  CLUTTER_MOD_LINE_FREQ,
+  CLUTTER_MOD_DEPTH_FREQ,
+  CLUTTER_HAZE,
+  CLUTTER_FREQ,
+  CLUTTER_LINE_FREQ,
+  CLUTTER_RE_A_X,
+  CLUTTER_RE_B,
+  CLUTTER_IM_A,
+  CLUTTER_IM_B,
+  RINGDOWN_CM,
+  RINGDOWN_GAIN,
+  FOCUS_HALF_APERTURE_MM,
+  FOCUS_HALF_ELEVATION_MM,
+  FOCUS_WAIST_LATERAL_MM,
+  FOCUS_WAIST_ELEVATION_MM,
+  ELEVATION_FOCUS_CM,
+  BEAM_ATTEN_MAX_HALF_ANGLE_RAD,
+  BEAM_ATTEN_MAX_LINES,
+  BEAM_ATTEN_MIN_ARC_CM,
+};
+
+/** A number as a GLSL float literal (`1` → `1.0`, `1e-4` → `1e-4`). */
+export function glslFloat(v: number): string {
+  return Number.isInteger(v) ? `${v}.0` : `${v}`;
+}
+
+export function acousticDefinesGlsl(envelopeNorm: number): string {
+  const lines = Object.entries(ACOUSTIC_GLSL_CONSTANTS).map(([name, v]) =>
+    typeof v === 'number'
+      ? `#define ${name} ${glslFloat(v)}`
+      : `#define ${name} vec${v.length}(${v.map(glslFloat).join(', ')})`,
+  );
+  lines.push(`#define ENVELOPE_NORM ${glslFloat(envelopeNorm)}`);
+  return lines.join('\n');
+}

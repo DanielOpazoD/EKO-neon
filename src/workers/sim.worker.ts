@@ -1,0 +1,167 @@
+import { SimulatorCore } from '@/simulator/core/simulatorCore';
+import {
+  frameTransferList,
+  type MainToWorker,
+  type SimInput,
+  type WorkerToMain,
+} from '@/simulator/core/protocol';
+import { isStripModality } from '@/simulator/renderer/modality';
+import type { ImagingModality } from '@/simulator/renderer/types';
+
+/**
+ * Web Worker entry. The worker drives its own clock (setTimeout at the simulated frame interval)
+ * so the simulation keeps running independently of main-thread rAF throttling; the main thread
+ * only sends inputs when they change and recycles buffers (which doubles as back-pressure ack).
+ */
+let core: SimulatorCore | null = null;
+let input: SimInput | null = null;
+let lastTick = 0;
+let outstanding = 0;
+let lastPostMs = 0;
+let dropped = 0;
+let timer: ReturnType<typeof setTimeout> | null = null;
+/** Absolute time (ms) the next tick is due, and how late the current one fired (diagnostics). */
+let nextDue = 0;
+let lateMs = 0;
+let lastFps = 30;
+/**
+ * Consecutive ticks that threw. Each one is reported and retried after a pause; after MAX_TICK_FAILURES the
+ * worker stops instead of retrying forever against a broken core (engineering audit, A5). A successful tick or
+ * a new case resets the count.
+ */
+let tickFailures = 0;
+export const MAX_TICK_FAILURES = 5;
+export const TICK_RETRY_MS = 500;
+
+/** Slowest rate a strip advances at (Hz): the sweep moves in steps of at most 33 ms whatever the 2D cadence. */
+export const STRIP_TICK_HZ = 30;
+
+/**
+ * Interval to the next tick (ms): the cadence the core forms frames at, within 12–50 ms, and at least STRIP_TICK_HZ with a
+ * strip. In the spectral modes the 2D keeps a quarter of its frame rate (decision 212), and pacing at that cadence moved
+ * the sweep and the ECG in 50 ms jumps. Frozen, 80 ms.
+ */
+export function tickIntervalMs(
+  cadenceHz: number,
+  modality: ImagingModality,
+  frozen: boolean,
+): number {
+  if (frozen) return 80;
+  const hz = isStripModality(modality) ? Math.max(cadenceHz, STRIP_TICK_HZ) : cadenceHz;
+  return Math.max(12, Math.min(50, 1000 / hz));
+}
+
+const post = (m: WorkerToMain, transfer?: Transferable[]): void => {
+  (self as unknown as Worker).postMessage(m, transfer ?? []);
+};
+
+function schedule(delayMs: number): void {
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(tick, delayMs);
+}
+
+function tick(): void {
+  timer = null;
+  if (!core || !input) return;
+  const tStart = performance.now();
+  lateMs = nextDue > 0 ? Math.max(0, tStart - nextDue) : 0;
+  const now = tStart / 1000;
+  const dt = lastTick ? now - lastTick : 1 / 60;
+  lastTick = now;
+  try {
+    const t0 = performance.now();
+    const out = core.step(dt);
+    const stepMs = performance.now() - t0;
+    tickFailures = 0;
+    if (out && outstanding < 2) {
+      out.stats = {
+        ...out.stats,
+        stepMs: Number(stepMs.toFixed(1)),
+        postMs: Number(lastPostMs.toFixed(2)),
+        lateMs: Number(lateMs.toFixed(1)),
+        dropped,
+      };
+      outstanding++;
+      const tp = performance.now();
+      post({ type: 'frame', output: out }, frameTransferList(out));
+      lastPostMs = performance.now() - tp;
+    } else if (out) {
+      out.bitmap?.close(); // main thread is behind: drop the frame, keep simulating
+      core.recycle(out.rgba);
+      dropped++;
+    }
+    // pace at the cadence the core forms frames at (at least STRIP_TICK_HZ with a strip) against an absolute schedule: a
+    // timer that fires late shortens the next wait instead of lowering the frame rate (worker timers ran ~5 ms late under
+    // load, 31.5 instead of 36.9 frames/s); after a stall longer than one interval the schedule restarts from now
+    if (out) lastFps = out.cadenceHz;
+    const targetMs = tickIntervalMs(lastFps, input.modality, input.frozen);
+    nextDue = nextDue > 0 && tStart - nextDue < targetMs ? nextDue + targetMs : tStart + targetMs;
+    schedule(Math.max(1, nextDue - performance.now()));
+  } catch (e) {
+    tickFailures++;
+    // the learner reads the message; the stack goes to the console (decision 154)
+    const detail = e instanceof Error ? e.message : String(e);
+    console.error('sim.worker: fallo del paso de simulación', e);
+    if (tickFailures >= MAX_TICK_FAILURES) {
+      post({
+        type: 'error',
+        message: `Simulación detenida tras ${tickFailures} errores consecutivos; recarga el caso. (${detail})`,
+      });
+      return;
+    }
+    post({ type: 'error', message: detail });
+    schedule(TICK_RETRY_MS);
+  }
+}
+
+self.onmessage = (ev: MessageEvent<MainToWorker>) => {
+  const msg = ev.data;
+  try {
+    if (msg.type === 'init' || msg.type === 'loadCase') {
+      // the previous case's core gives back its WebGL2 context before the new one takes one (decision 172)
+      core?.dispose();
+      core = new SimulatorCore(msg.caseDef, msg.input);
+      input = msg.input;
+      lastTick = 0;
+      outstanding = 0;
+      nextDue = 0;
+      lastFps = 30;
+      tickFailures = 0;
+      post({
+        type: 'ready',
+        truth: core.truth,
+        caseId: msg.caseDef.id,
+        phaseMarks: core.phaseMarks(),
+        lvLengthCm: core.lvLengthCm(),
+      });
+      schedule(1);
+      return;
+    }
+    if (!core) return;
+    if (msg.type === 'recycle') {
+      core.recycle(msg.buffer);
+      outstanding = Math.max(0, outstanding - 1);
+      return;
+    }
+    if (msg.type === 'input') {
+      // frozen, the worker ticks every 80 ms; a new cine frame (scrubbing on the ECG, the cine loop) is formed at once
+      // instead, or the loop showed at most 12.5 frames/s of a cine acquired at 50–90 (decision 197)
+      const newFrame =
+        msg.input.frozen && input?.frozen && msg.input.cineOffset !== input.cineOffset;
+      input = msg.input;
+      core.setInput(msg.input);
+      if (newFrame) {
+        nextDue = 0;
+        schedule(1);
+      }
+      return;
+    }
+    if (msg.type === 'request') {
+      post({ type: 'response', id: msg.id, res: core.request(msg.req) });
+    }
+  } catch (e) {
+    // the message reaches the screen; the stack only the console (decision 154)
+    console.error('sim worker:', e);
+    post({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+  }
+};
