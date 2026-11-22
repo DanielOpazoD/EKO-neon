@@ -115,12 +115,15 @@ export function sampleRegurgitantJets(
   out: FlowSample,
 ): void {
   const zAnn = hp.zAnn;
-  // ---- MR jet ----
+  // ---- MR jet (vena contracta neck + turbulent LA free jet + hemispheric LV PISA) ----
   if (p.enabled['mr-jet'] !== false && p.mrEroCm2 > 0) {
     const q = sampleTable(tables.mrFlowMlps, phase);
     if (q > 1) {
       const vj = Math.max(1e-3, sampleTable(tables.mrVelocityMps, phase));
-      const r0 = Math.sqrt(Math.min(p.mrEroCm2, q / vj / 100) / Math.PI) * 1.1;
+      const areaEff = Math.min(p.mrEroCm2, q / vj / 100);
+      // True orifice radius: 2·rVc equals the circular-equivalent vena contracta width
+      const rVc = Math.sqrt(areaEff / Math.PI);
+      const r0 = rVc * 1.1;
       const ox = p.mvCenter.x,
         oy = p.mvCenter.y,
         oz = zAnn - 0.1;
@@ -134,32 +137,43 @@ export function sampleRegurgitantJets(
         pz = dz - dirZ * along;
       const rho = Math.hypot(px, dy, pz);
       if (along >= 0 && along < 5.5) {
-        const rHalf = 0.84 * (r0 + along * 0.3);
-        if (rho < jetReach(rHalf, along, FAST_JET_SHEAR)) {
-          const prof = jetProfile(rho, rHalf, along, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, (2 * r0) / 1.1) * fadeOut(along, 4, 5.5);
+        // Vena contracta neck (first 0.35 cm beyond coaptation): collimated core matching rVc before
+        // shear-layer expansion into the turbulent LA free jet.
+        const expandAlong = Math.max(0, along - 0.35);
+        const rHalf = 0.84 * (rVc + expandAlong * 0.32);
+        if (rho < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
+          const prof = jetProfile(rho, rHalf, expandAlong, FAST_JET_SHEAR);
+          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 4, 5.5);
           const v = vj * prof * decay;
           out.vx += dirX * v;
           out.vz += dirZ * v;
+          // Laminar core inside the vena contracta, ramping smoothly into turbulent variance distally
+          const neckBlend = smoothstep(0.15, 0.7, along);
+          const baseTurb = (p.turbulence['mr-jet'] ?? 0.3) * (0.35 + 0.65 * neckBlend);
           out.dispersion = Math.max(
             out.dispersion,
-            (p.turbulence['mr-jet'] ?? 0.3) + 0.2 * Math.min(1, rho / (rHalf / 0.84)),
+            baseTurb + 0.22 * neckBlend * Math.min(1, rho / Math.max(0.08, rHalf / 0.84)),
           );
           out.present = 1;
         }
       } else if (along < 0) {
-        // PISA: hemispheric convergence on the LV side, v = Q / (2π r²), fading out where it used to stop
+        // Proximal Isovelocity Surface Area (PISA): hemispheric continuity v(d) = Q / (2·π·d²·100)
+        // on the LV side of the regurgitant orifice. Outer reach scales with flow rate so large
+        // severe-MR PISA hemispheres (r_40 ~ 1.0–1.2 cm) remain unclipped through the aliasing shell.
         const d = Math.hypot(dx, dy, dz);
-        if (d < 1.8 && d > 0.05) {
-          const v =
-            Math.min(vj * 0.6, q / (2 * Math.PI * d * d) / 100) *
-            fadeOut(d, 1.2, 1.8) *
-            convergenceWeight(rho, -along, r0);
+        const rShell30 = Math.sqrt(q / (2 * Math.PI * 30)); // radius where v = 0.30 m/s
+        const rMax = Math.min(2.6, Math.max(1.8, rShell30 * 1.9));
+        if (d < rMax && d > 0.05) {
+          const vHemisphere = q / (2 * Math.PI * d * d * 100);
+          // Gentler equatorial roll-off than inflow funnels so the 0.35–0.45 m/s shell forms a clean hemisphere
+          const hemiWeight = convergenceWeight(rho, -along, r0, 0.12, 0.38);
+          const v = Math.min(vj * 0.85, vHemisphere) * fadeOut(d, rMax * 0.78, rMax) * hemiWeight;
           if (v > 0.03) {
             out.vx += (-dx / d) * v;
             out.vy += (-dy / d) * v;
             out.vz += (-dz / d) * v;
-            out.dispersion = Math.max(out.dispersion, 0.08);
+            // Proximal convergence is laminar (low spectral variance until the orifice)
+            out.dispersion = Math.max(out.dispersion, 0.06);
             out.present = 1;
           }
         }

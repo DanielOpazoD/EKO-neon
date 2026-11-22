@@ -54,7 +54,7 @@ export function paintMmodeStripColumn(
   }
 }
 
-/** Rasterize the displayed spectral Doppler strip with baseline and tint map into the frame RGBA buffer. */
+/** Rasterize the displayed spectral Doppler strip with bilinear resampling, baseline, and tint map. */
 export function renderSpectralStripRgba(
   rgba: Uint8ClampedArray,
   W: number,
@@ -65,17 +65,46 @@ export function renderSpectralStripRgba(
   cols: number,
   spectral: SpectralSettings,
   tintMap?: TintMapId,
+  headCol?: number,
 ): { vMin: number; vMax: number } {
   const { vMin, vMax } = spectralRange(spectral);
   const customTint = tintMap && tintMap !== 'gray';
   const rgb: [number, number, number] = [0, 0, 0];
+  const seamCol = headCol !== undefined && cols > 1 ? ((headCol % cols) + cols) % cols : -1;
+  const maxBin = SPECTRAL_BINS - 1;
+  const maxCol = Math.max(0, cols - 1);
+
   for (let y = 0; y < h; y++) {
-    const b = Math.min(SPECTRAL_BINS - 1, Math.floor((y / h) * SPECTRAL_BINS));
+    const bf = ((y + 0.5) / h) * SPECTRAL_BINS - 0.5;
+    const b0 = Math.max(0, Math.min(maxBin, Math.floor(bf)));
+    const b1 = Math.min(maxBin, b0 + 1);
+    const fy = Math.max(0, Math.min(1, bf - b0));
+    const fy0 = 1 - fy;
+    const rowOff = (y0 + y) * W;
+
     for (let x = 0; x < W; x++) {
-      const col = Math.min(cols - 1, Math.floor((x * cols) / W));
-      const v = stripDisplay[col * SPECTRAL_BINS + b] ?? 0;
-      const g = Math.round(Math.min(1, v) * 255);
-      const o = ((y0 + y) * W + x) * 4;
+      const cf = ((x + 0.5) / W) * cols - 0.5;
+      let c0 = Math.max(0, Math.min(maxCol, Math.floor(cf)));
+      let c1 = Math.min(maxCol, c0 + 1);
+      let fx = Math.max(0, Math.min(1, cf - c0));
+      // Do not blend across the sweep-head discontinuity between the newest column and stale data.
+      if (seamCol >= 0 && c0 !== c1 && c1 === seamCol) {
+        if (fx < 0.5) {
+          c1 = c0;
+          fx = 0;
+        } else {
+          c0 = c1;
+          fx = 0;
+        }
+      }
+      const fx0 = 1 - fx;
+      const base0 = c0 * SPECTRAL_BINS;
+      const base1 = c1 * SPECTRAL_BINS;
+      const v0 = (stripDisplay[base0 + b0] ?? 0) * fx0 + (stripDisplay[base1 + b0] ?? 0) * fx;
+      const v1 = (stripDisplay[base0 + b1] ?? 0) * fx0 + (stripDisplay[base1 + b1] ?? 0) * fx;
+      const v = v0 * fy0 + v1 * fy;
+      const g = Math.round(Math.max(0, Math.min(1, v)) * 255);
+      const o = (rowOff + x) * 4;
       if (customTint) {
         tintGrayByte(g, tintMap, rgb);
         rgba[o] = rgb[0];

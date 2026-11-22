@@ -30,6 +30,7 @@ export interface LineContext {
   seed: number;
   harm: boolean;
   clutter: number;
+  windowAttenuation: number;
   contact: number;
   fwdH: { x: number; y: number; z: number };
   latH: { x: number; y: number; z: number };

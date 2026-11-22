@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useHudStore, useSegmentHover, useSegmentOrientation, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
 import { SteadySegments } from '@/app/steadySegments';
@@ -96,8 +96,18 @@ export function SegmentPanel() {
   // the window's segments, steady over its beat (decision 342): a holder per mounted panel
   const [steady] = useState(() => new SteadySegments());
   // the window: what decides which segments the plane holds (the frame's own phase does not)
-  const windowKey = useSimStore((s) =>
-    JSON.stringify([s.caseId, s.probe, s.patient, s.settings, s.modality]),
+  const { caseId, probe, patient, settings, modality } = useSimStore(
+    useShallow((s) => ({
+      caseId: s.caseId,
+      probe: s.probe,
+      patient: s.patient,
+      settings: s.settings,
+      modality: s.modality,
+    })),
+  );
+  const windowKey = useMemo(
+    () => JSON.stringify([caseId, probe, patient, settings, modality]),
+    [caseId, probe, patient, settings, modality],
   );
   const mode = useSimStore((s) => s.mode);
   const model = useSimStore((s) => s.ui.segmentModel);

@@ -16,9 +16,11 @@ import {
   continuityAva,
   ejectionFraction,
   meanGradientFromEnvelope,
+  pisaRadiusCm,
   rvspFromTr,
   simplifiedBernoulli,
   velocityRatio,
+  venaContractaFromEroaCm,
 } from '@/clinical/formulas';
 
 /**
@@ -63,6 +65,10 @@ export interface StructuredEchoTruth {
       vmaxMps: number;
       vtiCm: number;
       jetDirectionDeg: number;
+      /** Circular-equivalent vena contracta width (cm). */
+      venaContractaCm?: number;
+      /** Expected hemispheric PISA radius (cm) at standard aliasing velocity v_a = 0.40 m/s. */
+      pisaRadius40Cm?: number;
     } | null;
     ar: {
       eroaCm2: number;
@@ -256,6 +262,9 @@ export function computeGroundTruth(c: CaseDefinition, tables?: BeatTables): Stru
               vmaxMps: rg.mrVmaxMps,
               vtiCm: rg.mrVtiCm,
               jetDirectionDeg: mrCfg.jetDirectionDeg,
+              venaContractaCm: venaContractaFromEroaCm(mrCfg.eroaCm2),
+              pisaRadius40Cm:
+                rg.mrVmaxMps > 0 ? pisaRadiusCm(mrCfg.eroaCm2, rg.mrVmaxMps, 0.4) : undefined,
             }
           : null,
       ar:

@@ -8,7 +8,6 @@ import { DopplerTab } from './console/DopplerTab';
 import { ImageTab } from './console/ImageTab';
 import { MeasureTab } from './console/MeasureTab';
 import { IconAcquire, IconDoppler, IconImage, IconLab, IconMeasure, IconReview } from './icons';
-import { useSlidingPill } from './useSlidingPill';
 
 const LabTab = lazy(() => import('./console/LabTab').then((m) => ({ default: m.LabTab })));
 const ReviewPanel = lazy(() =>
@@ -28,7 +27,9 @@ export function ConsolePanel() {
       mode: st.mode,
       reviewCount: st.reviewMarkers.length,
       setUi: st.setUi,
-      ui: st.ui,
+      consoleTab: st.ui.consoleTab,
+      devMode: st.ui.devMode,
+      reviewMode: st.ui.reviewMode,
     })),
   );
   const mod = s.modality;
@@ -66,20 +67,17 @@ export function ConsolePanel() {
       show: true,
       badge: s.measurements.length || undefined,
     },
-    { id: 'lab', label: 'Lab', icon: <IconLab />, show: policy.devToolsAllowed },
+    { id: 'lab', label: 'Lab', icon: <IconLab />, show: policy.devToolsAllowed && s.devMode },
     {
       id: 'revisar',
       label: 'Revisar',
       icon: <IconReview />,
-      show: policy.devToolsAllowed && s.ui.reviewMode,
+      show: policy.devToolsAllowed && s.devMode && s.reviewMode,
       badge: s.reviewCount || undefined,
     },
   ];
   const visible = tabs.filter((t) => t.show);
-  const active = visible.some((t) => t.id === s.ui.consoleTab) ? s.ui.consoleTab : 'adquirir';
-  const tabsRef = useRef<HTMLDivElement>(null);
-  // the set of tabs is part of the key: a tab that appears (review) or goes (exam) moves the others
-  const ink = useSlidingPill(tabsRef, `${active}|${visible.map((t) => t.id).join(',')}`, '.on');
+  const active = visible.some((t) => t.id === s.consoleTab) ? s.consoleTab : 'adquirir';
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const onTabsKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -102,9 +100,7 @@ export function ConsolePanel() {
         role="tablist"
         aria-label="Familia de controles"
         onKeyDown={onTabsKeyDown}
-        ref={tabsRef}
       >
-        {ink && <span className="tab-ink" style={ink} aria-hidden="true" />}
         {visible.map((t, i) => (
           <button
             key={t.id}

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/shallow';
 import { useHudStore, useSimStore } from './store';
 import { modePolicy } from './modePolicy';
 import { correctedImpressionScore } from './examSummary';
@@ -61,10 +62,29 @@ export function App() {
   const audioRef = useRef<DopplerAudio | null>(null);
   const setHud = useHudStore((s) => s.setHud);
   const lastHudRef = useRef(0);
-  const ui = useSimStore((s) => s.ui);
+  const ui = useSimStore(
+    useShallow((s) => ({
+      screen: s.ui.screen,
+      showTorso: s.ui.showTorso,
+      minimal: s.ui.minimal,
+      railMini: s.ui.railMini,
+      roomMode: s.ui.roomMode,
+      segmentsOpen: s.ui.segmentsOpen,
+      guidanceOpen: s.ui.guidanceOpen,
+      devMode: s.ui.devMode,
+      devPanel: s.ui.devPanel,
+      tutorialDone: s.ui.tutorialDone,
+      shortcutsOpen: s.ui.shortcutsOpen,
+    })),
+  );
   const mode = useSimStore((s) => s.mode);
   const error = useSimStore((s) => s.error);
-  const spectral = useSimStore((s) => s.spectral);
+  const spectral = useSimStore(
+    useShallow((s) => ({
+      audioOn: s.spectral.audioOn,
+      volume: s.spectral.volume,
+    })),
+  );
   const modality = useSimStore((s) => s.modality);
   useShortcuts();
 
@@ -115,6 +135,11 @@ export function App() {
           out.spectralRange.vMin,
           out.spectralRange.vMax,
           (out.strip.frequencyMHz ?? 0) * 1e6,
+          {
+            aliasing: out.strip.aliasing,
+            prfHz: out.strip.prfHz,
+            wallFilterMps: out.strip.wallFilterMps,
+          },
         );
     },
     [setHud, modality],
@@ -151,10 +176,11 @@ export function App() {
   // (decision 256): where the probe sits on the chest is the learner's own reference, not a hint.
   const railVisible = ui.showTorso && !ui.minimal;
   const hints = modePolicy(mode).hintsEnabled;
+  const isSim = ui.screen === 'simulator';
   return (
     <div
       data-mobile-panel={mobilePanel ?? 'none'}
-      className={`app ${railVisible ? '' : 'no-torso'} ${railVisible && ui.railMini ? 'rail-mini' : ''}${ui.roomMode ? ' room' : ''}`}
+      className={`app ${isSim ? '' : 'doc-screen '}${railVisible ? '' : 'no-torso'} ${railVisible && ui.railMini ? 'rail-mini' : ''}${ui.roomMode ? ' room' : ''}`}
     >
       <Splash />
       <TopBar />
@@ -306,7 +332,7 @@ export function App() {
               </div>
             )}
             <DisplayCanvas onSize={setSize} />
-            {modePolicy(mode).devToolsAllowed && ui.devPanel && (
+            {modePolicy(mode).devToolsAllowed && ui.devMode && ui.devPanel && (
               <Suspense fallback={null}>
                 <DevPanel />
               </Suspense>
@@ -322,7 +348,7 @@ export function App() {
           </div>
         </>
       )}
-      <ModeBar />
+      {isSim && <ModeBar />}
       <TooltipLayer />
       {ui.shortcutsOpen && (
         <Suspense fallback={null}>
@@ -335,36 +361,39 @@ export function App() {
 
 /** The view score beside the guide's header, so it is glanceable while the guide is closed. */
 function RailScore() {
-  const hud = useHudStore((h) => h.hud);
+  const score = useHudStore((h) => h.hud?.view?.score ?? null);
   const mode = useSimStore((s) => s.mode);
-  const v = hud?.view;
-  if (!modePolicy(mode).hintsEnabled || !v) return null;
-  const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
+  if (!modePolicy(mode).hintsEnabled || score === null) return null;
+  const color = score >= 75 ? 'var(--ok)' : score >= 50 ? 'var(--warn)' : 'var(--bad)';
   return (
     <span className="rail-head-score" style={{ color }} aria-hidden="true">
-      {v.score}
+      {score}
     </span>
   );
 }
 
 /** Collapsed left rail: the view score stays glanceable while torso and guidance are tucked away. */
 function RailMini() {
-  const hud = useHudStore((h) => h.hud);
+  const { score, bestViewName } = useHudStore(
+    useShallow((h) => ({
+      score: h.hud?.view?.score ?? null,
+      bestViewName: h.hud?.view?.bestViewName ?? '',
+    })),
+  );
   const mode = useSimStore((s) => s.mode);
-  const v = hud?.view;
-  if (!modePolicy(mode).hintsEnabled || !v) return <div className="rail-strip" />;
-  const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
+  if (!modePolicy(mode).hintsEnabled || score === null) return <div className="rail-strip" />;
+  const color = score >= 75 ? 'var(--ok)' : score >= 50 ? 'var(--warn)' : 'var(--bad)';
   return (
     <div className="rail-strip">
       <div
         className="rail-strip-score"
         style={{ color }}
-        data-tip={`${v.score}/100 — ${v.bestViewName}`}
+        data-tip={`${score}/100 — ${bestViewName}`}
       >
-        {v.score}
+        {score}
       </div>
       <div className="rail-strip-bar">
-        <i style={{ height: `${v.score}%`, background: color }} />
+        <i style={{ height: `${score}%`, background: color }} />
       </div>
     </div>
   );

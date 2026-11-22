@@ -41,36 +41,60 @@ export function autoTraceSpectralEnvelope(
 
   /** Outer edge (m/s) of the envelope of column x on one side of the baseline; 0 without signal there. */
   const edgeOn = (x: number, above: boolean): number => {
+    const base = x * SPECTRAL_BINS;
     let max = 0;
     for (let b = 0; b < SPECTRAL_BINS; b++)
-      max = Math.max(max, strip[x * SPECTRAL_BINS + b] ?? 0);
+      max = Math.max(max, strip[base + b] ?? 0);
     const thr = envelopeThreshold(max, spectral);
     // Walk outward from the brightest bin of that side through the contiguous signal (gaps <= 2 bins),
     // so isolated noise far from it does not pull the envelope to the top of the scale (decision 96).
+    // Bin b is centred at (b + 0.5); linearly interpolate the exact sub-bin threshold crossing.
     let edgeBin = baselineBin;
     if (above) {
       let peak = -1;
       for (let b = Math.floor(baselineBin) - 1, best = thr; b >= 0; b--)
-        if ((strip[x * SPECTRAL_BINS + b] ?? 0) > best)
-          best = strip[x * SPECTRAL_BINS + (peak = b)]!;
+        if ((strip[base + b] ?? 0) > best)
+          best = strip[base + (peak = b)]!;
+      let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b >= 0; b--) {
-        if ((strip[x * SPECTRAL_BINS + b] ?? 0) > thr) {
-          edgeBin = b;
+        if ((strip[base + b] ?? 0) > thr) {
+          lastBin = b;
           gap = 0;
         } else if (++gap > 2) break;
+      }
+      if (lastBin >= 0) {
+        if (lastBin > 0) {
+          const vIn = strip[base + lastBin] ?? thr;
+          const vOut = strip[base + lastBin - 1] ?? 0;
+          const frac = Math.max(0, Math.min(1, (vIn - thr) / Math.max(1e-6, vIn - vOut)));
+          edgeBin = lastBin + 0.5 - frac;
+        } else {
+          edgeBin = 0.5;
+        }
       }
     } else {
       let peak = -1;
       for (let b = Math.ceil(baselineBin), best = thr; b < SPECTRAL_BINS; b++)
-        if ((strip[x * SPECTRAL_BINS + b] ?? 0) > best)
-          best = strip[x * SPECTRAL_BINS + (peak = b)]!;
+        if ((strip[base + b] ?? 0) > best)
+          best = strip[base + (peak = b)]!;
+      let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b < SPECTRAL_BINS; b++) {
-        if ((strip[x * SPECTRAL_BINS + b] ?? 0) > thr) {
-          edgeBin = b + 1;
+        if ((strip[base + b] ?? 0) > thr) {
+          lastBin = b;
           gap = 0;
         } else if (++gap > 2) break;
+      }
+      if (lastBin >= 0) {
+        if (lastBin < SPECTRAL_BINS - 1) {
+          const vIn = strip[base + lastBin] ?? thr;
+          const vOut = strip[base + lastBin + 1] ?? 0;
+          const frac = Math.max(0, Math.min(1, (vIn - thr) / Math.max(1e-6, vIn - vOut)));
+          edgeBin = lastBin + 0.5 + frac;
+        } else {
+          edgeBin = SPECTRAL_BINS - 0.5;
+        }
       }
     }
     const v = vMax - (edgeBin / SPECTRAL_BINS) * (vMax - vMin);

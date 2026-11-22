@@ -180,7 +180,7 @@ export function useShortcuts(): void {
           break;
         case 'r':
         case 'R': {
-          if (modePolicy(s.mode).devToolsAllowed) {
+          if (modePolicy(s.mode).devToolsAllowed && s.ui.devMode) {
             const on = !s.ui.reviewMode;
             s.setUi({ reviewMode: on, consoleTab: on ? 'revisar' : 'adquirir' });
           }

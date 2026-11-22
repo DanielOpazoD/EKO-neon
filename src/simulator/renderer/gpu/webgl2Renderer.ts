@@ -54,20 +54,43 @@ import {
   GLSL_VERT,
 } from './glslPasses';
 import { GLSL_THORAX } from './glslThorax';
+import {
+  DeferredDopplerPipeline,
+  type DeferredDopplerRequest,
+  type DeferredDopplerSettings,
+  type DeferredDopplerStats,
+  type PolarGBuffer,
+} from './deferredDoppler';
 import { GlPresentUploads } from './glPresentUploads';
 import { GlRenderTargets } from './glTargets';
 import { allocPacked, packScene, PARAM_TEXELS, type PackedScene } from './paramLayout';
 
 export { webglRendererName };
+export type {
+  DeferredDopplerRequest,
+  DeferredDopplerSettings,
+  DeferredDopplerStats,
+  PolarGBuffer,
+};
 
-/** Colour field blended by the present pass: velocity per polar sample (NaN = no colour) and variance. */
-export interface PresentColor {
+/** Colour field uploaded from CPU buffers (fallback / frozen / parity path). */
+export interface PresentColorCpu {
+  deferred?: false;
   vel: Float32Array;
   variance: Float32Array;
   /** Changes whenever the field is recomputed, so an unchanged field is not uploaded again. */
   version: number;
   settings: ColorPresentSettings;
 }
+
+/** GPU-resident deferred Doppler colour target shaded directly against the Polar G-Buffer (zero CPU upload). */
+export interface PresentColorDeferred {
+  deferred: true;
+  settings: ColorPresentSettings;
+}
+
+/** Colour field blended by the present pass: either CPU-uploaded or GPU-resident deferred Doppler. */
+export type PresentColor = PresentColorCpu | PresentColorDeferred;
 
 export interface PresentRequest {
   lut: ScanLut;
@@ -120,6 +143,9 @@ export class Webgl2Renderer implements RendererBackend {
   private noiseSeed = NaN;
   private targets: GlRenderTargets;
   private uploads: GlPresentUploads;
+  private doppler: DeferredDopplerPipeline;
+  private gbufferReady = false;
+  private gbufferVersion = 0;
   private histCurrent: 0 | 1 = 0;
   private histUpload = new Float32Array(0);
   private disposed = false;
@@ -179,6 +205,7 @@ export class Webgl2Renderer implements RendererBackend {
     this.up = uniformLocations(gl, this.progPresent, PRESENT_UNIFORMS);
     this.targets = new GlRenderTargets(gl);
     this.uploads = new GlPresentUploads(gl);
+    this.doppler = new DeferredDopplerPipeline(gl);
     this.noiseKernelTex = makeTexture2D(gl);
     this.vao = gl.createVertexArray()!;
     this.paramsTex = makeTexture2D(gl);
@@ -245,7 +272,27 @@ export class Webgl2Renderer implements RendererBackend {
     return this.disposed || this.lostByEvent || this.gl.isContextLost();
   }
 
+  /** GPU-resident Polar G-Buffer produced by the latest B-mode reconstruction pass. */
+  get gbuffer(): PolarGBuffer {
+    return this.targets.gbuffer(this.gbufferReady && !this.contextLost, this.gbufferVersion);
+  }
+
+  /** Whether a GPU-resident deferred Doppler texture is ready for zero-upload presentation. */
+  get hasDeferredDoppler(): boolean {
+    return !this.contextLost && this.doppler.valid;
+  }
+
+  /** Whether the deferred Doppler pipeline holds a cached raw flow box for settings-only re-shading. */
+  get canReshadeDoppler(): boolean {
+    return !this.contextLost && this.gbufferReady && this.doppler.hasRawFlow;
+  }
+
+  get deferredDopplerVersion(): number {
+    return this.doppler.version;
+  }
+
   stats(): Record<string, number | string> {
+    const ds = this.doppler.stats();
     return {
       renderMs: Number(this.lastMs.toFixed(2)),
       gpuMs: Number(this.lastGpuMs.toFixed(2)),
@@ -253,8 +300,45 @@ export class Webgl2Renderer implements RendererBackend {
       presentMs: Number(this.lastPresentMs.toFixed(2)),
       output: this.lastOutput,
       segRead: this.lastSegRead ? 1 : 0,
+      gbufferVersion: this.gbufferVersion,
+      doppler: ds.active ? 'gpu-deferred' : 'idle',
+      dopplerMs: ds.lastMs,
+      dopplerBoxPct: ds.boxPct,
+      dopplerIndependent: ds.independentPasses,
       gpu: 'webgl2',
     };
+  }
+
+  dopplerStats(): DeferredDopplerStats {
+    return this.doppler.stats();
+  }
+
+  /**
+   * Independent Deferred Doppler Shading Stage: executes physical Color Doppler calculations
+   * (acoustic shadow gate, gain blooming, 8-pulse Kasai packet autocorrelation, regression wall filter,
+   * resolution-cell averaging, Nyquist aliasing, and circular phasor persistence) directly on GPU
+   * against the resident Polar G-Buffer WITHOUT re-running B-mode anatomical reconstruction.
+   */
+  shadeDoppler(req: DeferredDopplerRequest): boolean {
+    if (this.disposed || this.contextLost) return false;
+    return this.doppler.shade(this.gbuffer, this.vao, req);
+  }
+
+  /** Reset GPU-resident deferred Doppler circular phasor history (e.g. modality change). */
+  resetDopplerHistory(): void {
+    this.doppler.resetHistory();
+  }
+
+  /** Optional on-demand readback of the shaded Doppler ROI box for verification or freeze snapshots. */
+  readbackDopplerBox(
+    spec: PolarFrameSpec,
+    scaleMps: number,
+    baselineShiftMps: number,
+    velOut: Float32Array,
+    varOut: Float32Array,
+  ): boolean {
+    if (this.disposed || this.contextLost) return false;
+    return this.doppler.readbackBox(spec, scaleMps, baselineShiftMps, velOut, varOut);
   }
 
   dispose(): void {
@@ -283,12 +367,14 @@ export class Webgl2Renderer implements RendererBackend {
       this.progNoiseL,
     ])
       gl.deleteProgram(p);
+    this.doppler.dispose();
     this.uploads.dispose();
     gl.deleteTexture(this.paramsTex);
     gl.deleteTexture(this.noiseTex);
     gl.deleteTexture(this.psfTex);
     gl.deleteTexture(this.noiseKernelTex);
     this.targets.dispose();
+    this.gbufferReady = false;
     this.histValid = false;
     this.packedFresh = false;
     this.psfKeyUploaded = this.noiseKernelKey = '';
@@ -385,6 +471,8 @@ export class Webgl2Renderer implements RendererBackend {
     if (t.ensure(w, h)) {
       this.histValid = false;
       this.packedFresh = false;
+      this.gbufferReady = false;
+      this.doppler.onGBufferResize();
     }
     this.ensurePsf(scene, spec);
     packScene(scene, beam, spec, this.packed);
@@ -471,6 +559,9 @@ export class Webgl2Renderer implements RendererBackend {
     this.bindAt(4, t.texC1);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     for (let u = 2; u <= 8; u++) this.bindAt(u, null);
+    // Polar G-Buffer (texD0 exact transmission + texB1 structure/tissue IDs) is now fresh on GPU
+    this.gbufferReady = true;
+    this.gbufferVersion++;
   }
 
   render(
@@ -658,10 +749,17 @@ export class Webgl2Renderer implements RendererBackend {
       canvas.height = H;
     }
     this.uploads.ensureLut(lut, W, H);
+    let colorTex: WebGLTexture | null = null;
     if (color) {
-      this.uploads.ensureColor(color, lut.lines, lut.samples);
-      this.uploads.ensurePolar(lut, W, H);
+      if (color.deferred) {
+        colorTex = this.doppler.outputTexture;
+      } else {
+        this.uploads.ensureColor(color, lut.lines, lut.samples);
+        colorTex = this.uploads.colorTex;
+      }
+      if (colorTex) this.uploads.ensurePolar(lut, W, H);
     }
+    const colorActive = color !== null && colorTex !== null;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.bindVertexArray(this.vao);
@@ -670,16 +768,16 @@ export class Webgl2Renderer implements RendererBackend {
     gl.uniform1i(u.uHeightPx, H);
     gl.uniform1i(u.uLines, lut.lines);
     gl.uniform1i(u.uSamples, lut.samples);
-    gl.uniform1i(u.uColorOn, color ? 1 : 0);
+    gl.uniform1i(u.uColorOn, colorActive ? 1 : 0);
     gl.uniform1i(u.uTintMap, tintMapIndex(req.tintMap));
-    if (color) {
+    if (colorActive) {
       const c = color.settings;
       gl.uniform4f(u.uBox, c.boxRMinCm, c.boxRMaxCm, c.boxThetaMinRad, c.boxThetaMaxRad);
       gl.uniform2f(u.uColorMap, c.scaleMps, c.showVariance ? 1 : 0);
     }
     this.bindAt(2, t.texPacked);
     this.bindAt(3, this.uploads.lutTex);
-    this.bindAt(4, this.uploads.colorTex);
+    this.bindAt(4, colorTex ?? this.uploads.colorTex);
     this.bindAt(5, this.uploads.polarTex);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     for (let unit = 2; unit <= 5; unit++) this.bindAt(unit, null);

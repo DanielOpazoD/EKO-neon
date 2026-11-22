@@ -100,26 +100,35 @@ export interface MitralRegurgitationInput {
   eroaCm2: number;
   regurgitantVolumeMl: number;
   regurgitantFractionPct: number;
+  /** Optional vena contracta width (cm); ASE/EACVI 2017: < 0.3 cm mild, ≥ 0.7 cm severe. */
+  venaContractaCm?: number;
 }
 
 /**
- * ASE/EACVI 2017 quantitative criteria: severe with ERO ≥ 0.40 cm², regurgitant volume ≥ 60 mL and fraction ≥ 50 %; mild
- * below 0.20 cm², 30 mL and 30 %. The grade is the one at least two of the three agree on, moderate otherwise; a jet below
- * 0.10 cm² is trace. The same thresholds serve primary and secondary regurgitation, as in the ASE document; the ESC 2021
- * lower secondary thresholds (0.20 cm², 30 mL) are not applied.
+ * ASE/EACVI 2017 quantitative criteria (`ase-scmr-regurgitation-2017`): severe with EROA ≥ 0.40 cm²,
+ * regurgitant volume ≥ 60 mL, regurgitant fraction ≥ 50 % (and vena contracta ≥ 0.7 cm when provided);
+ * mild below 0.20 cm², 30 mL, 30 % (and VC < 0.3 cm). A jet below 0.10 cm² is trace.
+ * Integrative grading: the grade supported by at least half of available criteria (≥ 2 of 3, or ≥ 2 of 4
+ * without conflicting majority) wins; moderate otherwise.
  */
 export function gradeMitralRegurgitation(m: MitralRegurgitationInput): ValveGrade {
   if (m.eroaCm2 < 0.1) return 'none';
+  const hasVc = m.venaContractaCm !== undefined && Number.isFinite(m.venaContractaCm);
   const severe =
     Number(m.eroaCm2 >= 0.4) +
     Number(m.regurgitantVolumeMl >= 60) +
-    Number(m.regurgitantFractionPct >= 50);
+    Number(m.regurgitantFractionPct >= 50) +
+    (hasVc ? Number(m.venaContractaCm! >= 0.7) : 0);
   const mild =
     Number(m.eroaCm2 < 0.2) +
     Number(m.regurgitantVolumeMl < 30) +
-    Number(m.regurgitantFractionPct < 30);
-  if (severe >= 2) return 'severe';
-  if (mild >= 2) return 'mild';
+    Number(m.regurgitantFractionPct < 30) +
+    (hasVc ? Number(m.venaContractaCm! < 0.3) : 0);
+  const need = hasVc ? 3 : 2;
+  if (severe >= need || (!hasVc && severe >= 2) || (hasVc && severe === 2 && mild === 0 && m.eroaCm2 >= 0.4))
+    return 'severe';
+  if (mild >= need || (!hasVc && mild >= 2) || (hasVc && mild === 2 && severe === 0 && m.eroaCm2 < 0.2))
+    return 'mild';
   return 'moderate';
 }
 

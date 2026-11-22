@@ -170,8 +170,12 @@ export function DopplerTab() {
           />
           {mod !== 'cw' && (
             <p className="small" aria-live="polite">
-              PRF {(limits.spectral.prfHz / 1000).toFixed(2)} kHz · límite{' '}
-              {(limits.spectral.maxPrfHz / 1000).toFixed(2)} kHz
+              PRF {(limits.spectral.prfHz / 1000).toFixed(2)} /{' '}
+              {(limits.spectral.maxPrfHz / 1000).toFixed(2)} kHz · vN máx ±
+              {limits.spectral.maxScaleMps.toFixed(2)} m/s
+              {s.spectral.scaleMps >= limits.spectral.maxScaleMps - 0.015
+                ? ' (límite por profundidad)'
+                : ''}
             </p>
           )}
           <Slider

@@ -14,6 +14,7 @@ import {
   spectralRange,
   type SpectralSettings,
 } from '@/simulator/doppler/spectral/spectrum';
+import { depthLimitedPulsedAcquisition } from '@/simulator/doppler/spectral/scatteringModel';
 import type { BeamFrame } from '@/simulator/probe/pose';
 import { MODALITIES } from '@/simulator/renderer/modality';
 import {
@@ -95,7 +96,9 @@ export class StripEngine {
     spectral: SpectralSettings;
     color: ColorSettings;
     depthCm: number;
+    gateDepthCm: number;
     frequencyMHz: number;
+    aliasing: boolean;
   } | null = null;
   private displayCols = 0;
   private lineAmp = new Float32Array(0);
@@ -136,9 +139,22 @@ export class StripEngine {
     return this.acquisitionId;
   }
 
+  private effectiveSpectral(acquired: NonNullable<StripEngine['acquired']>): SpectralSettings {
+    if (!acquired.aliasing) return acquired.spectral;
+    const { effectiveScaleMps } = depthLimitedPulsedAcquisition(
+      acquired.gateDepthCm,
+      acquired.spectral.gateLengthCm,
+      acquired.frequencyMHz,
+      acquired.spectral.scaleMps,
+    );
+    return effectiveScaleMps < acquired.spectral.scaleMps
+      ? { ...acquired.spectral, scaleMps: effectiveScaleMps }
+      : acquired.spectral;
+  }
+
   get velocityRange(): { vMin: number; vMax: number } | null {
     return this.acquired && this.stripKind === 'spectral'
-      ? spectralRange(this.acquired.spectral)
+      ? spectralRange(this.effectiveSpectral(this.acquired))
       : null;
   }
 
@@ -205,24 +221,7 @@ export class StripEngine {
     ctx: StripCtx,
   ): void {
     const inp = ctx.input;
-    const key = JSON.stringify([
-      inp.modality,
-      inp.spectral.sweepSpeedMmPerS,
-      inp.settings.depthCm,
-      inp.settings.frequencyMHz,
-      inp.cursorThetaRad,
-      inp.gateDepthCm,
-      inp.spectral.scaleMps,
-      inp.spectral.baselineShiftMps,
-      inp.spectral.invert,
-      inp.spectral.wallFilterMps,
-      inp.spectral.gainDb,
-      inp.spectral.gateLengthCm,
-      inp.color.scaleMps,
-      inp.color.baselineShiftMps,
-      inp.color.invert,
-      inp.color.wallFilterMps,
-    ]);
+    const key = `${inp.modality}|${inp.spectral.sweepSpeedMmPerS}|${inp.settings.depthCm}|${inp.settings.frequencyMHz}|${inp.cursorThetaRad}|${inp.gateDepthCm}|${inp.spectral.scaleMps}|${inp.spectral.baselineShiftMps}|${inp.spectral.invert ? 1 : 0}|${inp.spectral.wallFilterMps}|${inp.spectral.gainDb}|${inp.spectral.gateLengthCm}|${inp.color.scaleMps}|${inp.color.baselineShiftMps}|${inp.color.invert ? 1 : 0}|${inp.color.wallFilterMps}`;
     if (key !== this.acquisitionKey || !this.acquired) {
       this.reset();
       this.acquisitionKey = key;
@@ -230,7 +229,9 @@ export class StripEngine {
         spectral: { ...inp.spectral },
         color: { ...inp.color },
         depthCm: spec.depthCm,
+        gateDepthCm: inp.gateDepthCm,
         frequencyMHz: inp.settings.frequencyMHz,
+        aliasing: MODALITIES[inp.modality].aliasing,
       };
     }
     const kind: 'spectral' | 'm-mode' = MODALITIES[inp.modality].strip ?? 'spectral';
@@ -559,7 +560,7 @@ export class StripEngine {
         strip,
         this.stripCols,
         this.displayCols,
-        this.acquired.spectral,
+        this.effectiveSpectral(this.acquired),
         req.x0,
         req.x1,
       );
@@ -631,6 +632,7 @@ export class StripEngine {
       };
     }
     if (kind === 'spectral' && this.stripDisplay && acquired) {
+      const effectiveSpectral = this.effectiveSpectral(acquired);
       const { vMin, vMax } = renderSpectralStripRgba(
         rgba,
         W,
@@ -639,10 +641,19 @@ export class StripEngine {
         h,
         this.stripDisplay,
         cols,
-        acquired.spectral,
+        effectiveSpectral,
         tintMap,
+        this.stripHead % Math.max(1, cols),
       );
       drawSweepMarker(rgba, W, y0, h, head);
+      const pulsedTiming = acquired.aliasing
+        ? depthLimitedPulsedAcquisition(
+            acquired.gateDepthCm,
+            acquired.spectral.gateLengthCm,
+            acquired.frequencyMHz,
+            acquired.spectral.scaleMps,
+          )
+        : null;
       return {
         x: 0,
         y: y0,
@@ -656,6 +667,11 @@ export class StripEngine {
         sweepSpeedMmPerS: acquired.spectral.sweepSpeedMmPerS,
         wallFilterMps: acquired.spectral.wallFilterMps,
         frequencyMHz: acquired.frequencyMHz,
+        prfHz: pulsedTiming?.prfHz,
+        maxPrfHz: pulsedTiming?.maxPrfHz,
+        nyquistMps: pulsedTiming?.effectiveScaleMps,
+        gateDepthCm: acquired.aliasing ? acquired.gateDepthCm : undefined,
+        aliasing: acquired.aliasing,
         estimatorIntervalS: secondsShown / cols,
         topValue: vMax,
         bottomValue: vMin,

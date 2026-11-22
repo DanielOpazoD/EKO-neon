@@ -385,12 +385,16 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
   if (t.wallMotion.abnormalSegments.length) out.push(`${t.wallMotion.description}.`);
   const mr = t.regurgitation.mr;
   if (mr) {
-    // ERO, regurgitant volume and fraction: the grade at least two agree on (ASE/EACVI 2017)
+    // EROA, regurgitant volume, fraction and vena contracta: integrative grading (ASE/EACVI 2017)
     const grade = { none: 'trivial', mild: 'leve', moderate: 'moderada', severe: 'severa' }[
       gradeMitralRegurgitation(mr)
     ];
+    const extra: string[] = [];
+    if (mr.venaContractaCm !== undefined) extra.push(`VC ${mr.venaContractaCm.toFixed(2)} cm`);
+    if (mr.pisaRadius40Cm !== undefined)
+      extra.push(`radio PISA@40 ${mr.pisaRadius40Cm.toFixed(2)} cm`);
     out.push(
-      `Insuficiencia mitral ${grade} (ORE ${mr.eroaCm2.toFixed(2)} cm², volumen regurgitante ${mr.regurgitantVolumeMl.toFixed(0)} mL, fracción ${mr.regurgitantFractionPct.toFixed(0)} %)${Math.abs(mr.jetDirectionDeg) > 15 ? ', chorro excéntrico' : ''}.`,
+      `Insuficiencia mitral ${grade} (ORE ${mr.eroaCm2.toFixed(2)} cm², volumen regurgitante ${mr.regurgitantVolumeMl.toFixed(0)} mL, fracción ${mr.regurgitantFractionPct.toFixed(0)} %${extra.length ? `, ${extra.join(', ')}` : ''})${Math.abs(mr.jetDirectionDeg) > 15 ? ', chorro excéntrico' : ''}.`,
     );
   }
   const ar = t.regurgitation.ar;

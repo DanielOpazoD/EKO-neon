@@ -1,7 +1,7 @@
 
 /* measurement protocol panel (spec 16/28) */
 .pill.bad {
-  color: #ff7b7b;
+  color: var(--bad);
 }
 .protocol {
   display: flex;
@@ -31,19 +31,6 @@
   display: flex;
   gap: 6px;
   align-items: center;
-}
-.protocol-instruction {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  padding: 6px;
-  margin-bottom: 4px;
-  font-size: var(--fs-sm);
-  color: var(--text);
-}
-.protocol-instruction button {
-  margin-top: 4px;
-  font-size: var(--fs-xs);
 }
 .protocol details summary {
   cursor: pointer;
@@ -82,6 +69,62 @@
 .curriculum .module {
   margin-bottom: 14px;
 }
+.curriculum .module-acc {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+.curriculum .module-acc-head {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+.curriculum .module-acc-head::-webkit-details-marker {
+  display: none;
+}
+.curriculum .module-acc-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.curriculum .module-acc-title::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  flex: none;
+}
+.curriculum .module-acc[open] > .module-acc-head .module-acc-title::before {
+  transform: rotate(45deg);
+}
+.curriculum .module-acc-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.curriculum .module-acc-bar {
+  width: 84px;
+  height: 6px;
+}
+.curriculum .module-acc-body {
+  padding: 0 14px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.curriculum .module-acc-body .lesson h4 {
+  margin: 10px 0 4px;
+}
 .curriculum .tasks {
   list-style: none;
   padding: 0;
@@ -102,8 +145,8 @@
   opacity: 0.55;
 }
 .curriculum .tasks li.done {
-  border-color: #234a35;
-  background: #12211a;
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, var(--card));
 }
 .curriculum .tasks li.done b {
   color: var(--ok);
@@ -141,7 +184,7 @@
   color: var(--ok);
 }
 .impression-form .finding.bad {
-  color: #ff7b7b;
+  color: var(--bad);
 }
 .impression-form .finding.missed {
   color: var(--warn);
@@ -285,7 +328,7 @@ details.adv > summary:hover::before {
 }
 .review-place {
   font-size: var(--fs-md);
-  color: #9aa4b5;
+  color: var(--muted);
   line-height: 1.35;
 }
 .review-item textarea,
@@ -296,16 +339,16 @@ details.adv > summary:hover::before {
   resize: vertical;
   font: inherit;
   font-size: var(--fs-md);
-  background: #0e1218;
-  color: inherit;
-  border: 1px solid #2a3140;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
   border-radius: var(--r-sm);
   padding: 6px;
   box-sizing: border-box;
 }
 .review-preview {
   min-height: 140px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
   font-size: var(--fs-sm);
 }
 .review-actions {
@@ -318,7 +361,7 @@ details.adv > summary:hover::before {
 }
 .review-status {
   font-size: var(--fs-md);
-  color: #7ce8a0;
+  color: var(--ok);
   margin-top: 6px;
 }
 .review-item.on {
@@ -326,7 +369,8 @@ details.adv > summary:hover::before {
   box-shadow: 0 0 0 1px #ff6ad5 inset;
 }
 .review-item {
-  border: 1px solid #2a3140;
+  background: var(--card);
+  border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 8px;
   display: grid;
@@ -335,20 +379,24 @@ details.adv > summary:hover::before {
 }
 .review-chip {
   font-size: var(--fs-xs);
-  border: 1px solid #ff6ad5;
-  color: #ff6ad5;
+  border: 1px solid #d946ef;
+  color: #a21caf;
   border-radius: var(--r-xs);
   padding: 0 4px;
   flex: none;
 }
+.app.room .review-chip {
+  border-color: #ff6ad5;
+  color: #ff6ad5;
+}
 .review-help {
   font-size: var(--fs-sm);
-  color: #9aa4b5;
+  color: var(--muted);
   margin-top: 6px;
 }
 .review-source {
   font-size: var(--fs-md);
-  color: #ffc857;
+  color: var(--warn);
   margin-top: 4px;
 }
 canvas.overlay.review,
@@ -378,8 +426,8 @@ canvas.overlay.armed {
   font-size: var(--fs-sm);
 }
 .review-actions button.on {
-  border-color: #ffc857;
-  color: #ffc857;
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 /* ---- split navigator: torso above, cut face below (decision 137) ---- */

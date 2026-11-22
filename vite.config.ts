@@ -1,4 +1,3 @@
-import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
@@ -12,7 +11,7 @@ function glslStrip(): Plugin {
     enforce: 'pre',
     transform(code, id) {
       if (
-        !/[\\/]src[\\/]simulator[\\/]renderer[\\/]gpu[\\/]glsl(Common|Heart|Thorax|Passes|Image|Generated|VolumeHeart|Scatterers)\.ts$/.test(
+        !/[\\/]src[\\/]simulator[\\/]renderer[\\/]gpu[\\/]glsl(?!Strip)[A-Z][A-Za-z]+\.ts$/.test(
           id,
         )
       ) {
@@ -27,7 +26,6 @@ export default defineConfig(() => {
   return {
     plugins: [
       react(),
-      tailwindcss(),
       glslStrip(),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." still resolve in production builds. Do not remove.

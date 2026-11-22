@@ -10,7 +10,8 @@ import type { AssetFetcher } from '@/simulator/anatomy/roderoAsset';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
 import { cycleStateAt, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
-import { overlayColorField, type ColorField } from '@/simulator/doppler/color/colorDoppler';
+import { respiratoryDepth } from '@/simulator/cardiac-cycle/respiration';
+import type { ColorField } from '@/simulator/doppler/color/colorDoppler';
 import {
   buildFlowParams,
   type FlowFieldParams,
@@ -36,20 +37,14 @@ import {
   type ConsoleState,
 } from '@/simulator/renderer/postprocess/consolePipeline';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
-import {
-  buildScanLut,
-  computeSectorMapping,
-  lutKey,
-  scanConvertLut,
-  type ScanLut,
-  type SectorMapping,
-} from '@/simulator/renderer/scanConvert';
+import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import {
   caseArtifactLevels,
   consoleArtifacts,
   scenePhysicsFor,
   type ArtifactLevels,
 } from '@/simulator/renderer/scenePhysics';
+import { encodeTransmission } from '@/simulator/renderer/transmissionCode';
 import {
   allocPolarFrame,
   polarSpecFor,
@@ -69,6 +64,7 @@ import { CineBuffer, type CineFrame } from './cineBuffer';
 import { ColorFieldDriver } from './colorFieldDriver';
 import { EcgRing } from './ecgRing';
 import { ExperimentalLoaders } from './experimentalLoaders';
+import { FrameCompositor } from './frameCompositor';
 import { MMODE_TRACE_SHARE } from './mmodeStrip';
 import type {
   PhaseMarks,
@@ -130,6 +126,8 @@ export class SimulatorCore {
   private colorDriver = new ColorFieldDriver();
   private colorFps = 0;
   private displayOnGpu = false;
+  private dopplerOnGpu = false;
+  private transCodeScratch = new Uint8Array(0);
   private cine = new CineBuffer();
   private frameId = 0;
   private timeS = 0;
@@ -142,7 +140,7 @@ export class SimulatorCore {
   private ecgRing = new EcgRing();
   private strips = new StripEngine();
   private patientKey = '';
-  private rgbaPool: ArrayBuffer[] = [];
+  private compositor = new FrameCompositor();
   private modelVersion = 0;
   private lastOutputBeam: BeamFrame | null = null;
   private lastSector: (SectorMapping & { x: number; y: number }) | null = null;
@@ -155,7 +153,6 @@ export class SimulatorCore {
     cineMs: 0,
     presentMs: 0,
   };
-  private lut: ScanLut | null = null;
   private prevBeam: BeamFrame | null = null;
   private stationaryFrames = 0;
   private frameBudgetMs = 25;
@@ -311,13 +308,15 @@ export class SimulatorCore {
     if (!input.frozen && input.modality !== this.acquisitionModality) {
       this.strips.reset();
       this.colorDriver.resetHistory();
+      this.gpu?.resetDopplerHistory();
+      this.dopplerOnGpu = false;
       this.acquisitionModality = input.modality;
     }
     this.input = constrainAcquisition(input);
   }
 
   recycle(buffer: ArrayBuffer): void {
-    if (buffer.byteLength > 0 && this.rgbaPool.length < 3) this.rgbaPool.push(buffer);
+    this.compositor.recycle(buffer);
   }
 
   dispose(): void {
@@ -326,7 +325,7 @@ export class SimulatorCore {
     this.gpu?.dispose();
     this.gpu = null;
     this.atlas.invalidate();
-    this.rgbaPool.length = 0;
+    this.compositor.clear();
   }
 
   get isDisposed(): boolean {
@@ -394,7 +393,48 @@ export class SimulatorCore {
       this.timing.renderFrameMs = performance.now() - t0;
       produced = true;
     }
-    if (!produced && !isStrip) return null;
+    // Independent Deferred Doppler Re-shading: if Doppler-only console settings changed between
+    // B-mode acquisition ticks, re-shade Doppler directly on GPU against the resident Polar G-Buffer
+    // and re-present without re-running B-mode anatomical raymarching.
+    let dopplerReshaded = false;
+    if (
+      !produced &&
+      !isStrip &&
+      inp.modality === 'color' &&
+      this.displayOnGpu &&
+      this.dopplerOnGpu &&
+      this.gpu?.gbuffer.ready &&
+      this.frame
+    ) {
+      const acquiredPrev = this.cine.newest;
+      const phaseUse = acquiredPrev ? acquiredPrev.phase : this.clock.current.phase;
+      const beamUse = acquiredPrev ? acquiredPrev.beam : beam;
+      const specUse = acquiredPrev ? acquiredPrev.spec : spec;
+      const sceneUse = acquiredPrev ? acquiredPrev.scene : this.scene(phaseUse);
+      dopplerReshaded = this.colorDriver.reshadeDeferredGpu(
+        {
+          frame: this.frame,
+          scene: sceneUse,
+          heart: this.heart,
+          flow: this.flow,
+          tables: this.tables,
+          beam: beamUse,
+          spec: specUse,
+          phase: phaseUse,
+          probe: inp.probe,
+          color: inp.color,
+          frequencyMHz: inp.settings.frequencyMHz,
+          harmonics: inp.settings.harmonics,
+          modelVersion: this.modelVersion,
+          timeS: this.timeS,
+          frameIntervalS: this.frameIntervalS,
+          seed: this.caseDef.seed,
+        },
+        this.gpu,
+      );
+      if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+    }
+    if (!produced && !isStrip && !dopplerReshaded) return null;
     const t1 = performance.now();
     const acquired = this.cine.newest;
     const out = this.composite(acquired?.beam ?? beam, acquired?.spec ?? spec, false, acquired);
@@ -417,6 +457,7 @@ export class SimulatorCore {
     this.atlas = new AtlasRenderer(this.procedural, this.caseDef.seed);
     this.backend = this.pickBackend(this.input.rendererBackend);
     this.displayOnGpu = false;
+    this.dopplerOnGpu = false;
   }
 
   private physics(): ScenePhysics {
@@ -424,6 +465,16 @@ export class SimulatorCore {
       artifacts: this.artifactLevels,
       bloodFrame: this.consoleState.frameIndex,
     });
+  }
+
+  private thoraxAtTime(timeS = this.timeS): ThoraxModel {
+    if (this.input.patient.respiration !== 'free-breathing') return this.thorax;
+    const d = respiratoryDepth(timeS);
+    return {
+      ...this.thorax,
+      lungShiftCm: this.thorax.lungShiftCm + 1.15 * d,
+      diaphragmRiseCm: this.thorax.diaphragmRiseCm - 0.5 * d,
+    };
   }
 
   private scene(phase: number): Scene {
@@ -434,7 +485,7 @@ export class SimulatorCore {
     return {
       heart: this.heart,
       heartPose,
-      thorax: this.thorax,
+      thorax: this.thoraxAtTime(),
       physics: this.physics(),
       ...(cole ? { imageFormation: cole.COLE_FORMATION, scatterGpu: cole.COLE_GPU } : {}),
       ...(rodero
@@ -488,8 +539,10 @@ export class SimulatorCore {
     const moved = this.prevBeam ? AtlasBackend.poseDistance(this.prevBeam, beam) : Infinity;
     this.stationaryFrames = moved < 0.03 ? this.stationaryFrames + 1 : 0;
     this.prevBeam = beam;
+    const breathing = inp.patient.respiration === 'free-breathing';
+    if (breathing) this.atlas.invalidate();
     const hints: RenderHints = {
-      stationary: this.stationaryFrames >= 6,
+      stationary: !breathing && this.stationaryFrames >= 6,
       budgetMs: this.frameBudgetMs,
       sceneAtPhase: (ph) => this.scene(ph),
     };
@@ -503,8 +556,10 @@ export class SimulatorCore {
     this.displayOnGpu = onGpu;
     let colorVel: Float32Array | null = null;
     let colorVar: Float32Array | null = null;
+    let colorTissue: Uint8Array | null = null;
+    let colorTransCode: Uint8Array | null = null;
     if (inp.modality === 'color') {
-      const cOut = this.colorDriver.step({
+      const colorCtx = {
         frame: this.frame,
         scene,
         heart: this.heart,
@@ -521,16 +576,39 @@ export class SimulatorCore {
         timeS: this.timeS,
         frameIntervalS: this.frameIntervalS,
         seed: this.caseDef.seed,
-      });
-      colorVel = cOut.vel;
-      colorVar = cOut.variance;
+      };
+      if (onGpu && this.gpu && this.gpu.gbuffer.ready) {
+        const ok = this.colorDriver.stepDeferredGpu(colorCtx, this.gpu);
+        if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+        if (ok && this.gpu && this.gpu.hasDeferredDoppler) {
+          this.dopplerOnGpu = true;
+          const n = spec.lines * spec.samples;
+          if (this.transCodeScratch.length !== n) this.transCodeScratch = new Uint8Array(n);
+          const tr = this.frame.transmission;
+          for (let i = 0; i < n; i++) this.transCodeScratch[i] = encodeTransmission(tr[i] ?? 0);
+          colorTissue = this.frame.tissue;
+          colorTransCode = this.transCodeScratch;
+        } else {
+          this.dopplerOnGpu = false;
+          const cOut = this.colorDriver.step(colorCtx);
+          colorVel = cOut.vel;
+          colorVar = cOut.variance;
+        }
+      } else {
+        this.dopplerOnGpu = false;
+        const cOut = this.colorDriver.step(colorCtx);
+        colorVel = cOut.vel;
+        colorVar = cOut.variance;
+      }
+    } else {
+      this.dopplerOnGpu = false;
     }
     this.analysisCounter++;
     if (this.analysisCounter % 5 === 1) {
       const ta = performance.now();
       this.lastAnalysis = analyzeView({
         heart: this.heart,
-        thorax: this.thorax,
+        thorax: scene.thorax,
         control: inp.probe,
         beam,
         frame: this.frame,
@@ -577,6 +655,8 @@ export class SimulatorCore {
       beatIndex: this.clock.current.beatIndex,
       colorVel,
       colorVar,
+      colorTissue,
+      colorTransCode,
       beam,
       analysis: this.lastAnalysis,
     });
@@ -654,18 +734,10 @@ export class SimulatorCore {
   private frozenOutput(): SimOutput | null {
     const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
-    return this.composite(cf.beam, cf.spec, true, cf);
-  }
-
-  private takeBuffer(size: number): ArrayBuffer {
-    for (let i = 0; i < this.rgbaPool.length; i++) {
-      const b = this.rgbaPool[i]!;
-      if (b.byteLength === size) {
-        this.rgbaPool.splice(i, 1);
-        return b;
-      }
+    if (cf.acquisition.modality === 'color' && !cf.colorVel && cf.colorTissue && cf.colorTransCode) {
+      this.colorDriver.reconstructCineColor(cf, this.heart, this.flow, this.tables, this.caseDef.seed);
     }
-    return new ArrayBuffer(size);
+    return this.composite(cf.beam, cf.spec, true, cf);
   }
 
   private composite(
@@ -674,159 +746,45 @@ export class SimulatorCore {
     frozen: boolean,
     cf?: CineFrame,
   ): SimOutput | null {
-    const inp = this.input;
-    const W = Math.max(64, inp.display.width);
-    const H = Math.max(64, inp.display.height);
-    const modality = cf?.acquisition.modality ?? inp.modality;
-    const colorSettings = cf?.acquisition.color ?? inp.color;
-    const isStrip = isStripModality(modality);
-    const sectorH = isStrip ? Math.round(H * 0.42) : H;
-    const display = cf ? cf.display : this.display;
-    const fspec = cf ? cf.spec : spec;
-    if (!display) return null;
-    const mapping = computeSectorMapping(
-      fspec,
-      W,
-      sectorH,
-      inp.settings.invertLR,
-      inp.settings.zoom,
-    );
-    const key = lutKey(fspec, mapping);
-    if (!this.lut || this.lut.key !== key) this.lut = buildScanLut(fspec, mapping);
-    const colorCur = this.colorDriver.current;
-    const colorVel = cf ? cf.colorVel : inp.modality === 'color' && colorCur ? colorCur.vel : null;
-    const colorVar = cf
-      ? cf.colorVar
-      : inp.modality === 'color' && colorCur
-        ? colorCur.variance
-        : null;
-    const tintMap = inp.settings.tintMap;
-    let bitmap: ImageBitmap | null = null;
-    const tp = performance.now();
-    if (!frozen && !isStrip && this.displayOnGpu && this.gpu) {
-      const color =
-        colorVel && colorVar
-          ? {
-              vel: colorVel,
-              variance: colorVar,
-              version: this.colorDriver.version,
-              settings: colorSettings,
-            }
-          : null;
-      bitmap = this.gpu.present({ lut: this.lut, width: W, height: sectorH, color, tintMap });
-      if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
-    }
-    this.timing.presentMs = bitmap ? performance.now() - tp : 0;
-    const buffer = bitmap ? new ArrayBuffer(0) : this.takeBuffer(W * H * 4);
-    const rgba = new Uint8ClampedArray(buffer);
-    if (!bitmap) {
-      const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
-      scanConvertLut(display, this.lut, sectorRgba, tintMap);
-      if (colorVel && colorVar)
-        overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings);
-    }
-    if (isStrip) {
-      rgba.fill(0, W * sectorH * 4);
-      for (let i = W * sectorH * 4 + 3; i < rgba.length; i += 4) rgba[i] = 255;
-    }
-    let strip: StripInfo = {
-      x: 0,
-      y: sectorH,
-      width: W,
-      height: H - sectorH,
-      secondsPerColumn: 0,
-      headColumn: 0,
-      columns: 0,
-      topValue: 0,
-      bottomValue: 0,
-      kind: null,
-    };
-    if (isStrip && (!cf || cf.acquisition.stripAcquisitionId === this.strips.historyId))
-      strip = this.strips.drawStrip(rgba, W, H, sectorH, tintMap);
-    const view = cf ? cf.analysis : this.lastAnalysis;
-    const c = this.clock.current;
-    const structure = cf ? cf.structure : this.frame ? this.frame.structure : new Uint8Array(0);
-    const segment = cf ? cf.segment : this.frame ? this.frame.segment : new Uint8Array(0);
-    const gate = cf
-      ? cf.gate
-      : isStrip
-        ? this.strips.gateInfo(beam, fspec, c.phase, structure, this.stripCtx())
-        : null;
-    const ecgTail = this.ecgRing.extractTail(frozen, this.timeS, this.cine.oldest?.timeS);
-    this.lastOutputBeam = beam;
-    const sector = { ...mapping, x: 0, y: 0 };
-    this.lastSector = sector;
-    this.lastStrip = strip;
-    this.displayedFrame = cf ?? this.cine.newest;
-    return {
-      acquisition: cf?.acquisition,
-      frameId: cf ? cf.frameId : this.frameId,
-      width: W,
-      height: H,
-      rgba: buffer,
-      bitmap,
-      sector,
-      strip,
-      polar: {
-        lines: fspec.lines,
-        samples: fspec.samples,
-        sectorRad: fspec.sectorRad,
-        depthCm: fspec.depthCm,
-      },
-      structure: frozen || inp.needStructure !== false ? new Uint8Array(structure) : new Uint8Array(0),
-      segment: frozen || inp.needSegments !== false ? new Uint8Array(segment) : new Uint8Array(0),
-      gate,
-      timeS: cf ? cf.timeS : this.timeS,
-      phase: cf ? cf.phase : c.phase,
-      beatIndex: cf ? cf.beatIndex : c.beatIndex,
-      heartRateBpm: 60 / (cf ? cf.rrS : c.rrS),
-      rrS: cf ? cf.rrS : c.rrS,
-      simulatedFps: this.acquisitionFps(),
-      cadenceHz: 1 / this.frameIntervalS,
-      ecg: ecgTail,
-      ecgHead: this.timeS,
-      view,
-      spectrumColumn: frozen && cf ? cf.spectrumColumn : this.strips.spectrumColumn,
-      spectralRange:
-        frozen && cf
-          ? cf.spectralRange
-          : (this.strips.velocityRange ?? spectralRange(inp.spectral)),
+    const res = this.compositor.composite({
+      input: this.input,
+      beam,
+      spec,
       frozen,
-      cineLength: this.cine.length,
-      cineOffset: cf ? inp.cineOffset : 0,
-      cineFramePhase: cf ? cf.phase : c.phase,
-      cineWindow: {
-        startS: this.cine.oldest?.timeS ?? this.timeS,
-        endS: this.cine.newest?.timeS ?? this.timeS,
-        frameS: cf ? cf.timeS : this.timeS,
-      },
-      stats: {
-        ...this.backend.stats(),
-        backend: this.backend.id,
-        anatomy: this.experimental.anatomyStatus(this.input.anatomy, this.backend === this.procedural),
-        imagen: this.experimental.imageFormationStatus(this.input.imageFormation),
-        gpu: this.gpuReason,
-        tier: this.tier,
-        lines: spec.lines,
-        samples: spec.samples,
-        renderFrameMs: Number(this.timing.renderFrameMs.toFixed(1)),
-        consoleMs: Number(this.timing.consoleMs.toFixed(1)),
-        persistence: Number(this.lastPersistence.toFixed(3)),
-        analysisMs: Number(this.timing.analysisMs.toFixed(1)),
-        compositeMs: Number(this.timing.compositeMs.toFixed(1)),
-        cineMs: Number(this.timing.cineMs.toFixed(2)),
-        console: this.displayOnGpu ? 'gpu' : 'cpu',
-        present: bitmap ? 'gpu' : 'cpu',
-        presentMs: Number(this.timing.presentMs.toFixed(2)),
-      },
+      cf,
+      display: this.display,
+      frame: this.frame,
+      displayOnGpu: this.displayOnGpu,
+      dopplerOnGpu: this.dopplerOnGpu,
+      gpu: this.gpu,
+      gpuReason: this.gpuReason,
+      onGpuContextLost: (reason) => this.dropGpu(reason),
+      colorCurrent: this.colorDriver.current,
+      colorVersion: this.colorDriver.version,
       colorFps: this.colorFps,
-      probeBeam: {
-        origin: [beam.origin.x, beam.origin.y, beam.origin.z],
-        forward: [beam.forward.x, beam.forward.y, beam.forward.z],
-        lateral: [beam.lateral.x, beam.lateral.y, beam.lateral.z],
-        normal: [beam.normal.x, beam.normal.y, beam.normal.z],
-      },
-    };
+      strips: this.strips,
+      stripCtx: () => this.stripCtx(),
+      lastAnalysis: this.lastAnalysis,
+      clockCurrent: this.clock.current,
+      timeS: this.timeS,
+      frameId: this.frameId,
+      frameIntervalS: this.frameIntervalS,
+      acquisitionFps: this.acquisitionFps(),
+      ecgRing: this.ecgRing,
+      cine: this.cine,
+      backend: this.backend,
+      isProceduralBackend: this.backend === this.procedural,
+      experimental: this.experimental,
+      tier: this.tier,
+      lastPersistence: this.lastPersistence,
+      timing: this.timing,
+    });
+    if (!res) return null;
+    this.lastOutputBeam = beam;
+    this.lastSector = res.sector;
+    this.lastStrip = res.strip;
+    this.displayedFrame = res.displayedFrame;
+    return res.output;
   }
 
   // ---- accessors for tests / devtools ----

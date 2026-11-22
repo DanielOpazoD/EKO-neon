@@ -173,6 +173,53 @@ export function aliasVelocity(vMps: number, nyquistMps: number, baselineShiftMps
   return lo + x;
 }
 
+/**
+ * Hemispheric proximal isovelocity surface area (PISA) instantaneous regurgitant flow rate (mL/s):
+ * Q = 2·π·r²·v_a (r in cm, aliasing velocity v_a in m/s → ×100 cm/s). ASE/EACVI 2017.
+ */
+export function pisaFlowRateMlps(radiusCm: number, aliasingVelocityMps: number): number {
+  assertPositive(radiusCm, 'radiusCm');
+  assertPositive(aliasingVelocityMps, 'aliasingVelocityMps');
+  return 2 * Math.PI * radiusCm * radiusCm * aliasingVelocityMps * 100;
+}
+
+/**
+ * Effective regurgitant orifice area (cm²) from PISA radius (cm), aliasing velocity (m/s)
+ * and CW peak regurgitant velocity (m/s): EROA = (2·π·r²·v_a) / v_max.
+ */
+export function pisaEroaCm2(
+  radiusCm: number,
+  aliasingVelocityMps: number,
+  peakVelocityMps: number,
+): number {
+  assertPositive(peakVelocityMps, 'peakVelocityMps');
+  return pisaFlowRateMlps(radiusCm, aliasingVelocityMps) / (peakVelocityMps * 100);
+}
+
+/**
+ * Expected hemispheric PISA radius (cm) at a given aliasing velocity (default 0.40 m/s, ASE standard)
+ * for a regurgitant orifice of area `eroaCm2` and peak jet velocity `peakVelocityMps`.
+ */
+export function pisaRadiusCm(
+  eroaCm2: number,
+  peakVelocityMps: number,
+  aliasingVelocityMps = 0.4,
+): number {
+  assertPositive(eroaCm2, 'eroaCm2');
+  assertPositive(peakVelocityMps, 'peakVelocityMps');
+  assertPositive(aliasingVelocityMps, 'aliasingVelocityMps');
+  return Math.sqrt((eroaCm2 * peakVelocityMps) / (2 * Math.PI * aliasingVelocityMps));
+}
+
+/**
+ * Equivalent circular vena contracta width (cm) for a regurgitant orifice area (cm²):
+ * d = 2·√(EROA / π). Aligns physically with ASE/EACVI 2017 cutoffs (< 0.3 cm mild, ≥ 0.7 cm severe).
+ */
+export function venaContractaFromEroaCm(eroaCm2: number): number {
+  assertPositive(eroaCm2, 'eroaCm2');
+  return 2 * Math.sqrt(eroaCm2 / Math.PI);
+}
+
 function assertPositive(x: number, name: string): void {
   if (!(x > 0) || !Number.isFinite(x))
     throw new RangeError(`${name} must be a positive finite number, got ${x}`);

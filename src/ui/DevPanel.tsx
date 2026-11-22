@@ -43,7 +43,7 @@ export function DevPanel() {
   );
   const hud = useHudStore((h) => h.hud);
   const t = s.truth;
-  if (!modePolicy(s.mode).devToolsAllowed || !s.ui.devPanel) return null;
+  if (!modePolicy(s.mode).devToolsAllowed || !s.ui.devMode || !s.ui.devPanel) return null;
   const rows: [string, string][] = [];
   if (hud) {
     rows.push(

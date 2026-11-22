@@ -111,6 +111,12 @@ export interface StripInfo {
   wallFilterMps?: number;
   /** Transmitted fundamental of the spectral acquisition (not the harmonic receive frequency). */
   frequencyMHz?: number;
+  /** Physical pulse repetition frequency and depth-limited Nyquist readout of a pulsed strip. */
+  prfHz?: number;
+  maxPrfHz?: number;
+  nyquistMps?: number;
+  gateDepthCm?: number;
+  aliasing?: boolean;
   /**
    * The strip is written as a sweep (decision 231): `headColumn` is the column the next sample goes into, where the
    * sweep marker stands, of `columns`; the newest written column is the one before it. 0 without a strip.

@@ -72,11 +72,10 @@
    and showed 46 % of it, with the details and the causes clipped below an empty band; the cap now sits on the
    wrapper, against the rail, and the guide scrolls inside it */
 #view-guidance {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  max-height: 38%;
 }
 #view-guidance .guidance {
   max-height: none;
@@ -177,8 +176,8 @@
 
 /* the case card under the case selector: the patient's history, plain */
 .case-card {
-  margin: 6px 0 4px;
-  padding: 10px 12px;
+  margin: 5px 0 4px;
+  padding: 8px 10px;
   background: var(--panel-2);
   border: 0;
   border-radius: var(--r-sm);
@@ -246,6 +245,8 @@
     display: none;
   }
   .nav-seg button {
+    flex: 1;
+    text-align: center;
     padding: 4px 8px;
     font-size: var(--fs-md);
   }
@@ -261,9 +262,15 @@
   .topbar {
     order: 0;
     flex: 0 0 auto;
+    height: auto;
+    min-height: 44px;
     flex-wrap: wrap;
     padding: 8px;
     gap: 8px;
+  }
+  .topbar .tool-seg,
+  .topbar .notes-btn {
+    display: none;
   }
   .topbar .nav-seg {
     order: 2;
@@ -279,6 +286,8 @@
   .modebar {
     order: 1;
     flex: 0 0 auto;
+    height: auto;
+    min-height: 44px;
     flex-wrap: wrap;
     gap: 6px;
     padding: 6px;

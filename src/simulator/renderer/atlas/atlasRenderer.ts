@@ -293,7 +293,19 @@ export class AtlasRenderer implements RendererBackend {
     this.lastStats = {
       source: this.source.id,
       ...(typeof src['gpuMs'] === 'number'
-        ? { gpuMs: src['gpuMs'], readMs: src['readMs'] ?? 0, output: src['output'] ?? 'float' }
+        ? {
+            gpuMs: src['gpuMs'],
+            readMs: src['readMs'] ?? 0,
+            output: src['output'] ?? 'float',
+            ...(src['doppler'] !== undefined
+              ? {
+                  doppler: src['doppler'],
+                  dopplerMs: src['dopplerMs'] ?? 0,
+                  dopplerBoxPct: src['dopplerBoxPct'] ?? 0,
+                  dopplerIndependent: src['dopplerIndependent'] ?? 0,
+                }
+              : {}),
+          }
         : {}),
       mode: this.mode,
       served,

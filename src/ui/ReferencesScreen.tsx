@@ -16,6 +16,7 @@ export const USED_BY_LABEL: Readonly<Record<string, string>> = {
   'prosthetic valves (future)': 'prótesis valvulares (pendiente)',
   'rap-estimation': 'presión de la aurícula derecha',
   'reference-values': 'valores de referencia',
+  regurgitation: 'insuficiencias valvulares',
   'regurgitation (future)': 'insuficiencias valvulares (pendiente)',
   reporting: 'informe',
   'right-heart': 'corazón derecho',
@@ -39,10 +40,9 @@ export function ReferencesScreen() {
     <div className="screen">
       <h2>Referencias clínicas y técnicas</h2>
       <p className="small">
-        Cada regla clínica del simulador apunta a una de estas fuentes (id, sociedad, año, módulo
-        que la usa, fecha de última revisión). Los valores de corte viven en{' '}
-        <code>src/clinical/reference-values</code> como datos versionados; no se copian tablas
-        completas de las guías.
+        Cada regla clínica del simulador apunta a una de estas fuentes (identificador, sociedad,
+        año, módulo que la usa y fecha de última revisión). Los valores de corte se mantienen como
+        datos de referencia versionados sin copiar tablas completas de las guías.
       </p>
       <table>
         <thead>
@@ -59,7 +59,7 @@ export function ReferencesScreen() {
         <tbody>
           {GUIDELINE_REFERENCES.map((r) => (
             <tr key={r.id}>
-              <td>
+              <td className="nowrap">
                 <code>{r.id}</code>
               </td>
               <td>
@@ -69,9 +69,9 @@ export function ReferencesScreen() {
                 {r.notes ? <div className="small">{r.notes}</div> : null}
               </td>
               <td>{r.society}</td>
-              <td>{r.year}</td>
+              <td className="nowrap">{r.year}</td>
               <td>{r.usedBy.map((u) => USED_BY_LABEL[u] ?? u).join(', ')}</td>
-              <td>{r.accessedAt}</td>
+              <td className="nowrap">{r.accessedAt}</td>
               <td>
                 <span className={`pill ${r.verification === 'verified-online' ? 'ok' : 'warn'}`}>
                   {VERIFICATION_LABEL[r.verification] ?? r.verification}

@@ -2,7 +2,7 @@ import { consoleCompensation } from '../postprocess/consolePipeline';
 import { packScanLutTexels, type ScanLut } from '../scanConvert';
 import type { AcquisitionSettings, PolarFrameSpec } from '../types';
 import { makeTexture2D, UPLOAD_UNIT } from './glHelpers';
-import type { PresentColor } from './webgl2Renderer';
+import type { PresentColorCpu } from './webgl2Renderer';
 
 /**
  * Manages cached WebGL2 texture uploads for console depth compensation, scan-conversion LUT,
@@ -87,7 +87,7 @@ export class GlPresentUploads {
     this.polarKeyUploaded = lut.key;
   }
 
-  ensureColor(c: PresentColor, lines: number, samples: number): void {
+  ensureColor(c: PresentColorCpu, lines: number, samples: number): void {
     const scale = Math.max(1e-3, c.settings.scaleMps);
     const key = `${c.version}|${lines}x${samples}|${scale.toFixed(4)}`;
     if (key === this.colorKey) return;

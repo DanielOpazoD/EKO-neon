@@ -40,7 +40,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     usedBy: ['diastolic-function'],
     verification: 'verified-online',
     notes:
-      'Primary text reviewed: DOI 10.1016/j.echo.2025.03.011, Table 6 and Figures 2/8. Age-adjusted relaxation and nominal AF pressure assessment; general sinus-rhythm LAP grading remains unavailable.',
+      'DOI 10.1016/j.echo.2025.03.011 (Tabla 6 y Figuras 2 y 8): relajación ajustada por edad y algoritmo de presión de llenado auricular izquierda en ritmo sinusal (con relación S/D venosa pulmonar como criterio suplementario en empates) y en fibrilación auricular.',
   },
   {
     id: 'ase-right-heart-2025',
@@ -52,7 +52,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     accessedAt: '2026-10-04',
     usedBy: ['right-heart', 'rap-estimation', 'impression'],
     notes:
-      'DOI 10.1016/j.echo.2025.01.006: Table 2 and PH screening recommendations reviewed; suggestive echo findings are not an invasive diagnosis.',
+      'DOI 10.1016/j.echo.2025.01.006 (Tabla 2 y cribado de hipertensión pulmonar): los hallazgos ecocardiográficos sugieren probabilidad de hipertensión pulmonar y no sustituyen el diagnóstico invasivo.',
     verification: 'verified-online',
   },
   {
@@ -92,8 +92,10 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     year: 2017,
     url: 'https://www.asecho.org/guideline/native-valvular-regurgitation-by-echo/',
     accessedAt: '2026-09-10',
-    usedBy: ['regurgitation (future)'],
+    usedBy: ['regurgitation'],
     verification: 'title-verified',
+    notes:
+      'Cuantificación de insuficiencia mitral y aórtica mediante EROA, volumen regurgitante, fracción regurgitante, vena contracta y convergencia de flujo proximal (PISA).',
   },
   {
     id: 'ase-prosthetic-2024',
@@ -137,7 +139,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     usedBy: ['myocardial-segmentation', 'segment-catalog'],
     verification: 'verified-online',
     notes:
-      'Bibliographic record checked through Crossref (the publisher page refused automated access); the 17-segment rules are encoded in clinical/segmentation/catalog.ts and simulator/anatomy/lvSegments.ts (decision 152).',
+      'Registro bibliográfico verificado vía Crossref: modelo estandarizado de 17 segmentos miocárdicos del ventrículo izquierdo.',
   },
   {
     id: 'eacvi-ase-ste-2015',
@@ -150,7 +152,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     usedBy: ['myocardial-segmentation', 'segment-catalog (LV 18, strain: future)'],
     verification: 'verified-online',
     notes:
-      'Read online: segments defined at end-diastole and following the tissue; the 16-segment model divides the whole apex into four segments; the anterior RV insertion is the short-axis reference; the 18-segment model is a separate topology.',
+      'Segmentos definidos en telediástole siguiendo el tejido; modelo de 16 segmentos con ápex dividido en cuatro segmentos e inserción anterior del VD como referencia de eje corto.',
   },
   {
     id: 'dicom-cid-3717',
@@ -163,7 +165,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     accessedAt: '2026-09-22',
     usedBy: ['segment-catalog'],
     verification: 'verified-online',
-    notes: 'Segment names and SNOMED CT codes of catalog.ts.',
+    notes: 'Nomenclatura estandarizada de segmentos y códigos SNOMED CT.',
   },
   {
     id: 'rodero-ssm-2021',
@@ -176,7 +178,7 @@ export const GUIDELINE_REFERENCES: GuidelineReference[] = [
     usedBy: ['experimental-anatomy'],
     verification: 'verified-online',
     notes:
-      'The mean shape of 20 healthy hearts by CT, shipped voxelised at 1 mm (public/anatomy, decision 352) as the experimental anatomy. Licence CC BY 4.0.',
+      'Forma cardíaca media de 20 corazones sanos por TC, voxelizada a 1 mm como anatomía volumétrica experimental (licencia CC BY 4.0).',
   },
 ];
 

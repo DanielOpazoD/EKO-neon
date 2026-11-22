@@ -69,13 +69,13 @@ export function computeCycleTimings(
   const ejectionEndS = ejectionStartS + et;
   const ivrt = physiology.ivrtMs / 1000;
   const mitralOpenS = Math.min(ejectionEndS + ivrt, rrS - 0.05);
-  const eAccelS = Math.min(0.1, physiology.decelerationTimeMs / 2000);
+  const eAccelS = Math.min(0.085, Math.max(0.045, 0.032 + physiology.decelerationTimeMs / 4800));
   const eDecelS = physiology.decelerationTimeMs / 1000;
   const eEndS = Math.min(mitralOpenS + eAccelS + eDecelS, rrS);
   const hasAWave = rhythm.type !== 'atrial-fibrillation' && physiology.aPeakMps > 0;
   const pOnsetS = hasAWave ? rrS - PR_INTERVAL_S : Number.NaN;
   const aStartS = hasAWave ? Math.max(mitralOpenS + 0.02, pOnsetS + 0.04) : Number.NaN;
-  const aEndS = hasAWave ? Math.min(rrS - 0.01, aStartS + A_WAVE_DURATION_S) : Number.NaN;
+  const aEndS = hasAWave ? Math.min(rrS - 0.004, aStartS + A_WAVE_DURATION_S) : Number.NaN;
   return {
     rrS,
     ejectionStartS,
@@ -112,21 +112,27 @@ export function aorticStenosisSeverity(effectiveAreaCm2: number): number {
   return Math.min(1, Math.max(0, (1.5 - effectiveAreaCm2) / 0.6));
 }
 
-/** Normalized E-wave shape: sine-squared acceleration, then near-linear deceleration. */
+/**
+ * Normalized transmitral E-wave shape: brisk rapid-suction upstroke (~65–75 ms normal AT),
+ * followed by a crisp near-linear deceleration matching true deceleration time (DT) without
+ * artificial convex bulging.
+ */
 export function eWaveShape(tS: number, accelS: number, decelS: number): number {
   if (tS <= 0) return 0;
   if (tS < accelS) {
-    const s = Math.sin((Math.PI / 2) * (tS / accelS));
-    return s * s;
+    return Math.pow(Math.sin((Math.PI / 2) * (tS / accelS)), 1.25);
   }
   const d = (tS - accelS) / decelS;
   if (d >= 1) return 0;
-  // slightly convex decay: keeps deceleration slope measurable (DT) while avoiding a hard corner
-  return 1 - d * (1 - 0.15 * (1 - d));
+  // Crisp near-linear deceleration with faint physiological concavity near baseline equilibration
+  return Math.pow(1 - d, 1.06);
 }
 
-/** Normalized A-wave shape on u∈[0,1]: half sine. */
+/**
+ * Normalized atrial contraction (A-wave) shape on u∈[0,1]: slightly peaked triangular-bell
+ * contour preserving exact peak unity at u = 0.5 for E/A fusion continuity.
+ */
 export function aWaveShape(u: number): number {
   if (u <= 0 || u >= 1) return 0;
-  return Math.sin(Math.PI * u);
+  return Math.pow(Math.sin(Math.PI * u), 1.35);
 }

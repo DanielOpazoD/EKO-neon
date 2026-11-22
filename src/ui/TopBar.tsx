@@ -33,11 +33,14 @@ export function TopBar() {
       setMode: st.setMode,
       setQuality: st.setQuality,
       setUi: st.setUi,
-      ui: st.ui,
+      screen: st.ui.screen,
+      devMode: st.ui.devMode,
+      reviewMode: st.ui.reviewMode,
     })),
   );
   // the curriculum and the progress are sections of the «Informe» tab
-  const current = isReportSection(s.ui.screen) ? 'report' : s.ui.screen;
+  const current = isReportSection(s.screen) ? 'report' : s.screen;
+  const isSim = current === 'simulator';
   const pill = useSlidingPill(navRef, current);
   const policy = modePolicy(s.mode);
   return (
@@ -46,15 +49,19 @@ export function TopBar() {
         <i className="brand-mark" aria-hidden="true" />
         EchoTwin <span className="brand-sub">TTE</span>
       </span>
-      <span
-        className={`run-state ${s.frozen ? 'frozen' : 'live'}`}
-        data-tip={
-          s.frozen ? 'Imagen congelada (Espacio reanuda)' : 'Adquisición en vivo (Espacio congela)'
-        }
-      >
-        <i className="run-dot" aria-hidden="true" />
-        {s.frozen ? 'CONGELADA' : 'EN VIVO'}
-      </span>
+      {isSim && (
+        <span
+          className={`run-state ${s.frozen ? 'frozen' : 'live'}`}
+          data-tip={
+            s.frozen
+              ? 'Imagen congelada (Espacio reanuda)'
+              : 'Adquisición en vivo (Espacio congela)'
+          }
+        >
+          <i className="run-dot" aria-hidden="true" />
+          {s.frozen ? 'CONGELADA' : 'EN VIVO'}
+        </span>
+      )}
       <nav className="nav-seg" aria-label="Pantallas" ref={navRef}>
         {pill && <span className="seg-pill" style={pill} aria-hidden="true" />}
         {SCREENS.map((sc) => (
@@ -71,7 +78,7 @@ export function TopBar() {
           </button>
         ))}
       </nav>
-      {policy.devToolsAllowed && (
+      {isSim && policy.devToolsAllowed && s.devMode && (
         <div className="tool-seg" role="group" aria-label="Corazón">
           <span className="tool-seg-cap" aria-hidden="true">
             Corazón
@@ -89,14 +96,14 @@ export function TopBar() {
           ))}
         </div>
       )}
-      {policy.devToolsAllowed && (
+      {isSim && policy.devToolsAllowed && s.devMode && (
         <button
-          className={`notes-btn${s.ui.reviewMode ? ' active' : ''}`}
-          aria-pressed={s.ui.reviewMode}
+          className={`notes-btn${s.reviewMode ? ' active' : ''}`}
+          aria-pressed={s.reviewMode}
           onClick={() =>
             s.setUi({
-              reviewMode: !s.ui.reviewMode,
-              consoleTab: s.ui.reviewMode ? 'adquirir' : 'revisar',
+              reviewMode: !s.reviewMode,
+              consoleTab: s.reviewMode ? 'adquirir' : 'revisar',
             })
           }
           data-tip="Modo revisión: marca y anota sobre la imagen lo que ves mal, y copia el informe"
@@ -116,17 +123,19 @@ export function TopBar() {
         <option value="guided">Adquisición guiada</option>
         <option value="exam">Examen</option>
       </select>
-      <select
-        aria-label="Calidad"
-        value={s.quality}
-        onChange={(e) => s.setQuality(e.target.value as typeof s.quality)}
-        data-tip="Nivel de calidad: resolución del trazado y, en alta, el grosor del corte (tres planos de elevación); no altera la fisiología. Automática: la calibrada contra imágenes clínicas cuando la GPU forma la imagen, media con el trazador de CPU"
-      >
-        <option value="auto">Calidad automática</option>
-        <option value="low">Calidad baja</option>
-        <option value="medium">Calidad media</option>
-        <option value="high">Calidad alta</option>
-      </select>
+      {isSim && (
+        <select
+          aria-label="Calidad"
+          value={s.quality}
+          onChange={(e) => s.setQuality(e.target.value as typeof s.quality)}
+          data-tip="Nivel de calidad: resolución del trazado y, en alta, el grosor del corte (tres planos de elevación); no altera la fisiología. Automática: la calibrada contra imágenes clínicas cuando la GPU forma la imagen, media con el trazador de CPU"
+        >
+          <option value="auto">Calidad automática</option>
+          <option value="low">Calidad baja</option>
+          <option value="medium">Calidad media</option>
+          <option value="high">Calidad alta</option>
+        </select>
+      )}
     </div>
   );
 }

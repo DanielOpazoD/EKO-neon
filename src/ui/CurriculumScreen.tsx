@@ -18,6 +18,15 @@ export function CurriculumScreen() {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const total = tasks.length;
   const completed = Object.keys(done).length;
+  const moduleStats = CURRICULUM.map((m) => {
+    const modTasks = m.lessons.flatMap((l) => l.tasks);
+    const modDone = modTasks.filter((t) => Boolean(done[t.id])).length;
+    return { total: modTasks.length, done: modDone };
+  });
+  const firstOpenIdx = Math.max(
+    0,
+    moduleStats.findIndex((ms) => ms.done < ms.total),
+  );
   return (
     <div className="screen curriculum">
       <h2>Currículo por etapas</h2>
@@ -25,56 +34,76 @@ export function CurriculumScreen() {
         {completed}/{total} tareas completadas. Las tareas se verifican automáticamente mientras
         trabajas en el simulador (modo libre o guiado); ninguna mueve la sonda por ti.
       </p>
-      {CURRICULUM.map((m) => (
-        <section key={m.id} className="module">
-          <h3>{m.title}</h3>
-          {m.lessons.map((l) => (
-            <div key={l.id} className="lesson">
-              <h4>{l.title}</h4>
-              <p className="small">{l.goal}</p>
-              <ul className="tasks">
-                {l.tasks.map((t) => {
-                  const ok = Boolean(done[t.id]);
-                  // a task waits for the ones it builds on (decision 260)
-                  const locked = !ok && !isUnlocked(t, done);
-                  const caseTitle = t.caseId ? cases.find((c) => c.id === t.caseId)?.title : null;
-                  const before = (t.requires ?? [])
-                    .filter((id) => !done[id])
-                    .map((id) => byId.get(id)?.title ?? id);
-                  return (
-                    <li
-                      key={t.id}
-                      className={ok ? 'done' : locked ? 'locked' : ''}
-                      data-task={t.id}
-                      data-done={ok ? '1' : '0'}
-                      data-locked={locked ? '1' : '0'}
-                    >
-                      <span className={`pill ${ok ? 'ok' : ''}`}>
-                        {ok ? 'hecha' : locked ? 'bloqueada' : 'pendiente'}
-                      </span>{' '}
-                      <b>{t.title}</b>
-                      <div className="small why">{t.why}</div>
-                      {locked && <div className="small requires">Antes: {before.join(' · ')}</div>}
-                      {!locked && (t.caseId || t.viewId) && (
-                        <button
-                          className="small"
-                          data-open-task={t.id}
-                          data-tip={[caseTitle, t.viewId ? getViewTarget(t.viewId).name : null]
-                            .filter(Boolean)
-                            .join(' · ')}
-                          onClick={() => s.openTask(t)}
+      {CURRICULUM.map((m, idx) => {
+        const ms = moduleStats[idx]!;
+        const pct = ms.total ? Math.round((ms.done / ms.total) * 100) : 0;
+        return (
+          <details key={m.id} className="module-acc" open={idx === firstOpenIdx}>
+            <summary className="module-acc-head">
+              <span className="module-acc-title">{m.title}</span>
+              <span className="module-acc-meta">
+                <span className="small">
+                  {ms.done}/{ms.total}
+                </span>
+                <span className="bar module-acc-bar" aria-hidden="true">
+                  <i style={{ width: `${pct}%` }} />
+                </span>
+              </span>
+            </summary>
+            <div className="module-acc-body">
+              {m.lessons.map((l) => (
+                <div key={l.id} className="lesson">
+                  <h4>{l.title}</h4>
+                  <p className="small">{l.goal}</p>
+                  <ul className="tasks">
+                    {l.tasks.map((t) => {
+                      const ok = Boolean(done[t.id]);
+                      // a task waits for the ones it builds on (decision 260)
+                      const locked = !ok && !isUnlocked(t, done);
+                      const caseTitle = t.caseId
+                        ? cases.find((c) => c.id === t.caseId)?.title
+                        : null;
+                      const before = (t.requires ?? [])
+                        .filter((id) => !done[id])
+                        .map((id) => byId.get(id)?.title ?? id);
+                      return (
+                        <li
+                          key={t.id}
+                          className={ok ? 'done' : locked ? 'locked' : ''}
+                          data-task={t.id}
+                          data-done={ok ? '1' : '0'}
+                          data-locked={locked ? '1' : '0'}
                         >
-                          Abrir tarea
-                        </button>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
+                          <span className={`pill ${ok ? 'ok' : ''}`}>
+                            {ok ? 'hecha' : locked ? 'bloqueada' : 'pendiente'}
+                          </span>{' '}
+                          <b>{t.title}</b>
+                          <div className="small why">{t.why}</div>
+                          {locked && (
+                            <div className="small requires">Antes: {before.join(' · ')}</div>
+                          )}
+                          {!locked && (t.caseId || t.viewId) && (
+                            <button
+                              className="small"
+                              data-open-task={t.id}
+                              data-tip={[caseTitle, t.viewId ? getViewTarget(t.viewId).name : null]
+                                .filter(Boolean)
+                                .join(' · ')}
+                              onClick={() => s.openTask(t)}
+                            >
+                              Abrir tarea
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
             </div>
-          ))}
-        </section>
-      ))}
+          </details>
+        );
+      })}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
 import {
   ATTEN_NP_PER_DB,
   calciumAttenDb,
+  CHEST_WALL_ATTEN_DB,
   SOFT_TISSUE_ATTEN_DB,
 } from '@/simulator/renderer/acoustic/acoustics';
 import { DOPPLER_SHADOW_TRANSMISSION } from './color/colorDoppler';
@@ -30,6 +31,7 @@ export function relativeEchoAmplitude(
   const coupling = Math.min(1, Math.max(0, contact));
   // Doppler is transmitted at the fundamental; the B-mode THI toggle does not change its propagation.
   const k = ATTEN_NP_PER_DB * scene.physics.frequencyMHz * stepCm;
+  const wallAtten = scene.physics.windowAttenuation ?? 0;
   return (depth: number): number => {
     if (coupling <= 0 || depth < 0) return 0;
     const n = Math.ceil(depth / stepCm);
@@ -39,23 +41,28 @@ export function relativeEchoAmplitude(
       if (previous === 0) return 0;
       const r = (i - 0.5) * stepCm;
       let t = previous;
-      if (
-        classify(
-          origin.x + direction.x * r,
-          origin.y + direction.y * r,
-          origin.z + direction.z * r,
-          sample,
-        )
-      ) {
+      const cls = classify(
+        origin.x + direction.x * r,
+        origin.y + direction.y * r,
+        origin.z + direction.z * r,
+        sample,
+      );
+      if (cls !== 0) {
         if (sample.tissue === Tissue.Lung) t = 0;
-        else
+        else {
+          const wallExtraDb =
+            cls === 1 && (sample.tissue === Tissue.Fat || sample.tissue === Tissue.Muscle)
+              ? CHEST_WALL_ATTEN_DB * wallAtten
+              : 0;
           t *= Math.exp(
             -(
               TISSUE_PROPS[sample.tissue]!.attenuation +
+              wallExtraDb +
               calciumAttenDb(sample.extraReflect) -
               SOFT_TISSUE_ATTEN_DB
             ) * k,
           );
+        }
       }
       transmission.push(t);
     }

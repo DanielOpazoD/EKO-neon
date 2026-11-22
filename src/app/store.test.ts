@@ -47,6 +47,30 @@ describe('UI preferences schema (prefs.ts)', () => {
     const ui = useSimStore.getState().ui;
     const picked = pickPrefs(ui);
     assert.deepEqual(Object.keys(picked).sort(), [...PERSISTED_PREF_KEYS].sort());
+    assert.equal(ui.devMode, false);
+    assert.equal(ui.tutorialDone, true);
+  });
+
+  it('disabling devMode automatically closes devPanel, showPhysics, reviewMode and dev console tabs', () => {
+    const s = useSimStore.getState();
+    s.setUi({
+      devMode: true,
+      devPanel: true,
+      showPhysics: true,
+      reviewMode: true,
+      consoleTab: 'lab',
+    });
+    assert.equal(useSimStore.getState().ui.devMode, true);
+    assert.equal(useSimStore.getState().ui.devPanel, true);
+    assert.equal(useSimStore.getState().ui.consoleTab, 'lab');
+
+    useSimStore.getState().setUi({ devMode: false });
+    const after = useSimStore.getState().ui;
+    assert.equal(after.devMode, false);
+    assert.equal(after.devPanel, false);
+    assert.equal(after.showPhysics, false);
+    assert.equal(after.reviewMode, false);
+    assert.equal(after.consoleTab, 'adquirir');
   });
 });
 

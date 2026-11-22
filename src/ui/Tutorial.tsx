@@ -126,11 +126,7 @@ export function Tutorial() {
   const done = useSimStore((s) => s.ui.tutorialDone);
   const setUi = useSimStore((s) => s.setUi);
   const [step, setStep] = useState(0);
-  // open until the learner ends it, and closed as soon as the preference says it is done — also when something else
-  // sets it (decision 207: the review E2E marks it done after load, and the card beside the torso had come to sit
-  // over the image where the test clicked)
-  const [ended, setEnded] = useState(false);
-  const open = !done && !ended;
+  const open = !done;
   const [rect, setRect] = useState<Rect | null>(null);
   const [cardH, setCardH] = useState(240);
   const card = useRef<HTMLDivElement>(null);
@@ -174,7 +170,6 @@ export function Tutorial() {
   const place = rect ? placeCard(rect, cardH) : null;
   const finish = () => {
     setUi({ tutorialDone: true, consoleTab: tabAtStart.current });
-    setEnded(true);
   };
   return (
     <>
@@ -238,12 +233,4 @@ export function Tutorial() {
       </div>
     </>
   );
-}
-
-export function useRestartTutorial(): () => void {
-  const setUi = useSimStore((s) => s.setUi);
-  return () => {
-    setUi({ tutorialDone: false });
-    window.location.reload();
-  };
 }

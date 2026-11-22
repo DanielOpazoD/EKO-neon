@@ -21,12 +21,11 @@ export function ExamNotice() {
 }
 
 export function GuidancePanel() {
-  const hud = useHudStore((h) => h.hud);
-  const ui = useSimStore((s) => s.ui);
+  const v = useHudStore((h) => h.hud?.view ?? null);
+  const showHints = useSimStore((s) => s.ui.showHints);
   const mode = useSimStore((s) => s.mode);
   const targetId = useSimStore((s) => s.targetViewId);
   const settings = useSimStore((s) => s.settings);
-  const v = hud?.view;
   if (!modePolicy(mode).hintsEnabled) return <ExamNotice />;
   if (!v) return <div className="guidance small">Analizando vista…</div>;
   const targetScore = targetId ? v.perView.find((p) => p.id === targetId)?.score : undefined;
@@ -41,7 +40,7 @@ export function GuidancePanel() {
     ['Artefactos', comps.artifacts],
   ];
   const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
-  const causes = ui.showHints ? explainAnalysis(v, settings) : [];
+  const causes = showHints ? explainAnalysis(v, settings) : [];
   const targetHints = targetId ? getViewTarget(targetId).hints : [];
   return (
     <div className="guidance" aria-live="polite">
@@ -75,7 +74,7 @@ export function GuidancePanel() {
           Objetivo: {getViewTarget(targetId).name} · {targetScore ?? '—'}/100
         </div>
       )}
-      {ui.showHints && (
+      {showHints && (
         <>
           {v.hints.length + targetHints.length > 0 && (
             <ul className="hints">

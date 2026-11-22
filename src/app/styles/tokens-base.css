@@ -244,6 +244,9 @@ select:hover {
 .app.no-torso {
   grid-template-columns: 0 1fr 316px;
 }
+.app.doc-screen {
+  grid-template-rows: 46px 1fr;
+}
 .topbar {
   grid-column: 1 / -1;
   height: 46px;
@@ -402,18 +405,6 @@ select:hover {
   background: var(--accent-soft);
   border-color: var(--accent-line);
 }
-.topbar .stat {
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 0 1 auto;
-  min-width: 40px;
-}
-.topbar .stat b {
-  color: var(--text);
-  font-weight: 600;
-}
 .topbar .spacer {
   flex: 1;
 }
@@ -449,6 +440,9 @@ select:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--track) transparent;
   padding-bottom: 8px;
 }
 .rail-collapse {

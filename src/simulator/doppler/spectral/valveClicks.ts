@@ -41,19 +41,30 @@ function clickTime(t: number, event: number, rr: number): number {
   return Math.exp(-0.5 * (d / CLICK_SIGMA_S) ** 2);
 }
 
+export interface ValveClickSignal {
+  /** Scalar click intensity (0 = none, ~1 = leaflets inside sample volume at opening/closing). */
+  weight: number;
+  /**
+   * Signed directional projection (-1..+1) of leaflet motion onto the Doppler toward-probe axis (-rayHeartDir):
+   * positive when leaflets snap toward the transducer (e.g. mitral opening in A4C), negative when moving away (MVC).
+   */
+  direction: number;
+}
+
 /**
- * Valve click (decision 103) for a spectral column at `timeInBeatS`, sampled at heart-frame `points` (x, y, z, …): the PW
- * gate centre and ends or the points of a CW line. Each valve clicks as it opens and as it closes, 1 with its leaflets at a
- * point and fading as they lie farther from the nearest one.
+ * Directional valve click (decision 103) for a spectral column at `timeInBeatS`, sampled at heart-frame `points`
+ * (x, y, z, …): the PW gate centre and ends or the points of a CW line. Each valve clicks as it opens (motion along
+ * `+axis`) and closes (motion along `-axis`), projecting onto `-rayHeartDir` for authentic clinical click polarity.
  */
-export function valveClickWeight(
+export function valveClickSignal(
   heart: HeartModel,
   hp: HeartPose,
   tables: BeatTables,
   timeInBeatS: number,
   points: ArrayLike<number>,
+  rayHeartDir?: { x: number; y: number; z: number },
   receivedPower?: ArrayLike<number>,
-): number {
+): ValveClickSignal {
   const A = heartAnchors(heart);
   const events = valveEventTimes(tables);
   const rr = tables.rrS;
@@ -84,11 +95,11 @@ export function valveClickWeight(
     },
   ];
   let weight = 0;
+  let dirAccum = 0;
   for (const v of valves) {
-    const inTime = Math.max(
-      clickTime(timeInBeatS, v.times[0], rr),
-      clickTime(timeInBeatS, v.times[1], rr),
-    );
+    const openW = clickTime(timeInBeatS, v.times[0], rr);
+    const closeW = clickTime(timeInBeatS, v.times[1], rr);
+    const inTime = Math.max(openW, closeW);
     if (inTime < 1e-3) continue;
     let near = 0;
     for (let i = 0; i + 2 < points.length; i += 3)
@@ -114,7 +125,29 @@ export function valveClickWeight(
         ) * (receivedPower?.[i / 3] ?? 1),
       );
     if (near < 0.02) continue;
-    weight += near * inTime;
+    const contrib = near * inTime;
+    weight += contrib;
+    if (rayHeartDir) {
+      const axisDotRay = v.a[0] * rayHeartDir.x + v.a[1] * rayHeartDir.y + v.a[2] * rayHeartDir.z;
+      const openSign = (openW - closeW) / Math.max(1e-6, openW + closeW);
+      // Opening moves along +axis, closing along -axis; positive Doppler is toward probe (-rayHeartDir).
+      dirAccum += contrib * (-axisDotRay * openSign);
+    }
   }
-  return weight;
+  const direction = weight > 1e-6 ? Math.max(-1, Math.min(1, dirAccum / weight)) : 0;
+  return { weight, direction };
+}
+
+/**
+ * Scalar valve click weight (decision 103) for a spectral column at `timeInBeatS`.
+ */
+export function valveClickWeight(
+  heart: HeartModel,
+  hp: HeartPose,
+  tables: BeatTables,
+  timeInBeatS: number,
+  points: ArrayLike<number>,
+  receivedPower?: ArrayLike<number>,
+): number {
+  return valveClickSignal(heart, hp, tables, timeInBeatS, points, undefined, receivedPower).weight;
 }

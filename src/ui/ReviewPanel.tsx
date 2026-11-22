@@ -85,12 +85,12 @@ export function ReviewPanel() {
     }
   };
   const copyReport = () =>
-    copyText(reportToMarkdown(report()), 'Informe copiado al portapapeles: pégalo en el chat.');
+    copyText(reportToMarkdown(report()), 'Informe copiado al portapapeles.');
   // one marker with its secondary points and the exact state of the frame (decision 340)
   const copyMarker = (id: string, n: number) =>
     copyText(
       reportToMarkdown(markerReport(report(), id)),
-      `Marcador ${n} copiado con el estado del cuadro: pégalo en el chat.`,
+      `Marcador ${n} copiado con el estado del cuadro.`,
     );
 
   const copyImage = async () => {
@@ -112,7 +112,7 @@ export function ReviewPanel() {
     s.loadReviewReport(r);
     setPasted('');
     setStatus(
-      `Informe cargado: ${r.markers.length} marcador(es) de ${r.author === 'claude' ? 'Claude' : 'usuario'} sobre ${r.caseId}.`,
+      `Informe cargado: ${r.markers.length} marcador(es) de ${r.author === 'claude' ? 'revisión externa' : 'usuario'} sobre ${r.caseId}.`,
     );
   };
 
@@ -121,10 +121,10 @@ export function ReviewPanel() {
       <Section title="Modo revisión">
         <p className="small">
           Clic sobre la imagen o sobre el torso 3D deja un marcador numerado con lo que el modelo
-          tiene debajo: la estructura se resalta en la imagen y el marcador dice de dónde viene el
+          tiene debajo: la estructura se resalta en la imagen y el marcador indica de dónde viene el
           eco ahí (tejido, ruido, reverberación, lóbulos, sombra). Con el lápiz rodeas a mano lo que
-          no sea una estructura. Copia el informe o un marcador y pégalo en el chat: incluye el
-          estado exacto para reproducir el cuadro.
+          no sea una estructura. Copia el informe o un marcador para documentar o reproducir el
+          cuadro exacto.
         </p>
         <div className="seg review-tool" role="group" aria-label="Herramienta de revisión">
           <button
@@ -151,7 +151,7 @@ export function ReviewPanel() {
         </div>
         {s.source && (
           <div className="review-source">
-            Informe cargado de {s.source.author === 'claude' ? 'Claude' : 'usuario'} (
+            Informe cargado de {s.source.author === 'claude' ? 'revisión externa' : 'usuario'} (
             {s.source.createdAt.slice(0, 16).replace('T', ' ')}).
           </div>
         )}
@@ -340,7 +340,7 @@ export function ReviewPanel() {
                     </button>
                     <button
                       aria-label={`Copiar el marcador ${m.n}`}
-                      data-tip="Copia este marcador con el estado del cuadro, listo para el chat"
+                      data-tip="Copia este marcador con el estado exacto del cuadro"
                       onClick={(e) => {
                         e.stopPropagation();
                         void copyMarker(m.id, m.n);
@@ -367,8 +367,8 @@ export function ReviewPanel() {
       )}
       <Section title="Cargar un informe">
         <p className="small">
-          Pega aquí un informe (el tuyo o uno de Claude): la app restaura el caso, el paciente, la
-          sonda y la consola, y muestra sus marcadores.
+          Pega aquí un informe guardado: la aplicación restaura el caso, el paciente, la sonda y la
+          consola, y muestra sus marcadores.
         </p>
         <textarea
           className="review-note"

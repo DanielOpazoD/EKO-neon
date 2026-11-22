@@ -1,4 +1,5 @@
 import { makeTexture2D } from './glHelpers';
+import type { PolarGBuffer } from './deferredDoppler';
 
 /**
  * Owns all polar-grid size-dependent WebGL2 render target textures, framebuffers, and
@@ -45,6 +46,19 @@ export class GlRenderTargets {
   readPacked = new Uint8Array(0);
 
   constructor(private readonly gl: WebGL2RenderingContext) {}
+
+  /** Polar G-Buffer view of the GPU-resident B-mode anatomy targets consumed by deferred Doppler passes. */
+  gbuffer(ready: boolean, version: number): PolarGBuffer {
+    return {
+      ready: ready && this.texD0 !== null && this.texB1 !== null,
+      w: this.w,
+      h: this.h,
+      version,
+      envTex: this.texD0,
+      idsTex: this.texB1,
+      packedTex: this.texPacked,
+    };
+  }
 
   /** Allocate or resize all polar FBOs and readback buffers. Returns true if reallocated. */
   ensure(w: number, h: number): boolean {

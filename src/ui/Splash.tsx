@@ -7,7 +7,8 @@ import { useHudStore, useSimStore } from '@/app/store';
  * fading over 350 ms; the navigator may still be loading then, and its own placeholder says so in the rail.
  */
 export function Splash() {
-  const hud = useHudStore((h) => h.hud);
+  const hasHud = useHudStore((h) => h.hud !== null);
+  const gpuOk = useHudStore((h) => h.hud?.stats['gpu'] === 'ok');
   const workerMode = useSimStore((s) => s.workerMode);
   const navigatorReady = useSimStore((s) => s.navigatorReady);
   const showTorso = useSimStore((s) => s.ui.showTorso && !s.ui.minimal);
@@ -20,14 +21,14 @@ export function Splash() {
     const id = window.setTimeout(() => setWaitedTooLong(true), 15_000);
     return () => window.clearTimeout(id);
   }, []);
-  const leaving = hud !== null || error !== null || waitedTooLong;
+  const leaving = hasHud || error !== null || waitedTooLong;
   useEffect(() => {
     if (!leaving || gone) return;
     const id = window.setTimeout(() => setGone(true), 380);
     return () => window.clearTimeout(id);
   }, [leaving, gone]);
   if (gone) return null;
-  const gpu = hud ? (hud.stats['gpu'] === 'ok' ? 'trazado en la GPU' : 'trazado en la CPU') : '';
+  const gpu = hasHud ? (gpuOk ? 'trazado en la GPU' : 'trazado en la CPU') : '';
   const rows: { label: string; done: boolean; detail?: string }[] = [
     {
       label: 'Motor de simulación',
@@ -35,7 +36,7 @@ export function Splash() {
       detail: workerMode === 'inline' ? 'en el hilo de la interfaz' : undefined,
     },
     ...(showTorso ? [{ label: 'Navegador 3D', done: navigatorReady }] : []),
-    { label: 'Primera imagen', done: hud !== null, detail: gpu || undefined },
+    { label: 'Primera imagen', done: hasHud, detail: gpu || undefined },
   ];
   return (
     <div

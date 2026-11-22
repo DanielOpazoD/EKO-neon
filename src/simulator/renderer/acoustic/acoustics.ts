@@ -200,6 +200,12 @@ export const ATTEN_NP_PER_DB = 0.23;
 export const HARMONIC_ATTEN_FACTOR = 1.2;
 /** The attenuation of average soft tissue (dB/cm/MHz, one way) against which shadows and depth are judged. */
 export const SOFT_TISSUE_ATTEN_DB = 0.5;
+/**
+ * Excess one-way attenuation (dB·cm⁻¹·MHz⁻¹) added to superficial chest-wall fat and intercostal muscle
+ * at maximum difficult-window attenuation (windowAttenuation = 1). Produces realistic SNR loss with
+ * habitus/obesity that rewards lowering transmit frequency and adjusting TGC.
+ */
+export const CHEST_WALL_ATTEN_DB = 0.85;
 /** Frequency (MHz) the attenuation of an acquisition scales with: the transmit frequency, ×1.2 with harmonics. */
 export function attenuationFrequencyMHz(frequencyMHz: number, harmonics: boolean): number {
   return frequencyMHz * (harmonics ? HARMONIC_ATTEN_FACTOR : 1);
@@ -487,6 +493,7 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   PHASOR_IM_B,
   ATTEN_NP_PER_DB,
   SOFT_TISSUE_ATTEN_DB,
+  CHEST_WALL_ATTEN_DB,
   CALCIUM_ATTEN_THRESHOLD,
   CALCIUM_ATTEN_DB,
   TRANSMISSION_FLOOR,

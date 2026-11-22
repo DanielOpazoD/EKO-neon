@@ -49,7 +49,7 @@ export function scenePhysicsFor(
     frequencyMHz: settings.frequencyMHz,
     harmonics: settings.harmonics,
     clutterLevel: Math.min(1, w.clutterLevel + 0.6 * a.clutter) + w.emphysemaScatter * 0.5,
-    windowAttenuation: w.chestWallAttenuation,
+    windowAttenuation: Math.min(1, w.chestWallAttenuation + 0.25 * w.obesityAttenuation),
     seed: opts.seed ?? c.seed,
     beamWidth: a.beamWidth,
     sideLobe: a.sideLobe,

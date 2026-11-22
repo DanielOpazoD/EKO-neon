@@ -17,23 +17,16 @@ const MODES = MODALITY_LIST;
 export function ModeBar() {
   const s = useSimStore(
     useShallow((st) => ({
-      cineOffset: st.cineOffset,
-      cineSpeed: st.cineSpeed,
-      fpsUi: st.fpsUi,
       frozen: st.frozen,
-      jumpCinePhase: st.jumpCinePhase,
       modality: st.modality,
-      mode: st.mode,
-      setCineOffset: st.setCineOffset,
-      setCineSpeed: st.setCineSpeed,
       setModality: st.setModality,
       setUi: st.setUi,
       toggleFreeze: st.toggleFreeze,
-      ui: st.ui,
+      showTorso: st.ui.showTorso,
+      minimal: st.ui.minimal,
       workerMode: st.workerMode,
     })),
   );
-  const hud = useHudStore((h) => h.hud);
   const segRef = useRef<HTMLDivElement>(null);
   const pill = useSlidingPill(segRef, s.modality);
   return (
@@ -68,86 +61,17 @@ export function ModeBar() {
         <i className="run-dot" aria-hidden="true" />
         {s.frozen ? 'Reanudar' : 'Congelar'}
       </button>
-      {s.frozen && hud && (
-        <div className="cine">
-          <CinePlay
-            length={hud.cineLength}
-            spanS={hud.cineWindow.endS - hud.cineWindow.startS}
-            speed={s.cineSpeed}
-          />
-          <button
-            type="button"
-            className="cine-chip"
-            aria-label="Cuadro anterior"
-            data-tip="Cuadro anterior"
-            disabled={s.cineOffset <= -(hud.cineLength - 1)}
-            onClick={() => s.setCineOffset(s.cineOffset - 1)}
-          >
-            ‹
-          </button>
-          <button
-            type="button"
-            className="cine-chip"
-            aria-label="Cuadro siguiente"
-            data-tip="Cuadro siguiente"
-            disabled={s.cineOffset >= 0}
-            onClick={() => s.setCineOffset(s.cineOffset + 1)}
-          >
-            ›
-          </button>
-          <button
-            type="button"
-            className="cine-chip"
-            aria-label={`Velocidad del cine ${s.cineSpeed}×`}
-            data-tip="Cambiar velocidad del bucle (1× / 0.5× / 0.25×)"
-            onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
-          >
-            {s.cineSpeed}×
-          </button>
-          <button
-            type="button"
-            className="cine-chip cine-phase"
-            aria-label="Ir a telediástole"
-            data-tip="Saltar a telediástole (TD · onda R)"
-            disabled={hud.cineLength < 2}
-            onClick={() => s.jumpCinePhase('ed')}
-          >
-            TD
-          </button>
-          <button
-            type="button"
-            className="cine-chip cine-phase"
-            aria-label="Ir a telesístole"
-            data-tip="Saltar a telesístole (TS · volumen mínimo VI)"
-            disabled={hud.cineLength < 2}
-            onClick={() => s.jumpCinePhase('es')}
-          >
-            TS
-          </button>
-          <input
-            type="range"
-            aria-label="Cine"
-            min={-(hud.cineLength - 1)}
-            max={0}
-            value={s.cineOffset}
-            onChange={(e) => s.setCineOffset(Number(e.target.value))}
-          />
-          <span className="small cine-read">
-            {hud.cineLength + s.cineOffset}/{hud.cineLength} ·{' '}
-            {(hud.cineFramePhase * 100).toFixed(0)}%
-          </span>
-        </div>
-      )}
+      {s.frozen && <CineControls />}
       <span className="spacer" style={{ flex: 1 }} />
       {/* no label (decision 244): the button is an icon, its name stays «Torso 3D» for assistive technology */}
       <button
-        onClick={() => s.setUi({ showTorso: !s.ui.showTorso })}
-        className={`icon-btn${s.ui.showTorso ? ' active' : ''}`}
+        onClick={() => s.setUi({ showTorso: !s.showTorso })}
+        className={`icon-btn${s.showTorso ? ' active' : ''}`}
         aria-label="Torso 3D"
-        data-tip={s.ui.minimal ? undefined : 'Mostrar u ocultar el torso 3D'}
-        data-tip-key={s.ui.minimal ? undefined : 'H'}
-        aria-pressed={s.ui.showTorso}
-        disabled={s.ui.minimal}
+        data-tip={s.minimal ? undefined : 'Mostrar u ocultar el torso 3D'}
+        data-tip-key={s.minimal ? undefined : 'H'}
+        aria-pressed={s.showTorso}
+        disabled={s.minimal}
       >
         <IconTorso />
       </button>
@@ -160,6 +84,93 @@ export function ModeBar() {
           Sin worker
         </span>
       )}
+    </div>
+  );
+}
+
+/** Mounted only while frozen so live ModeBar never subscribes to high-frequency HUD ticks. */
+function CineControls() {
+  const s = useSimStore(
+    useShallow((st) => ({
+      cineOffset: st.cineOffset,
+      cineSpeed: st.cineSpeed,
+      jumpCinePhase: st.jumpCinePhase,
+      setCineOffset: st.setCineOffset,
+      setCineSpeed: st.setCineSpeed,
+    })),
+  );
+  const hud = useHudStore(
+    useShallow((h) => ({
+      hasHud: h.hud !== null,
+      cineLength: h.hud?.cineLength ?? 0,
+      spanS: h.hud ? h.hud.cineWindow.endS - h.hud.cineWindow.startS : 0,
+      cineFramePhase: h.hud?.cineFramePhase ?? 0,
+    })),
+  );
+  if (!hud.hasHud) return null;
+  return (
+    <div className="cine">
+      <CinePlay length={hud.cineLength} spanS={hud.spanS} speed={s.cineSpeed} />
+      <button
+        type="button"
+        className="cine-chip"
+        aria-label="Cuadro anterior"
+        data-tip="Cuadro anterior"
+        disabled={s.cineOffset <= -(hud.cineLength - 1)}
+        onClick={() => s.setCineOffset(s.cineOffset - 1)}
+      >
+        ‹
+      </button>
+      <button
+        type="button"
+        className="cine-chip"
+        aria-label="Cuadro siguiente"
+        data-tip="Cuadro siguiente"
+        disabled={s.cineOffset >= 0}
+        onClick={() => s.setCineOffset(s.cineOffset + 1)}
+      >
+        ›
+      </button>
+      <button
+        type="button"
+        className="cine-chip"
+        aria-label={`Velocidad del cine ${s.cineSpeed}×`}
+        data-tip="Cambiar velocidad del bucle (1× / 0.5× / 0.25×)"
+        onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
+      >
+        {s.cineSpeed}×
+      </button>
+      <button
+        type="button"
+        className="cine-chip cine-phase"
+        aria-label="Ir a telediástole"
+        data-tip="Saltar a telediástole (TD · onda R)"
+        disabled={hud.cineLength < 2}
+        onClick={() => s.jumpCinePhase('ed')}
+      >
+        TD
+      </button>
+      <button
+        type="button"
+        className="cine-chip cine-phase"
+        aria-label="Ir a telesístole"
+        data-tip="Saltar a telesístole (TS · volumen mínimo VI)"
+        disabled={hud.cineLength < 2}
+        onClick={() => s.jumpCinePhase('es')}
+      >
+        TS
+      </button>
+      <input
+        type="range"
+        aria-label="Cine"
+        min={-(hud.cineLength - 1)}
+        max={0}
+        value={s.cineOffset}
+        onChange={(e) => s.setCineOffset(Number(e.target.value))}
+      />
+      <span className="small cine-read">
+        {hud.cineLength + s.cineOffset}/{hud.cineLength} · {(hud.cineFramePhase * 100).toFixed(0)}%
+      </span>
     </div>
   );
 }
@@ -195,20 +206,6 @@ function ContextChip() {
 
 /** ⋯ menu: interface toggles (checkable) plus the secondary actions, per the minimal-console spec. */
 function OverflowMenu() {
-  const s = useSimStore(
-    useShallow((st) => ({
-      caseId: st.caseId,
-      examFinished: st.examFinished,
-      mode: st.mode,
-      setUi: st.setUi,
-      ui: st.ui,
-    })),
-  );
-  const policy = modePolicy(s.mode);
-  const restartTutorial = () => {
-    s.setUi({ tutorialDone: false });
-    window.location.reload();
-  };
   const { open, setOpen, wrap } = usePopover();
   const [recording, setRecording] = useState(false);
 
@@ -225,99 +222,141 @@ function OverflowMenu() {
         <IconSliders />
       </button>
       {open && (
-        <div className="menu" role="menu" aria-label="Paneles y acciones">
-          <MenuCap>Revisión</MenuCap>
-          <CheckItem
-            label="Modo revisión"
-            checked={s.ui.reviewMode}
-            onToggle={() =>
-              s.setUi({
-                reviewMode: !s.ui.reviewMode,
-                consoleTab: s.ui.reviewMode ? 'adquirir' : 'revisar',
-              })
-            }
-            disabled={!policy.devToolsAllowed}
-            hint="Marca sobre la imagen lo que ves mal y copia el informe (R)"
-          />
-          <MenuCap>Mostrar</MenuCap>
-          <CheckItem
-            label="Ayudas de vista"
-            checked={s.ui.showHints}
-            onToggle={() => s.setUi({ showHints: !s.ui.showHints })}
-            disabled={!policy.hintsEnabled}
-            hint="Puntuación y sugerencias de adquisición"
-          />
-          <CheckItem
-            label="Superposición física"
-            checked={s.ui.showPhysics}
-            onToggle={() => s.setUi({ showPhysics: !s.ui.showPhysics })}
-            disabled={!policy.devToolsAllowed}
-            hint="Líneas de barrido y zona focal"
-          />
-          <CheckItem
-            label="Datos sobre imagen"
-            checked={s.ui.showHud}
-            onToggle={() => s.setUi({ showHud: !s.ui.showHud })}
-            hint="Caso, FC y parámetros en las esquinas"
-          />
-          <CheckItem
-            label="Interfaz limpia"
-            checked={s.ui.minimal}
-            onToggle={() => s.setUi({ minimal: !s.ui.minimal })}
-            hint="Solo imagen y consola — oculta el rail izquierdo"
-          />
-          <CheckItem
-            label="Modo sala"
-            checked={s.ui.roomMode}
-            onToggle={() => s.setUi({ roomMode: !s.ui.roomMode })}
-            hint="Atenúa todo salvo la imagen, como en la sala a oscuras"
-          />
-          <CheckItem
-            label="ECG"
-            checked={s.ui.showEcg}
-            onToggle={() => s.setUi({ showEcg: !s.ui.showEcg })}
-          />
-          <CheckItem
-            label="Panel Dev"
-            checked={s.ui.devPanel}
-            onToggle={() => s.setUi({ devPanel: !s.ui.devPanel })}
-            disabled={!policy.devToolsAllowed}
-          />
+        <OverflowMenuContent
+          recording={recording}
+          setRecording={setRecording}
+          close={() => setOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function OverflowMenuContent({
+  recording,
+  setRecording,
+  close,
+}: {
+  recording: boolean;
+  setRecording: (v: boolean) => void;
+  close: () => void;
+}) {
+  const s = useSimStore(
+    useShallow((st) => ({
+      caseId: st.caseId,
+      examFinished: st.examFinished,
+      mode: st.mode,
+      setUi: st.setUi,
+      ui: st.ui,
+    })),
+  );
+  const policy = modePolicy(s.mode);
+  const devOn = policy.devToolsAllowed && s.ui.devMode;
+
+  return (
+    <div className="menu" role="menu" aria-label="Paneles y acciones">
+      <MenuCap>Mostrar</MenuCap>
+      <CheckItem
+        label="Ayudas de vista"
+        checked={s.ui.showHints}
+        onToggle={() => s.setUi({ showHints: !s.ui.showHints })}
+        disabled={!policy.hintsEnabled}
+        hint="Puntuación y sugerencias de adquisición"
+      />
+      <CheckItem
+        label="Datos sobre imagen"
+        checked={s.ui.showHud}
+        onToggle={() => s.setUi({ showHud: !s.ui.showHud })}
+        hint="Caso, FC y parámetros en las esquinas"
+      />
+      <CheckItem
+        label="Interfaz limpia"
+        checked={s.ui.minimal}
+        onToggle={() => s.setUi({ minimal: !s.ui.minimal })}
+        hint="Solo imagen y consola — oculta el rail izquierdo"
+      />
+      <CheckItem
+        label="Modo sala"
+        checked={s.ui.roomMode}
+        onToggle={() => s.setUi({ roomMode: !s.ui.roomMode })}
+        hint="Atenúa todo salvo la imagen, como en la sala a oscuras"
+      />
+      <CheckItem
+        label="ECG"
+        checked={s.ui.showEcg}
+        onToggle={() => s.setUi({ showEcg: !s.ui.showEcg })}
+      />
+      <div className="menu-sep" />
+      <MenuCap>Acciones</MenuCap>
+      <ActionItem
+        label="Guardar imagen PNG"
+        onClick={() => {
+          exportDisplayPng(exportCaseTag(s.mode, s.examFinished, s.caseId));
+          close();
+        }}
+      />
+      <ActionItem
+        label={recording ? 'Grabando clip WebM…' : 'Exportar clip WebM (3 s)'}
+        onClick={() => {
+          if (recording) return;
+          setRecording(true);
+          close();
+          void recordDisplayClip(exportCaseTag(s.mode, s.examFinished, s.caseId), 3000).finally(
+            () => setRecording(false),
+          );
+        }}
+      />
+      <ActionItem
+        label="Atajos de teclado"
+        onClick={() => {
+          s.setUi({ shortcutsOpen: true });
+          close();
+        }}
+      />
+      <ActionItem
+        label="Tutorial de controles"
+        onClick={() => {
+          s.setUi({ tutorialDone: false });
+          close();
+        }}
+      />
+      {policy.devToolsAllowed && (
+        <>
           <div className="menu-sep" />
-          <MenuCap>Acciones</MenuCap>
-          <ActionItem
-            label="Guardar imagen PNG"
-            onClick={() => {
-              exportDisplayPng(exportCaseTag(s.mode, s.examFinished, s.caseId));
-              setOpen(false);
-            }}
+          <MenuCap>Desarrollo</MenuCap>
+          <CheckItem
+            label="Modo desarrollador"
+            checked={s.ui.devMode}
+            onToggle={() => s.setUi({ devMode: !s.ui.devMode })}
+            hint="Habilita Lab, anatomía experimental, revisión y telemetría"
           />
-          <ActionItem
-            label={recording ? 'Grabando clip WebM…' : 'Exportar clip WebM (3 s)'}
-            onClick={() => {
-              if (recording) return;
-              setRecording(true);
-              setOpen(false);
-              void recordDisplayClip(exportCaseTag(s.mode, s.examFinished, s.caseId), 3000).finally(
-                () => setRecording(false),
-              );
-            }}
-          />
-          <ActionItem
-            label="Atajos de teclado"
-            onClick={() => {
-              s.setUi({ shortcutsOpen: true });
-              setOpen(false);
-            }}
-          />
-          <ActionItem
-            label="Reiniciar tutorial"
-            onClick={() => {
-              restartTutorial();
-              setOpen(false);
-            }}
-          />
-        </div>
+          {devOn && (
+            <>
+              <CheckItem
+                label="Modo revisión"
+                checked={s.ui.reviewMode}
+                onToggle={() =>
+                  s.setUi({
+                    reviewMode: !s.ui.reviewMode,
+                    consoleTab: s.ui.reviewMode ? 'adquirir' : 'revisar',
+                  })
+                }
+                hint="Marca sobre la imagen para documentar hallazgos (R)"
+              />
+              <CheckItem
+                label="Superposición física"
+                checked={s.ui.showPhysics}
+                onToggle={() => s.setUi({ showPhysics: !s.ui.showPhysics })}
+                hint="Líneas de barrido y zona focal"
+              />
+              <CheckItem
+                label="Panel Dev"
+                checked={s.ui.devPanel}
+                onToggle={() => s.setUi({ devPanel: !s.ui.devPanel })}
+              />
+            </>
+          )}
+        </>
       )}
     </div>
   );

@@ -116,12 +116,37 @@ export function assessDiastolic(input: DiastolicInputs) {
       const available = criteria.filter((c) => c !== null).length;
       const positive = criteria.filter((c) => c === true).length;
       const negative = available - positive;
-      fillingPressure =
-        available < 2 || positive === negative
-          ? 'indeterminate'
-          : positive > negative
-            ? 'elevated'
-            : 'normal';
+      if (available < 2) {
+        fillingPressure = 'indeterminate';
+      } else if (positive > negative) {
+        fillingPressure = 'elevated';
+      } else if (negative > positive) {
+        fillingPressure = 'normal';
+      } else {
+        // ASE 2025 supplemental tie-breaker when 2 primary criteria disagree (1 positive, 1 negative):
+        // Pulmonary vein S/D < 1 (only when not confounded by significant MR / AF, i.e. laSizeReliable),
+        // or LA reservoir strain ≤ 18 % if not already used as criterion 3.
+        const usedLaviForC3 = input.laSizeReliable && valid(input.laviMlM2);
+        const strainTie =
+          usedLaviForC3 && valid(input.laReservoirStrainPct)
+            ? input.laReservoirStrainPct <= 18
+            : null;
+        const pvTie =
+          input.laSizeReliable && valid(input.pulmonaryVeinSd) && input.pulmonaryVeinSd > 0
+            ? input.pulmonaryVeinSd < 1
+            : null;
+        if (pvTie === true) {
+          fillingPressure = 'elevated';
+          pressureEvidence.push('pulmonary-vein-sd');
+        } else if (strainTie === true) {
+          fillingPressure = 'elevated';
+          pressureEvidence.push('la-reservoir-strain');
+        } else if (pvTie === false || strainTie === false) {
+          fillingPressure = 'normal';
+        } else {
+          fillingPressure = 'indeterminate';
+        }
+      }
     }
   }
   return {

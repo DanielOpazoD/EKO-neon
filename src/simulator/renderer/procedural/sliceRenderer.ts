@@ -16,8 +16,6 @@ import {
   buildLineKernels,
   buildPsfKernels,
   formEnvelope,
-  formEnvelopeLine,
-  LINE_LATTICE_PATH,
   lineKernelKey,
   psfKey,
   sideLobeLevelDb,
@@ -28,8 +26,8 @@ import {
 import {
   ATTEN_NP_PER_DB,
   attenuationFrequencyMHz,
+  CHEST_WALL_ATTEN_DB,
   SOFT_TISSUE_ATTEN_DB,
-  BLOOD_DECORRELATION_CELLS,
   BLOOD_HARMONIC_SIGMA,
   bloodShiftCells,
   CALCIUM_AMP,
@@ -83,6 +81,7 @@ import {
   type LineContext,
 } from './beamMarch';
 import { drawLungFrame, lungEcho, pleuraEcho } from './lungEcho';
+import { MmodeLineBuffers, synthesizeMmodeLine } from './mmodeScatter';
 
 export { beamMarch, clutterLoss };
 
@@ -139,16 +138,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
   private heartFlag = new Uint8Array(0);
   /** Sample of each frame line where it enters lung, −1 where it does not (decision 221). */
   private lungEntry = new Int32Array(0);
-  private lineRe = new Float32Array(0);
-  private lineIm = new Float32Array(0);
-  private lineTmpRe = new Float32Array(0);
-  private lineTmpIm = new Float32Array(0);
-  private lineSigma = new Float32Array(0);
-  private lineAcross = new Float32Array(0);
-  private lineElevation = new Float32Array(0);
-  private lineAlong = new Float32Array(0);
-  private lineGrainScale = new Float32Array(0);
-  private lineGrainCells = new Float32Array(0);
+  private mmode = new MmodeLineBuffers();
   private psf: PsfKernels | null = null;
   private linePsf: LineKernels | null = null;
   private acA = { sigma: 0, spec: 0 };
@@ -302,131 +292,13 @@ export class ProceduralSliceRenderer implements RendererBackend {
     tr: Float32Array,
     ti: Uint8Array,
   ): void {
-    if (this.lineRe.length !== samples) {
-      this.lineRe = new Float32Array(samples);
-      this.lineIm = new Float32Array(samples);
-      this.lineTmpRe = new Float32Array(samples);
-      this.lineTmpIm = new Float32Array(samples);
-      this.lineSigma = new Float32Array(samples);
-      this.lineAcross = new Float32Array(samples);
-      this.lineElevation = new Float32Array(samples);
-      this.lineAlong = new Float32Array(samples);
-      this.lineGrainScale = new Float32Array(samples);
-      this.lineGrainCells = new Float32Array(samples);
-    }
-    this.lineSigma.fill(0);
-    this.lineGrainScale.fill(0);
     const spec: PolarFrameSpec = { ...frame, samples, elevationSamples: 1 };
     const k = this.lineKernels(scene, frame, samples);
     const ctx = this.prepare(scene, beam, spec);
-    const ct = Math.cos(theta),
-      sn = Math.sin(theta);
-    const hf = scene.heart.frame;
-    const lat = {
-      x: beam.lateral.x * ct - beam.forward.x * sn,
-      y: beam.lateral.y * ct - beam.forward.y * sn,
-      z: beam.lateral.z * ct - beam.forward.z * sn,
-    };
-    const fwd = {
-      x: beam.forward.x * ct + beam.lateral.x * sn,
-      y: beam.forward.y * ct + beam.lateral.y * sn,
-      z: beam.forward.z * ct + beam.lateral.z * sn,
-    };
-    const fH = torsoToHeartDir(hf, fwd),
-      lH = torsoToHeartDir(hf, lat),
-      nH = torsoToHeartDir(hf, beam.normal);
-    ctx.line = {
-      kernels: k,
-      torsoAxes: [
-        fwd.x,
-        fwd.y,
-        fwd.z,
-        lat.x,
-        lat.y,
-        lat.z,
-        beam.normal.x,
-        beam.normal.y,
-        beam.normal.z,
-      ],
-      heartAxes: [fH.x, fH.y, fH.z, lH.x, lH.y, lH.z, nH.x, nH.y, nH.z],
-      // a new realization of the flowing blood in every pulse (decision 163)
-      bloodCells: (pulse % 4096) * BLOOD_DECORRELATION_CELLS,
-      sigma: this.lineSigma,
-      across: this.lineAcross,
-      elevation: this.lineElevation,
-      along: this.lineAlong,
-      grainScale: this.lineGrainScale,
-      grainCells: this.lineGrainCells,
-    };
+    ctx.line = this.mmode.prepare(samples, k, beam, scene.heart.frame, theta, pulse);
     const li = Math.round(((theta + frame.sectorRad / 2) / frame.sectorRad) * frame.lines);
-    const re = this.lineRe,
-      im = this.lineIm;
-    this.renderLine(ctx, theta, li, 0, re, im, st, tr, ti);
-    // Scatterers along the beam. Many heart structures carry material coordinates fixed in the heart frame (valves, atrial
-    // and aortic walls, pericardium) or scaled with the whole ventricle, which is invisible in a frame but in an M-mode trace
-    // leaves the speckle standing still while the band moves: horizontal stripes across a moving leaflet. Each run of one
-    // heart structure and tissue along the line is given its own coordinate from the run's centre, so its speckle travels
-    // with it and stretches only by half the thickening. The thorax does not move under the probe: its tissue keeps its
-    // material coordinate, or a chest-wall run ending on the beating heart would drag its speckle along.
-    const { latA, latB, latC } = ctx;
-    const R = SCATTER_FREQ_RATIO;
-    const dr = frame.depthCm / samples;
-    const sigma = this.lineSigma,
-      across = this.lineAcross,
-      elev = this.lineElevation,
-      along = this.lineAlong,
-      grainScale = this.lineGrainScale,
-      grainCells = this.lineGrainCells;
-    const [, pathY, pathZ] = LINE_LATTICE_PATH;
-    for (let a = 0; a < samples;) {
-      let b = a + 1;
-      while (b < samples && st[b] === st[a] && ti[b] === ti[a]) b++;
-      const centre = (a + b) / 2;
-      const offset = st[a]! * 7.31 + ti[a]! * 3.17;
-      for (let i = a; i < b; i++) {
-        const sg = sigma[i]!;
-        if (sg === 0) continue;
-        const uc = Number.isNaN(along[i]!) ? (i + 0.5 - centre) * dr : along[i]!;
-        const u = uc * SCATTER_FREQ;
-        const gs = grainScale[i]!;
-        if (gs > 0) {
-          // the grains of the run travel with it too; across the beam their cell is the beam width or the slice
-          // thickness where those are coarser than the grain
-          const gf = grainCells[i]!;
-          const ug = uc * gf;
-          re[i] =
-            re[i]! +
-            gs *
-              grainCoef(
-                ug + offset + GR_X,
-                across[i]! * Math.min(1, gf / k.lateralCells[i]!) + ug * pathY + GR_Y,
-                elev[i]! * Math.min(1, gf / k.elevationCells[i]!) + ug * pathZ + GR_Z,
-                latA,
-                latB,
-                latC,
-              );
-        }
-        const qx = u + offset,
-          qy = across[i]! + u * pathY,
-          qz = elev[i]! + u * pathZ;
-        re[i] =
-          re[i]! +
-          sg *
-            (latticeNoise3(qx, qy, qz, latA) +
-              latticeNoise3(qx * R + PRB_X, qy * R + PRB_Y, qz * R + PRB_Z, latB) -
-              1) *
-            PHASOR_NORM;
-        im[i] =
-          im[i]! +
-          sg *
-            (latticeNoise3(qx + PIA_X, qy + PIA_Y, qz + PIA_Z, latC) +
-              latticeNoise3(qx * R + PIB_X, qy * R + PIB_Y, qz * R + PIB_Z, latA) -
-              1) *
-            PHASOR_NORM;
-      }
-      a = b;
-    }
-    formEnvelopeLine(re, im, samples, k, amp, this.lineTmpRe, this.lineTmpIm);
+    this.renderLine(ctx, theta, li, 0, this.mmode.re, this.mmode.im, st, tr, ti);
+    synthesizeMmodeLine(this.mmode, ctx, k, frame.depthCm, samples, st, ti, amp);
   }
 
   private prepare(scene: Scene, beam: BeamFrame, spec: PolarFrameSpec): LineContext {
@@ -446,6 +318,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
         (physics.clutterLevel * 2.5 + physics.windowAttenuation * 0.8) *
         (harm ? 0.35 : 1) *
         Math.sqrt(2.5 / f),
+      windowAttenuation: physics.windowAttenuation,
       contact: contactQuality(beam.contact),
       fwdH: torsoToHeartDir(hf, beam.forward),
       latH: torsoToHeartDir(hf, beam.lateral),
@@ -947,8 +820,15 @@ export class ProceduralSliceRenderer implements RendererBackend {
       // attenuation, so a layer loses the same whatever the sampling. Bone, calcium and spine used a fixed 1.2 Np per
       // sample, which made a rib's shadow depend on the quality tier (17 dB between low and high behind 4 mm of rib).
       // a calcified leaflet's calcium attenuates as calcium does (decision 251)
+      const wallExtraDb =
+        !inHeart && (tissue === Tissue.Fat || tissue === Tissue.Muscle)
+          ? CHEST_WALL_ATTEN_DB * ctx.windowAttenuation
+          : 0;
       const attenNp =
-        ATTEN_NP_PER_DB * (props.attenuation + calciumAttenDb(s.extraReflect)) * fAtten * dr;
+        ATTEN_NP_PER_DB *
+        (props.attenuation + wallExtraDb + calciumAttenDb(s.extraReflect)) *
+        fAtten *
+        dr;
       if (atten) atten[idx] = attenNp;
       transmission *= Math.exp(-attenNp);
       if (transmission < TRANSMISSION_FLOOR) transmission = TRANSMISSION_FLOOR;

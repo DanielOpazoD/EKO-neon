@@ -2,6 +2,12 @@ import { aliasVelocity } from '@/clinical/formulas';
 import { SPEED_OF_SOUND_MPS } from '@/core/units';
 import { hash3 } from '@/core/random';
 import { APERTURE_MM } from '@/simulator/probe/transducer';
+import {
+  acousticSnrScale,
+  clutterFilterPowerResponse,
+  depthLimitedPulsedAcquisition,
+  transitBroadeningMps,
+} from './scatteringModel';
 
 /**
  * Spectral Doppler column generation (spec 62): velocity distribution → histogram over the
@@ -93,9 +99,15 @@ export interface VelocitySample {
   v: number; // axial velocity m/s (positive = toward the transducer)
   weight: number;
   dispersion: number;
-  /** Speed across the beam (m/s) and depth (cm) of the sample: they set its geometric spectral broadening. Omitted: none. */
+  /** Speed across the beam (m/s) and depth (cm) of the sample: they set its geometric and transit broadening. Omitted: none. */
   vPerp?: number;
   depthCm?: number;
+  /** Optional physical beam/gate parameters for transit-time broadening (cm / MHz). */
+  focusCm?: number;
+  gateLengthCm?: number | null;
+  frequencyMHz?: number;
+  /** Optional axial blood acceleration (m/s², positive toward transducer) for intra-packet chirp broadening. */
+  accelMps2?: number;
 }
 
 /** Spectral resolution as a fraction of a display bin: an estimate over as many pulses as the display has bins. */
@@ -105,12 +117,11 @@ const TURBULENT_SPREAD = 0.9;
 
 /**
  * Standard deviations (m/s) of one sample's spectral line above and below its velocity (decision 96). Above: the spectral
- * resolution, which follows the scale because the pulse repetition frequency does, and the geometric broadening of an
- * aperture seen from the sample (Newhouse et al. 1980: a spread of v⊥·D/F in velocity, here uniform, σ = v⊥·D/(F·√12)).
+ * resolution, which follows the scale because the pulse repetition frequency does, the geometric broadening of an
+ * aperture seen from the sample (Newhouse et al. 1980: a spread of v⊥·D/F in velocity, here uniform, σ = v⊥·D/(F·√12)),
+ * and physical transit-time broadening across the finite beam width and range gate.
  * Below, toward the baseline: also the turbulent spread, which fills the spectral window under the envelope instead of
- * lifting it. The envelope used to be a symmetric Gaussian of 0.035·scale + 0.02 m/s plus 0.9·dispersion·|v|: at the
- * mitral tips its outer edge read 0.97 m/s for a 0.75 m/s flow, tissue Doppler 0.15 m/s at a septal base moving at 0.096 m/s, and a
- * 3.8 m/s stenotic jet reached the top of a 6 m/s scale.
+ * lifting it.
  */
 export function spectralSpread(
   smp: VelocitySample,
@@ -122,40 +133,65 @@ export function spectralSpread(
     smp.vPerp && smp.depthCm
       ? (Math.abs(smp.vPerp) * (APERTURE_MM / 10)) / (smp.depthCm * Math.sqrt(12))
       : 0;
-  const up = Math.hypot(resolution, geometric);
+  const transit =
+    smp.depthCm && smp.frequencyMHz
+      ? transitBroadeningMps(
+          smp.v,
+          smp.vPerp ?? 0,
+          smp.depthCm,
+          smp.focusCm ?? 9,
+          smp.frequencyMHz,
+          smp.gateLengthCm ?? null,
+        )
+      : 0;
+  const up = Math.hypot(resolution, geometric, transit);
   return { up, down: Math.hypot(up, TURBULENT_SPREAD * smp.dispersion * Math.abs(smp.v)) };
 }
 
 /**
  * Raw spectral distribution of one column (SPECTRAL_BINS values, index 0 = vMax at top) before gain and compression.
  * Each sample adds a line with the spread of `spectralSpread` on each side (decisions 87 and 96):
- * - PW (`aliasing`): centred on the aliased velocity and summed around the displayed span, so the part of the distribution
- *   that crosses Nyquist reappears at the other end. It used to fold only the centre and cut the Gaussian at the screen
- *   edge, so energy near Nyquist was lost.
- * - CW: centred on the true velocity, and only the part inside the displayed range is drawn. The velocity used to be
- *   clamped to the range first, so an out-of-range jet stacked at the edge and a wider scale did not move it back.
+ * - PW (`aliasing`): centred on the depth-limited aliased velocity and summed around the displayed span, so the part of
+ *   the distribution that crosses Nyquist reappears at the other end.
+ * - CW: centred on the true velocity, and only the part inside the displayed range is drawn.
  */
 export function accumulateSpectrum(
   samples: readonly VelocitySample[],
   s: SpectralSettings,
   aliasing: boolean,
   out: Float32Array,
+  gateDepthCm?: number,
+  frequencyMHz?: number,
 ): void {
-  const { vMin, vMax } = spectralRange(s);
+  const effectiveSettings =
+    aliasing && gateDepthCm !== undefined && frequencyMHz !== undefined
+      ? {
+          ...s,
+          scaleMps: depthLimitedPulsedAcquisition(
+            gateDepthCm,
+            s.gateLengthCm,
+            frequencyMHz,
+            s.scaleMps,
+          ).effectiveScaleMps,
+        }
+      : s;
+  const { vMin, vMax } = spectralRange(effectiveSettings);
   const span = vMax - vMin;
   out.fill(0);
   for (const smp of samples) {
     if (smp.weight <= 0) continue;
-    if (Math.abs(smp.v) < s.wallFilterMps) continue; // wall filter on true velocity
-    let v = s.invert ? -smp.v : smp.v;
-    if (aliasing) v = aliasVelocity(v, s.scaleMps, s.baselineShiftMps);
-    const spread = spectralSpread(smp, s);
+    if (Math.abs(smp.v) < effectiveSettings.wallFilterMps) continue; // wall filter on true velocity
+    const wfGain = clutterFilterPowerResponse(smp.v, effectiveSettings.wallFilterMps);
+    if (wfGain <= 0) continue;
+    let v = effectiveSettings.invert ? -smp.v : smp.v;
+    if (aliasing) v = aliasVelocity(v, effectiveSettings.scaleMps, effectiveSettings.baselineShiftMps);
+    const spread = spectralSpread(smp, effectiveSettings);
     const centerBin = ((vMax - v) / span) * SPECTRAL_BINS;
     const upBins = (spread.up / span) * SPECTRAL_BINS;
     const downBins = (spread.down / span) * SPECTRAL_BINS;
     // turbulence spreads toward lower speed: bins grow as the displayed velocity falls, so that side is +bins for a flow
     // displayed toward the transducer, and stays so once it aliases (a slower flow wraps to a lower displayed velocity)
-    const baselineSide = smp.v >= 0 !== s.invert ? 1 : -1;
+    const baselineSide = smp.v >= 0 !== effectiveSettings.invert ? 1 : -1;
     const loSpan = baselineSide > 0 ? upBins : downBins;
     const hiSpan = baselineSide > 0 ? downBins : upBins;
     let lo = Math.floor(centerBin - 3 * loSpan);
@@ -165,12 +201,10 @@ export function accumulateSpectrum(
       hi = Math.min(SPECTRAL_BINS - 1, hi);
     }
     // the turbulent spread stops at the baseline (decision 246): the velocities in a turbulent jet lie between its own and
-    // zero, and reversed ones, weak, only in its mixing layer. A Gaussian tail that crossed the baseline filled the opposite
-    // channel of a continuous-wave stenotic jet: at its systolic peak 16.7 % of the column's energy lay above +0.1 m/s.
-    // Past the baseline only the estimate's resolution spreads it. Only continuous wave does this: PW and TDI keep the tail,
-    // whose bins wrap with aliasing.
+    // zero, and reversed ones, weak, only in its mixing layer.
     const zeroBin = (vMax / span) * SPECTRAL_BINS;
     const crossesAt = !aliasing && (zeroBin - centerBin) * baselineSide > 0 ? zeroBin : NaN;
+    const weighted = smp.weight * wfGain;
     for (let b = lo; b <= hi; b++) {
       const o = b + 0.5 - centerBin;
       const towardBaseline = o * baselineSide > 0;
@@ -184,7 +218,7 @@ export function accumulateSpectrum(
         w = Math.exp(-0.5 * d * d);
       }
       const k = aliasing ? ((b % SPECTRAL_BINS) + SPECTRAL_BINS) % SPECTRAL_BINS : b;
-      out[k] = (out[k] ?? 0) + smp.weight * w;
+      out[k] = (out[k] ?? 0) + weighted * w;
     }
   }
 }
@@ -201,6 +235,9 @@ export function accumulateSpectrum(
 export const CLICK_SIGMA_S = 0.002;
 const CLICK_LEVEL = 1.5;
 const CLICK_SPREAD = 0.7;
+/** Logarithmic display calibration for valve clicks: crisp specular ticks near baseline rather than full-scale bars. */
+const DISPLAY_CLICK_LEVEL = 0.55;
+const DISPLAY_CLICK_SPREAD = 0.22;
 
 /** Noise floor of a spectral column before gain: each bin adds up to this much, uniformly distributed. */
 const SPECTRAL_NOISE = 0.05;
@@ -240,13 +277,15 @@ export function estimateDurationS(
     (SPECTRAL_BINS * SPEED_OF_SOUND_MPS) / (4 * frequencyMHz * 1e6 * s.scaleMps * activeFraction)
   );
 }
-/** Frequency extent (display bins) of one speckle cell: the resolution of the estimate, whose line has σ = RESOLUTION_BINS. */
-const SPECKLE_BINS = 2.5 * RESOLUTION_BINS;
-/** Dynamic range (dB) of the display from black to white, and the level (dB) above a normalised peak of 1 that is white (declared). */
-const DISPLAY_RANGE_DB = 40;
-const WHITE_DB = 6;
-/** Receiver noise power relative to a normalised peak of 1 (dB): a dark floor with sparse grain (declared). */
-const NOISE_DB = -36;
+/** Frequency extent (display bins) of one speckle cell: finer clinical STFT grain matching display scale. */
+const SPECKLE_BINS = 1.9 * RESOLUTION_BINS;
+/** Overlapping STFT hop fraction of `estimateDurationS` for isotropic fine ultrasound snow instead of horizontal dashes. */
+const SPECKLE_HOP_FRACTION = 0.45;
+/** Dynamic range (dB) of the display from black to white, and the level (dB) above a normalised peak of 1 that is white. */
+const DISPLAY_RANGE_DB = 42;
+const WHITE_DB = 5;
+/** Receiver noise power relative to a normalised peak of 1 (dB): a clean dark floor with sparse clinical snow. */
+const NOISE_DB = -38;
 
 /** Bin-direction lattice of the speckle: for every display bin, its five nearest lattice nodes and their Gaussian weights. */
 const SPECKLE_NODE_OFFSET = 2;
@@ -346,21 +385,37 @@ export function displaySpectrum(
   frequencyMHz: number,
   activeFraction: number,
   addFlowSpeckle = true,
+  clickDirection = 0,
 ): void {
   const { vMin, vMax } = spectralRange(s);
   let max = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, expected[b] ?? 0);
-  const norm = max > 0 ? 1 / (max * 0.8 + 0.2) : 0;
-  const tCells = timeS / estimateDurationS(s, frequencyMHz, activeFraction);
+  const snr = acousticSnrScale(max);
+  const norm = max > 0 ? snr / (max * 0.8 + 0.2) : 0;
+  const tCells = timeS / (SPECKLE_HOP_FRACTION * estimateDurationS(s, frequencyMHz, activeFraction));
   const noise = Math.pow(10, NOISE_DB / 10);
+  const dir = s.invert ? -clickDirection : clickDirection;
   if (addFlowSpeckle) estimateSpeckleColumn(tCells, seed, 17, speckleFlow);
   estimateSpeckleColumn(tCells, seed, 29, speckleNoise);
   for (let b = 0; b < SPECTRAL_BINS; b++) {
     const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin);
-    const clickLevel =
-      click > 0 && Math.abs(v) >= s.wallFilterMps
-        ? click * CLICK_LEVEL * Math.exp(-0.5 * (v / (CLICK_SPREAD * s.scaleMps)) ** 2)
-        : 0;
+    let clickLevel = 0;
+    if (click > 0) {
+      const wf = clutterFilterPowerResponse(v, s.wallFilterMps);
+      if (wf > 0) {
+        const align = dir === 0 ? 0 : Math.sign(v) * dir;
+        const opp = align < 0 ? -align : 0;
+        const ampScale = 1 - 0.78 * opp;
+        const spreadScale = (DISPLAY_CLICK_SPREAD - 0.02) - 0.08 * opp;
+        clickLevel =
+          click *
+          DISPLAY_CLICK_LEVEL *
+          ampScale *
+          wf *
+          Math.exp(-0.5 * (v / (spreadScale * s.scaleMps)) ** 2) *
+          (0.72 + 0.28 * speckleNoise[b]!);
+      }
+    }
     const flow = (expected[b] ?? 0) * norm;
     const power =
       flow * (addFlowSpeckle ? speckleFlow[b]! : 1) + noise * speckleNoise[b]! + clickLevel;
@@ -387,6 +442,7 @@ export function buildSpectralColumn(
   click = 0,
   display?: Float32Array,
   timeS = columnIndex * 0.004,
+  clickDirection = 0,
 ): void {
   accumulateSpectrum(samples, s, aliasing, out);
   presentSpectralColumn(
@@ -399,6 +455,8 @@ export function buildSpectralColumn(
     click,
     display,
     timeS,
+    true,
+    clickDirection,
   );
 }
 
@@ -414,6 +472,7 @@ export function presentSpectralColumn(
   display?: Float32Array,
   timeS = columnIndex * 0.004,
   addFlowSpeckle = true,
+  clickDirection = 0,
 ): void {
   if (display)
     displaySpectrum(
@@ -426,6 +485,7 @@ export function presentSpectralColumn(
       frequencyMHz,
       activeFraction,
       addFlowSpeckle,
+      clickDirection,
     );
   const gainLin = Math.pow(10, s.gainDb / 20);
   const { vMin, vMax } = spectralRange(s);

@@ -174,8 +174,14 @@ export function drawOverlay(
         ctx.fillText(`${v.toFixed(2)}`, W - 4, Math.min(H - 8, Math.max(strip.y + 6, y)));
       }
       ctx.textAlign = 'left';
+      const scaleHalf = (strip.topValue - strip.bottomValue) / 2;
+      const wfText = strip.wallFilterMps === undefined ? '—' : Math.round(strip.wallFilterMps * 100);
+      const pulsedMeta =
+        strip.aliasing && strip.gateDepthCm !== undefined
+          ? `  vN ±${(strip.nyquistMps ?? scaleHalf).toFixed(2)} m/s  gate ${strip.gateDepthCm.toFixed(1)} cm`
+          : `  escala ±${scaleHalf.toFixed(2)} m/s`;
       ctx.fillText(
-        `${modality.toUpperCase()}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s  escala ±${((strip.topValue - strip.bottomValue) / 2).toFixed(2)} m/s  WF ${strip.wallFilterMps === undefined ? '—' : Math.round(strip.wallFilterMps * 100)} cm/s`,
+        `${modality.toUpperCase()}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s${pulsedMeta}  WF ${wfText} cm/s`,
         6,
         strip.y + 8,
       );

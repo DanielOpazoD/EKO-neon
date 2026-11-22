@@ -233,7 +233,10 @@ export function ReportScreen() {
               ))}
               {report.rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="small">
+                  <td
+                    colSpan={4 + (revealed ? 2 : 0) + (s.mode !== 'exam' ? 2 : 0)}
+                    className="small"
+                  >
                     Sin mediciones todavía.
                   </td>
                 </tr>
@@ -272,9 +275,8 @@ export function ReportScreen() {
               <tr>
                 <th>Vista</th>
                 <th>Mínimo</th>
-                {/* the best score of each view would say which view the image showed (decision 154) */}
-                {revealed && <th>Mejor puntuación</th>}
-                {revealed && <th>Estado</th>}
+                <th>Mejor puntuación</th>
+                <th>Estado</th>
               </tr>
             </thead>
             <tbody>
@@ -282,14 +284,12 @@ export function ReportScreen() {
                 <tr key={v.viewId}>
                   <td>{viewLabel(v.viewId)}</td>
                   <td>{v.required}</td>
-                  {revealed && <td>{v.achieved}</td>}
-                  {revealed && (
-                    <td>
-                      <span className={`pill ${v.ok ? 'ok' : 'warn'}`}>
-                        {v.ok ? 'ok' : v.achieved ? 'incompleta' : 'no adquirida'}
-                      </span>
-                    </td>
-                  )}
+                  <td>{v.achieved}</td>
+                  <td>
+                    <span className={`pill ${v.ok ? 'ok' : 'warn'}`}>
+                      {v.ok ? 'ok' : v.achieved ? 'incompleta' : 'no adquirida'}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -422,7 +422,6 @@ export function ReportScreen() {
             <p className="small">
               Adquisición {summary.acquisition.total}/100 · Mediciones {summary.measurements.total}
               /100{summary.impression !== null ? ` · Impresión ${summary.impression}/100` : ''}.
-              Tolerancias y pesos en <code>src/education/scoring</code>.
             </p>
             <table>
               <thead>

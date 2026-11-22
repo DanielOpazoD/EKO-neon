@@ -56,59 +56,86 @@ export const useHudStore = create<{ hud: SimOutput | null; setHud: (h: SimOutput
   }),
 );
 
-export const createUiSlice: SimSliceCreator<UiSlice> = (set) => ({
-  ui: {
-    showTorso: true,
-    showSkeleton: true,
-    navSkin: true,
-    navHeart: true,
-    navChambers: true,
-    navValves: true,
-    navVessels: true,
-    navAxes: true,
-    navCut: false,
-    navWindows: true,
-    navSplit: true,
-    navLabels: true,
-    navSegments: false,
-    imageSegments: false,
-    segmentsOpen: false,
-    segmentModel: 'LV_AHA17',
-    selectedSegment: null,
-    guidanceOpen: false,
-    shortcutsOpen: false,
-    showHints: true,
-    showPhysics: false,
-    devPanel: false,
-    reviewMode: false,
-    reviewFreezeOnMark: true,
-    reviewTool: 'point',
-    showEcg: true,
-    tutorialDone: false,
-    showHud: true,
-    railMini: false,
-    minimal: false,
-    roomMode: false,
-    consoleTab: 'adquirir',
-    screen: 'simulator',
-    ...loadPrefs(),
-  },
-  phaseMarks: null,
-  lvLengthCm: null,
-  error: null,
-  workerMode: 'starting',
-  navigatorReady: false,
-  fpsUi: 0,
+function devModeQueryParam(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return new URLSearchParams(window.location.search).get('dev') === '1';
+  } catch {
+    return false;
+  }
+}
 
-  setUi: (u) =>
-    set((s) => {
-      const ui = { ...s.ui, ...u };
-      savePrefs(ui);
-      return u.reviewMode ? { ui, cinePlaying: false } : { ui };
-    }),
-  setCycleInfo: (marks, lvLengthCm) => set({ phaseMarks: marks, lvLengthCm }),
-  setError: (e) => set({ error: e }),
-  setWorkerMode: (m) => set({ workerMode: m }),
-  setNavigatorReady: (ready) => set({ navigatorReady: ready }),
-  setFpsUi: (f) => set({ fpsUi: f }),
-});
+export const createUiSlice: SimSliceCreator<UiSlice> = (set) => {
+  const persisted = loadPrefs();
+  const devFromUrl = devModeQueryParam();
+  const initialDevMode = devFromUrl || persisted.devMode === true;
+  const initialTab =
+    !initialDevMode && (persisted.consoleTab === 'lab' || persisted.consoleTab === 'revisar')
+      ? 'adquirir'
+      : persisted.consoleTab ?? 'adquirir';
+  return {
+    ui: {
+      showTorso: true,
+      showSkeleton: true,
+      navSkin: true,
+      navHeart: true,
+      navChambers: true,
+      navValves: true,
+      navVessels: true,
+      navAxes: true,
+      navCut: false,
+      navWindows: true,
+      navSplit: true,
+      navLabels: true,
+      navSegments: false,
+      imageSegments: false,
+      segmentsOpen: false,
+      segmentModel: 'LV_AHA17',
+      selectedSegment: null,
+      guidanceOpen: false,
+      shortcutsOpen: false,
+      showHints: true,
+      reviewFreezeOnMark: true,
+      reviewTool: 'point',
+      showEcg: true,
+      tutorialDone: true,
+      showHud: true,
+      railMini: false,
+      minimal: false,
+      roomMode: false,
+      screen: 'simulator',
+      ...persisted,
+      devMode: initialDevMode,
+      devPanel: initialDevMode ? (persisted.devPanel ?? false) : false,
+      showPhysics: initialDevMode ? (persisted.showPhysics ?? false) : false,
+      reviewMode: initialDevMode ? (persisted.reviewMode ?? false) : false,
+      consoleTab: initialTab,
+    },
+    phaseMarks: null,
+    lvLengthCm: null,
+    error: null,
+    workerMode: 'starting',
+    navigatorReady: false,
+    fpsUi: 0,
+
+    setUi: (u) =>
+      set((s) => {
+        const ui = { ...s.ui, ...u };
+        if (u.devMode === false) {
+          ui.devPanel = false;
+          ui.showPhysics = false;
+          ui.reviewMode = false;
+          if (ui.consoleTab === 'lab' || ui.consoleTab === 'revisar') {
+            ui.consoleTab = 'adquirir';
+          }
+        }
+        savePrefs(ui);
+        return u.reviewMode ? { ui, cinePlaying: false } : { ui };
+      }),
+    setCycleInfo: (marks, lvLengthCm) => set({ phaseMarks: marks, lvLengthCm }),
+    setError: (e) => set({ error: e }),
+    setWorkerMode: (m) => set({ workerMode: m }),
+    setNavigatorReady: (ready) => set({ navigatorReady: ready }),
+    setFpsUi: (f) => set({ fpsUi: f }),
+  };
+};

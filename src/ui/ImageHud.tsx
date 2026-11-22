@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
+import { useShallow } from 'zustand/shallow';
 import { viewLabel } from '@/simulator/windows/viewLabels';
 import { useHudStore, useSimStore } from '@/app/store';
 import { EXAM_CASE_NAME, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
@@ -31,7 +32,14 @@ export function ImageHud() {
   const frequencyMHz = useSimStore((s) => s.settings.frequencyMHz);
   const harmonics = useSimStore((s) => s.settings.harmonics);
   const strip = useSimStore((s) => isStripModality(s.modality));
-  const hud = useHudStore((h) => h.hud);
+  const { hrBpm, fps, gpuReason, tier } = useHudStore(
+    useShallow((h) => ({
+      hrBpm: h.hud ? Math.round(h.hud.heartRateBpm) : null,
+      fps: h.hud ? Math.round(h.hud.simulatedFps) : null,
+      gpuReason: typeof h.hud?.stats?.['gpu'] === 'string' ? h.hud.stats['gpu'] : null,
+      tier: typeof h.hud?.stats?.['tier'] === 'string' ? h.hud.stats['tier'] : null,
+    })),
+  );
   // the title wraps to two lines on a narrow image: the segment chip below it reads its height (--hud-tl-h) to keep clear
   const titleBoxRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -52,8 +60,6 @@ export function ImageHud() {
     return () => ro.disconnect();
   }, [show]);
   if (!show) return null;
-  const gpuReason = typeof hud?.stats?.['gpu'] === 'string' ? hud.stats['gpu'] : null;
-  const tier = typeof hud?.stats?.['tier'] === 'string' ? hud.stats['tier'] : null;
   const title = showsCaseIdentity(mode, examFinished)
     ? (listCases().find((c) => c.id === caseId)?.title ?? caseId)
     : EXAM_CASE_NAME;
@@ -69,7 +75,7 @@ export function ImageHud() {
       </div>
       <div className="hud-box hud-tr">
         <span>
-          FC {hud ? Math.round(hud.heartRateBpm) : '—'} lpm
+          FC {hrBpm !== null ? hrBpm : '—'} lpm
           {truth ? ` · ${RHYTHM_LABEL[truth.rhythm] ?? truth.rhythm}` : ''}
         </span>
         <span>
@@ -77,7 +83,7 @@ export function ImageHud() {
           {harmonics ? ' THI' : ''}
         </span>
         {/* in colour the frame rate already is the colour one: «· color N» repeated it (decision 195) */}
-        <span>FR {hud ? Math.round(hud.simulatedFps) : '—'} Hz</span>
+        <span>FR {fps !== null ? fps : '—'} Hz</span>
         {strip ? viewLine : null}
         {gpuReason && gpuReason !== 'ok' ? (
           // the image is formed by the CPU tracer (no WebGL2, or the context was lost): slower and, on «auto», coarser
@@ -93,26 +99,27 @@ export function ImageHud() {
 
 /** The recognised view and its score, with a ring in the colour of the guide; null in exam mode. */
 function ViewLine({ mode }: { mode: ProductMode }) {
-  const hud = useHudStore((h) => h.hud);
+  const { hasView, bestViewId, score } = useHudStore(
+    useShallow((h) => ({
+      hasView: h.hud?.view != null,
+      bestViewId: h.hud?.view?.bestViewId ?? null,
+      score: h.hud?.view?.score ?? 0,
+    })),
+  );
   if (!modePolicy(mode).showViewFeedback) return null;
   return (
     <span className="hud-view">
-      {hud?.view ? (
+      {hasView ? (
         <i
           className="mini-ring"
           aria-hidden="true"
           style={{
-            ['--p' as string]: `${Math.max(0, Math.min(100, hud.view.score))}%`,
-            color:
-              hud.view.score >= 75
-                ? 'var(--ok)'
-                : hud.view.score >= 50
-                  ? 'var(--warn)'
-                  : 'var(--bad)',
+            ['--p' as string]: `${Math.max(0, Math.min(100, score))}%`,
+            color: score >= 75 ? 'var(--ok)' : score >= 50 ? 'var(--warn)' : 'var(--bad)',
           }}
         />
       ) : null}
-      Vista {hud?.view?.bestViewId ? `${viewLabel(hud.view.bestViewId)} ${hud.view.score}` : '—'}
+      Vista {bestViewId ? `${viewLabel(bestViewId)} ${score}` : '—'}
     </span>
   );
 }

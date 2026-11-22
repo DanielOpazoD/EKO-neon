@@ -21,6 +21,7 @@ const PERSISTED = {
   showSkeleton: isBool,
   showHints: isBool,
   showEcg: isBool,
+  devMode: isBool,
   tutorialDone: isBool,
   showHud: isBool,
   navSkin: isBool,

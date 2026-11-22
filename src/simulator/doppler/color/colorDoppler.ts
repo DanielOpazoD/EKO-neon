@@ -1,10 +1,19 @@
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
 import { aliasVelocity } from '@/clinical/formulas';
-import { hash3 } from '@/core/random';
 import { Tissue } from '@/simulator/anatomy/tissue';
 import type { PolarFrame } from '@/simulator/renderer/types';
 import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import { COLOR_BLEND, colorMap } from '@/simulator/renderer/postprocess/colorMap';
+import {
+  COLOR_PACKET,
+  colorScratch,
+  kasaiEstimate,
+  NOISE_COHERENCE,
+  NOISE_POWER_GATE,
+  type ColorEstimate,
+} from './kasaiEstimator';
+
+export { COLOR_PACKET, type ColorEstimate };
 
 export interface ColorSettings {
   boxThetaMinRad: number;
@@ -75,280 +84,8 @@ export interface ColorField {
   invert: boolean;
 }
 
-/**
- * The colour field as a scanner estimates it (decision 116). Each update the velocity comes from the autocorrelation of a short
- * packet of echoes and the power from the same echoes of moving blood, so both scatter: the power of the blood's speckle
- * (exponential, averaged over the packet and the sample volume) decides whether a sample passes the display threshold,
- * and the velocity estimate scatters around the velocity, more with a broad spectrum and with a weak echo. Both are
- * correlated over about two samples and two lines (the resolution cell) and new at every update, as the blood moves on.
- * Without an estimate the field is the expected one. Declared values: no measured colour Doppler texture was found to
- * calibrate against.
- */
-export interface ColorEstimate {
-  /** Index of the colour update: every update draws a new realization. */
-  realization: number;
-  seed: number;
-}
 /** Display threshold of the colour power (after gain). */
-const COLOR_THRESHOLD = 0.25;
-/** Pulses per colour line: the packet of the frame-rate model (decision 178). */
-export const COLOR_PACKET = 8;
-/**
- * Receiver noise power, relative to the echo of blood at the transmission soft tissue would leave, and the pulse-to-pulse
- * phase jitter of a laminar flow (rad): the transit of the scatterers through the sample volume and the beam's
- * geometric broadening. Declared values, set so a strong laminar flow scatters by a few per cent of Nyquist; no measured
- * colour texture was found to calibrate against.
- */
-const NOISE_POWER = 0.02;
-const TRANSIT_JITTER_RAD = 0.4;
-/** Below this |R1|/R0 a weak echo is rejected as noise, unless it is NOISE_POWER_GATE times over the display threshold. */
-const NOISE_COHERENCE = 0.5;
-const NOISE_POWER_GATE = 2.5;
-/** 1 − |R1|/R0 of a strong laminar flow: the transit jitter and the receiver noise alone. */
-const LAMINAR_DECORRELATION = 1 - Math.exp(-(TRANSIT_JITTER_RAD ** 2)) / (1 + NOISE_POWER);
-
-/** Unit Gaussian from two hashes (Box–Muller). */
-function hashGaussian(li: number, si: number, stream: number, seed: number): number {
-  const u1 = hash3(li, si, stream, seed);
-  const u2 = hash3(li, si, stream + 1, seed);
-  return Math.sqrt(-2 * Math.log(Math.max(1e-12, u1))) * Math.cos(2 * Math.PI * u2);
-}
-
-/**
- * Scratch buffers reused across colour updates (decision 304): an update allocated ~18 typed arrays the size of the colour
- * box. Each name keeps one buffer, grown when a box needs more; the views returned are only valid until the next update.
- */
-const scratchPool = new Map<string, Float32Array>();
-function scratch(name: string, n: number): Float32Array {
-  let b = scratchPool.get(name);
-  if (!b || b.length < n) {
-    b = new Float32Array(Math.max(n, Math.ceil((b?.length ?? 0) * 1.5)));
-    scratchPool.set(name, b);
-  }
-  return b.subarray(0, n);
-}
-
-/** A pair of independent unit Gaussians from the same two hashes (both outputs of Box–Muller), into `out`. */
-function hashGaussianPair(
-  li: number,
-  si: number,
-  stream: number,
-  seed: number,
-  out: { a: number; b: number },
-): void {
-  const u1 = hash3(li, si, stream, seed);
-  const u2 = hash3(li, si, stream + 1, seed);
-  const r = Math.sqrt(-2 * Math.log(Math.max(1e-12, u1)));
-  out.a = r * Math.cos(2 * Math.PI * u2);
-  out.b = r * Math.sin(2 * Math.PI * u2);
-}
-
-/** Binomial [1 2 1]/4 smoothing of a lines × samples grid, along lines and along samples, in place. */
-function smoothGrid(g: Float32Array, nL: number, nS: number, tmp: Float32Array): void {
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      const i = l * nS + k;
-      tmp[i] = 0.25 * (g[k > 0 ? i - 1 : i]! + 2 * g[i]! + g[k < nS - 1 ? i + 1 : i]!);
-    }
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      const i = l * nS + k;
-      g[i] = 0.25 * (tmp[l > 0 ? i - nS : i]! + 2 * tmp[i]! + tmp[l < nL - 1 ? i + nS : i]!);
-    }
-}
-
-/**
- * The colour estimate of one update (decision 300), as a scanner forms it. Each sample of the box receives a packet of
- * `COLOR_PACKET` echoes: the blood's speckle amplitude (a complex Gaussian correlated over the resolution cell, new at every
- * update), turning by π·v/Nyquist per pulse, with a pulse-to-pulse jitter from transit and turbulence (the spectral width
- * 0.9 × dispersion × speed of spectrum.ts), plus receiver noise. A regression wall filter removes the packet's mean (and
- * its linear trend for a high cutoff): it acts on the sampled phase, so it is periodic in the PRF and rejects a jet that
- * aliases to near zero as well as slow flow. The lag-zero and lag-one autocorrelations R0 and R1, averaged over the
- * resolution cell as a scanner's range and lateral averaging does, give the power, the velocity Nyquist·arg(R1)/π (Kasai) and the
- * variance 1 − |R1|/R0. Until then the field was the true velocity plus a Gaussian scatter and the wall filter a cut on
- * the true velocity, which kept a jet at twice Nyquist that a real filter rejects.
- */
-function kasaiEstimate(
-  cellV: Float32Array,
-  cellDisp: Float32Array,
-  cellRel: Float32Array,
-  liMin: number,
-  siMin: number,
-  nL: number,
-  nS: number,
-  s: ColorSettings,
-  estimate: ColorEstimate,
-): {
-  velocity: Float32Array;
-  power: Float32Array;
-  variance: Float32Array;
-  coherence: Float32Array;
-} {
-  const n = nL * nS;
-  const stream = estimate.realization * 64;
-  // the blood's speckle amplitude: a complex Gaussian of unit power, correlated over about two samples and two lines
-  const zr = scratch('zr', n);
-  const zi = scratch('zi', n);
-  const tmp = scratch('tmp', n);
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      zr[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream, estimate.seed);
-      zi[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream + 2, estimate.seed);
-    }
-  smoothGrid(zr, nL, nS, tmp);
-  smoothGrid(zi, nL, nS, tmp);
-  // the pulse-to-pulse jitter of each pulse, correlated over the same cell: neighbouring samples share their scatterers
-  const N = COLOR_PACKET;
-  const jit: Float32Array[] = [];
-  for (let p = 0; p < N; p++) {
-    const j = scratch(`jit${p}`, n);
-    for (let l = 0; l < nL; l++)
-      for (let k = 0; k < nS; k++)
-        j[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream + 4 + 2 * p, estimate.seed);
-    smoothGrid(j, nL, nS, tmp);
-    for (let g = 0; g < n; g++) j[g]! /= 0.375;
-    jit.push(j);
-  }
-  // [1 2 1]/4 in two directions keeps (6/16)² of the variance; each part then carries half the unit power
-  const unit = 1 / (0.375 * Math.SQRT2);
-  // the wall filter follows its cutoff continuously (decision 304): the share of the packet's mean it removes grows to the
-  // whole of it at 10 % of Nyquist, then the share of its linear trend up to 35 % (removing part of the trend below that
-  // biased a laminar 0.30 m/s to 0.31). With an order chosen by thresholds the
-  // slider had three states: 0.01-0.09 m/s drew the same image, and so did 0.10-0.30
-  const cut = Math.max(0, s.wallFilterMps / s.scaleMps);
-  const meanShare = Math.min(1, cut / 0.1);
-  const trendShare = Math.min(1, Math.max(0, (cut - 0.1) / 0.25));
-  const pair = { a: 0, b: 0 };
-  const xr = new Float64Array(N);
-  const xi = new Float64Array(N);
-  const r0 = scratch('r0', n);
-  const r1r = scratch('r1r', n);
-  const r1i = scratch('r1i', n);
-  const valid = scratch('valid', n);
-  valid.fill(0);
-  // the centred linear basis, orthonormal over the packet
-  const lin = new Float64Array(N);
-  let linNorm = 0;
-  for (let p = 0; p < N; p++) {
-    lin[p] = p - (N - 1) / 2;
-    linNorm += lin[p]! * lin[p]!;
-  }
-  for (let p = 0; p < N; p++) lin[p]! /= Math.sqrt(linNorm);
-  for (let g = 0; g < n; g++) {
-    const v = cellV[g]!;
-    if (Number.isNaN(v)) continue;
-    valid[g] = 1;
-    const l = Math.floor(g / nS),
-      k = g - l * nS;
-    const li = liMin + l,
-      si = siMin + k;
-    const amp = Math.sqrt(cellRel[g]!);
-    const ar = amp * zr[g]! * unit,
-      ai = amp * zi[g]! * unit;
-    const phi = (Math.PI * v) / s.scaleMps;
-    const turbulent = (Math.PI * 0.9 * cellDisp[g]! * Math.abs(v)) / s.scaleMps / Math.SQRT2;
-    const jitter = Math.hypot(TRANSIT_JITTER_RAD, turbulent);
-    const noise = Math.sqrt(NOISE_POWER / 2);
-    for (let p = 0; p < N; p++) {
-      const ph = p * phi + jitter * jit[p]![g]!;
-      const c = Math.cos(ph),
-        sn = Math.sin(ph);
-      hashGaussianPair(li, si, stream + 24 + 2 * p, estimate.seed, pair);
-      xr[p] = ar * c - ai * sn + noise * pair.a;
-      xi[p] = ar * sn + ai * c + noise * pair.b;
-    }
-    // regression wall filter: the packet less its projection on the low-order polynomials, in the shares above
-    if (meanShare > 0) {
-      let mr = 0,
-        mi = 0;
-      for (let p = 0; p < N; p++) {
-        mr += xr[p]!;
-        mi += xi[p]!;
-      }
-      mr = (mr / N) * meanShare;
-      mi = (mi / N) * meanShare;
-      for (let p = 0; p < N; p++) {
-        xr[p]! -= mr;
-        xi[p]! -= mi;
-      }
-      if (trendShare > 0) {
-        let pr = 0,
-          pi = 0;
-        for (let p = 0; p < N; p++) {
-          pr += xr[p]! * lin[p]!;
-          pi += xi[p]! * lin[p]!;
-        }
-        pr *= trendShare;
-        pi *= trendShare;
-        for (let p = 0; p < N; p++) {
-          xr[p]! -= pr * lin[p]!;
-          xi[p]! -= pi * lin[p]!;
-        }
-      }
-    }
-    let a0 = 0,
-      a1r = 0,
-      a1i = 0;
-    for (let p = 0; p < N; p++) a0 += xr[p]! * xr[p]! + xi[p]! * xi[p]!;
-    for (let p = 0; p + 1 < N; p++) {
-      // x[p+1] · conj(x[p])
-      a1r += xr[p + 1]! * xr[p]! + xi[p + 1]! * xi[p]!;
-      a1i += xi[p + 1]! * xr[p]! - xr[p + 1]! * xi[p]!;
-    }
-    r0[g] = a0 / N;
-    r1r[g] = a1r / (N - 1);
-    r1i[g] = a1i / (N - 1);
-  }
-  // averaged over the resolution cell ([1 2 1] in range and across lines), over the samples that carry colour only
-  const avg = (src: Float32Array, name: string): Float32Array => {
-    const outA = scratch(name, n);
-    outA.fill(0);
-    for (let l = 0; l < nL; l++)
-      for (let k = 0; k < nS; k++) {
-        const g = l * nS + k;
-        if (!valid[g]) continue;
-        let sum = 0,
-          w = 0;
-        for (let dl = -1; dl <= 1; dl++)
-          for (let dk = -1; dk <= 1; dk++) {
-            const ll = l + dl,
-              kk = k + dk;
-            if (ll < 0 || ll >= nL || kk < 0 || kk >= nS) continue;
-            const h = ll * nS + kk;
-            if (!valid[h]) continue;
-            const wt = (dl === 0 ? 2 : 1) * (dk === 0 ? 2 : 1);
-            sum += wt * src[h]!;
-            w += wt;
-          }
-        outA[g] = sum / w;
-      }
-    return outA;
-  };
-  const R0 = avg(r0, 'R0'),
-    R1r = avg(r1r, 'R1r'),
-    R1i = avg(r1i, 'R1i');
-  const velocity = scratch('velocity', n).fill(NaN);
-  const power = scratch('power', n).fill(0);
-  const variance = scratch('variance', n).fill(0);
-  const coherence = scratch('coherence', n).fill(0);
-  for (let g = 0; g < n; g++) {
-    if (!valid[g]) continue;
-    const p0 = R0[g]!;
-    if (p0 <= 0) continue;
-    velocity[g] = (s.scaleMps * Math.atan2(R1i[g]!, R1r[g]!)) / Math.PI;
-    // the noise is part of what the receiver measures: subtract its expected share, as a scanner's power estimate does
-    power[g] = Math.max(0, p0 - NOISE_POWER);
-    // the variance over what a laminar flow already shows through transit and noise: laminar flow reads 0, as on a
-    // scanner whose variance map starts at the system's own decorrelation
-    coherence[g] = Math.hypot(R1r[g]!, R1i[g]!) / p0;
-    const raw = 1 - coherence[g]!;
-    variance[g] = Math.min(
-      1,
-      Math.max(0, (raw - LAMINAR_DECORRELATION) / (1 - LAMINAR_DECORRELATION)),
-    );
-  }
-  return { velocity, power, variance, coherence };
-}
+export const COLOR_THRESHOLD = 0.25;
 
 export function allocColorField(n: number): ColorField {
   return {
@@ -415,9 +152,9 @@ export function computeColorField(
   const nS = Math.max(0, siMax - siMin + 1);
   // pass 1: what reaches the receiver at each sample of the box — moving blood (or, with blooming, a sample beside it)
   // over the shadow threshold: its axial velocity, the dispersion of its spectrum and its transmission
-  const cellV = scratch('cellV', nL * nS).fill(NaN);
-  const cellDisp = scratch('cellDisp', nL * nS).fill(0);
-  const cellRel = scratch('cellRel', nL * nS).fill(0);
+  const cellV = colorScratch('cellV', nL * nS).fill(NaN);
+  const cellDisp = colorScratch('cellDisp', nL * nS).fill(0);
+  const cellRel = colorScratch('cellRel', nL * nS).fill(0);
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {
       const idx = li * samples + si;
@@ -448,7 +185,18 @@ export function computeColorField(
   // the estimate of this update (decision 300): a packet of echoes per sample, wall-filtered and autocorrelated
   const kasai =
     estimate && nL > 0 && nS > 0
-      ? kasaiEstimate(cellV, cellDisp, cellRel, liMin, siMin, nL, nS, s, estimate)
+      ? kasaiEstimate(
+          cellV,
+          cellDisp,
+          cellRel,
+          liMin,
+          siMin,
+          nL,
+          nS,
+          s.scaleMps,
+          s.wallFilterMps,
+          estimate,
+        )
       : null;
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {

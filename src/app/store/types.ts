@@ -63,6 +63,8 @@ export interface UiPrefs {
   navWindows: boolean;
   showHints: boolean;
   showPhysics: boolean;
+  /** Developer mode (off by default): exposes engineering tools (Lab, Rodero anatomy, review mode, DevPanel). */
+  devMode: boolean;
   devPanel: boolean;
   /** Review mode (decision 134): clicks on the image place numbered markers for a feedback report. Not persisted. */
   reviewMode: boolean;

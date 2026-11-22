@@ -160,17 +160,7 @@ function probeWebgl(): string | null {
 
 /** 3D navigator layers as a checkable popover: keeps the torso overlay to camera controls only. */
 function LayerMenu() {
-  const ui = useSimStore((s) => s.ui);
-  const setUi = useSimStore((s) => s.setUi);
   const { open, setOpen, wrap } = usePopover();
-  const layer = (label: string, key: keyof typeof ui, hint: string) => (
-    <CheckItem
-      label={label}
-      checked={Boolean(ui[key])}
-      onToggle={() => setUi({ [key]: !ui[key] })}
-      hint={hint}
-    />
-  );
   return (
     <div className="menu-wrap" ref={wrap}>
       <button
@@ -183,42 +173,48 @@ function LayerMenu() {
       >
         <IconLayers size={12} />
       </button>
-      {open && (
-        <div className="menu down" role="menu" aria-label="Capas del navegador 3D">
-          <MenuCap>Cuerpo</MenuCap>
-          {layer('Piel', 'navSkin', 'Superficie del tórax')}
-          {layer('Hueso', 'showSkeleton', 'Costillas y esternón')}
-          <MenuCap>Corazón</MenuCap>
-          {layer('Miocardio', 'navHeart', 'Paredes del modelo 3D')}
-          {layer('Cavidades', 'navChambers', 'Ventrículos y aurículas')}
-          {layer('Válvulas', 'navValves', 'Válvulas y cuerdas')}
-          {layer(
-            'Segmentos del VI',
-            'navSegments',
-            'Colorea el miocardio del VI por segmento (también el corte); pasar el ratón: nombre',
-          )}
-          {layer('Vasos', 'navVessels', 'Aorta torácica y ramas proximales, pulmonar y cavas')}
-          <MenuCap>Vistas</MenuCap>
-          {layer(
-            'Corte de frente',
-            'navSplit',
-            'Segunda vista: el corazón cortado por el plano, mirando el corte',
-          )}
-          {layer(
-            'Etiquetas del corte',
-            'navLabels',
-            'Nombres de cámaras y válvulas sobre el corte',
-          )}
-          <MenuCap>Examen</MenuCap>
-          {layer('Ventanas', 'navWindows', 'Ventanas acústicas de las vistas canónicas')}
-          {layer('Ejes', 'navAxes', 'Haz, elevación y lateral')}
-          {layer('Corte', 'navCut', 'Cortar el corazón por el plano de imagen')}
-        </div>
-      )}
+      {open && <LayerMenuContent />}
     </div>
   );
 }
 
-// ------------------------------------------------------------------------------------------------
-// geometry builders
-// ------------------------------------------------------------------------------------------------
+function LayerMenuContent() {
+  const ui = useSimStore((s) => s.ui);
+  const setUi = useSimStore((s) => s.setUi);
+  const layer = (label: string, key: keyof typeof ui, hint: string) => (
+    <CheckItem
+      label={label}
+      checked={Boolean(ui[key])}
+      onToggle={() => setUi({ [key]: !ui[key] })}
+      hint={hint}
+    />
+  );
+  return (
+    <div className="menu down" role="menu" aria-label="Capas del navegador 3D">
+      <MenuCap>Cuerpo</MenuCap>
+      {layer('Piel', 'navSkin', 'Superficie del tórax')}
+      {layer('Hueso', 'showSkeleton', 'Costillas y esternón')}
+      <MenuCap>Corazón</MenuCap>
+      {layer('Miocardio', 'navHeart', 'Paredes del modelo 3D')}
+      {layer('Cavidades', 'navChambers', 'Ventrículos y aurículas')}
+      {layer('Válvulas', 'navValves', 'Válvulas y cuerdas')}
+      {layer(
+        'Segmentos del VI',
+        'navSegments',
+        'Colorea el miocardio del VI por segmento (también el corte); pasar el ratón: nombre',
+      )}
+      {layer('Vasos', 'navVessels', 'Aorta torácica y ramas proximales, pulmonar y cavas')}
+      <MenuCap>Vistas</MenuCap>
+      {layer(
+        'Corte de frente',
+        'navSplit',
+        'Segunda vista: el corazón cortado por el plano, mirando el corte',
+      )}
+      {layer('Etiquetas del corte', 'navLabels', 'Nombres de cámaras y válvulas sobre el corte')}
+      <MenuCap>Examen</MenuCap>
+      {layer('Ventanas', 'navWindows', 'Ventanas acústicas de las vistas canónicas')}
+      {layer('Ejes', 'navAxes', 'Haz, elevación y lateral')}
+      {layer('Corte', 'navCut', 'Cortar el corazón por el plano de imagen')}
+    </div>
+  );
+}

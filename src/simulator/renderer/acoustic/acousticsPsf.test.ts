@@ -19,7 +19,22 @@ import {
   SIDE_LOBE_DB,
   sideLobeLevelDb,
 } from './psf';
-import type { PolarFrameSpec } from '../types';
+import {
+  allocPolarFrame,
+  DEFAULT_ACQUISITION,
+  polarSpecFor,
+  type PolarFrameSpec,
+} from '../types';
+import { loadCaseById } from '@/cases';
+import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
+import { computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
+import { beamFrameFromPose, poseFromControl } from '@/simulator/probe/pose';
+import { ProceduralSliceRenderer } from '../procedural/sliceRenderer';
+import { scenePhysicsFor } from '../scenePhysics';
+import { SimulatorCore } from '@/simulator/core/simulatorCore';
+import { baseInput } from '@/simulator/core/baseInput';
+import { Tissue } from '@/simulator/anatomy/tissue';
 
 const SPEC: PolarFrameSpec = {
   lines: 96,
@@ -128,3 +143,75 @@ test('buildPsfKernels produces symmetric, unit-energy axial and lateral kernels'
   const kNoise = buildNoiseKernels(SPEC, 2.5, true);
   assert.ok(kNoise.lateralRadius[64]! < k.lateralRadius[64]!);
 });
+
+test('habitus chest-wall attenuation reduces myocardial transmission and lowering frequency recovers signal', () => {
+  const diffCase = loadCaseById('normal-difficult-window');
+  const { heart, thorax, tables } = buildCaseModels(diffCase, REST_PATIENT);
+  const hp = computeHeartPose(heart, cycleStateAt(tables, 0));
+  const renderer = new ProceduralSliceRenderer();
+  const spec = polarSpecFor(DEFAULT_ACQUISITION, 'low');
+  const beam = beamFrameFromPose(
+    poseFromControl(thorax, { u: 4.5, v: 2.0, rotationDeg: -30, tiltDeg: 0, rockDeg: 0, pressure: 0.8 }),
+    1,
+  );
+
+  const meanHeartTrans = (windowAttenuation: number, frequencyMHz: number): number => {
+    const out = allocPolarFrame(spec);
+    const phys = {
+      ...scenePhysicsFor(diffCase, { ...DEFAULT_ACQUISITION, frequencyMHz, harmonics: false }),
+      windowAttenuation,
+    };
+    renderer.render({ heart, heartPose: hp, thorax, physics: phys }, beam, spec, 0, out);
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < out.transmission.length; i++) {
+      if (out.tissue[i] === Tissue.Myocardium) {
+        sum += out.transmission[i]!;
+        cnt++;
+      }
+    }
+    assert.ok(cnt > 20, `expected myocardium samples in PLAX frame, got ${cnt}`);
+    return sum / cnt;
+  };
+
+  const tNoExtra = meanHeartTrans(0, 2.5);
+  const tDifficult = meanHeartTrans(0.75, 2.5);
+  const tLowFreq = meanHeartTrans(0.75, 1.8);
+
+  assert.ok(
+    tDifficult < tNoExtra * 0.75,
+    `difficult chest wall must meaningfully attenuate heart signal (${tDifficult.toFixed(4)} vs ${tNoExtra.toFixed(4)})`,
+  );
+  assert.ok(
+    tLowFreq > tDifficult * 1.25,
+    `lowering frequency to 1.8 MHz must recover transmission (${tLowFreq.toFixed(4)} vs ${tDifficult.toFixed(4)})`,
+  );
+});
+
+test('free-breathing mode modulates lung curtain continuously over the respiratory cycle', () => {
+  const c = loadCaseById('normal-difficult-window');
+  const inp = baseInput();
+  inp.rendererBackend = 'procedural';
+  inp.quality = 'low';
+  inp.patient = { ...REST_PATIENT, respiration: 'free-breathing' };
+  const core = new SimulatorCore(c, inp);
+  // Capture lung sample counts across 4 seconds (one full respiratory cycle)
+  const lungCounts: number[] = [];
+  for (let i = 0; i < 40; i++) {
+    core.step(0.1);
+    const f = core.lastFrame;
+    if (f) {
+      let nLung = 0;
+      for (let j = 0; j < f.tissue.length; j++) if (f.tissue[j] === Tissue.Lung) nLung++;
+      lungCounts.push(nLung);
+    }
+  }
+  const minLung = Math.min(...lungCounts);
+  const maxLung = Math.max(...lungCounts);
+  assert.ok(
+    maxLung > minLung,
+    `free-breathing should visibly shift lung interposition across the breath cycle (min=${minLung}, max=${maxLung})`,
+  );
+  core.dispose();
+});
+

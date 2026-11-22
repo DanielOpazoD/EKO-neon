@@ -27,8 +27,12 @@ export function flowPropagationCmps(c: CaseDefinition): number {
   return Math.min(120, Math.max(15, 6 * c.physiology.ePrimeSeptalCmps));
 }
 
-/** Length (cm) of the inflow core beyond the annulus, where the jet keeps its orifice velocity: the leaflet tips. */
-export const INFLOW_CORE_CM = 1.2;
+/**
+ * Length (cm) of the inflow core beyond the annulus through the open mitral leaflet tips so both
+ * early (E) and late-diastolic (A, after annular recoil) inflow preserve full orifice velocity at
+ * the standard ASE leaflet-tip PW sampling plane.
+ */
+export const INFLOW_CORE_CM = 1.8;
 
 /**
  * Distance (cm) beyond the tips over which the inflow core falls to half its velocity. The conventional Vp follows the
@@ -99,11 +103,11 @@ const FUNNEL_FADE_FROM_CM = 2;
 export const FUNNEL_FADE_TO_CM = 3;
 
 export const LVOT_ENTRANCE_T = -0.8;
-export const LVOT_SINK_FADE_FROM_CM = 3;
-export const LVOT_SINK_FADE_TO_CM = 4.5;
+export const LVOT_SINK_FADE_FROM_CM = 1.1;
+export const LVOT_SINK_FADE_TO_CM = 2.3;
 
-export const LVOT_SINK_COS_FROM = 0.55;
-export const LVOT_SINK_COS_TO = 0.8;
+export const LVOT_SINK_COS_FROM = 0.65;
+export const LVOT_SINK_COS_TO = 0.88;
 const FUNNEL_COS_FROM = 0.3;
 const FUNNEL_COS_TO = 0.6;
 
@@ -185,7 +189,20 @@ export function inflowJet(
   const q = inflowFlow(tables, phase, Math.hypot(zr, rho), waveCmps, table);
   if (q <= 1) return;
   out.vz += (q / areaCm2 / 100) * jetProfile(rho, rHalf, zr) * axial(zr);
-  out.dispersion = Math.max(out.dispersion, turbulence + 0.15 * Math.min(1, rho / r));
+  // Subtle transmitral/tricuspid vortex-ring roll-up during E deceleration mildly feathers the inner flank
+  // (toward baseline only) while leaving E-wave acceleration and peak razor-focused.
+  let decelShear = 0;
+  if (table === tables.mitralFlowMlps || table === tables.tricuspidFlowMlps) {
+    const tm = tables.timings;
+    const tBeat = (((phase % 1) + 1) % 1) * tables.rrS;
+    const ePeakT = tm.mitralOpenS + tm.eAccelS;
+    const eEndT = Math.min(tables.rrS, ePeakT + tm.eDecelS * 1.1);
+    if (tBeat > ePeakT && tBeat < eEndT && tm.eDecelS > 0.02) {
+      const u = Math.min(1, (tBeat - ePeakT) / tm.eDecelS);
+      decelShear = 0.065 * Math.sin(Math.PI * u);
+    }
+  }
+  out.dispersion = Math.max(out.dispersion, turbulence + decelShear + 0.15 * Math.min(1, rho / r));
   out.present = 1;
 }
 
