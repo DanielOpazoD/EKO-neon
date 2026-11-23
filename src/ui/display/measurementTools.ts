@@ -374,7 +374,7 @@ export function handleMeasurementToolClick(
           commit(
             {
               kind: 'vti',
-              label: 'VTI (envolvente automática)',
+              label: 'VTI auto',
               value: s.vtiCm,
               units: 'cm',
               modality,

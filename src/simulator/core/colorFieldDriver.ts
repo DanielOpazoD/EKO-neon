@@ -115,7 +115,7 @@ export class ColorFieldDriver {
 
   /** Build the Doppler console-only settings key (scale, baseline, wall filter, gain, persistence, invert, variance). */
   static settingsKey(c: ColorSettings): string {
-    return `${c.boxThetaMinRad}|${c.boxThetaMaxRad}|${c.boxRMinCm}|${c.boxRMaxCm}|${c.scaleMps}|${c.baselineShiftMps}|${c.wallFilterMps}|${c.gainDb}|${c.persistence}|${c.invert ? 1 : 0}|${c.showVariance ? 1 : 0}`;
+    return `${c.boxThetaMinRad}|${c.boxThetaMaxRad}|${c.boxRMinCm}|${c.boxRMaxCm}|${c.scaleMps}|${c.baselineShiftMps}|${c.wallFilterMps}|${c.gainDb}|${c.persistence}|${c.smoothing}|${c.invert ? 1 : 0}|${c.showVariance ? 1 : 0}`;
   }
 
   /**

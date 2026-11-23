@@ -1,3 +1,5 @@
+import { COLOR_THRESHOLD } from '@/simulator/doppler/color/colorDoppler';
+import { colorPowerConfidence } from '@/simulator/doppler/color/spatiotemporalFilter';
 import { consoleCompensation } from '../postprocess/consolePipeline';
 import { packScanLutTexels, type ScanLut } from '../scanConvert';
 import type { AcquisitionSettings, PolarFrameSpec } from '../types';
@@ -89,20 +91,26 @@ export class GlPresentUploads {
 
   ensureColor(c: PresentColorCpu, lines: number, samples: number): void {
     const scale = Math.max(1e-3, c.settings.scaleMps);
-    const key = `${c.version}|${lines}x${samples}|${scale.toFixed(4)}`;
+    const baseline = c.settings.baselineShiftMps ?? 0;
+    const key = `${c.version}|${lines}x${samples}|${scale.toFixed(4)}|${baseline.toFixed(4)}`;
     if (key === this.colorKey) return;
     const n = lines * samples;
     if (this.colorTexels.length !== n * 4) this.colorTexels = new Float32Array(n * 4);
     const t = this.colorTexels;
     const kPhi = Math.PI / scale;
+    const powArr = c.power;
     for (let i = 0, o = 0; i < n; i++, o += 4) {
       const v = c.vel[i] ?? NaN;
       if (!Number.isNaN(v)) {
-        const ph = v * kPhi;
+        const ph = (v - baseline) * kPhi;
         t[o] = Math.cos(ph);
         t[o + 1] = Math.sin(ph);
         t[o + 2] = c.variance[i] ?? 0;
-        t[o + 3] = 1;
+        if (powArr) {
+          t[o + 3] = 0.5 + 0.5 * colorPowerConfidence(powArr[i] ?? 1, COLOR_THRESHOLD);
+        } else {
+          t[o + 3] = 1;
+        }
       } else {
         t[o] = 0;
         t[o + 1] = 0;

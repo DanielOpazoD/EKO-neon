@@ -1,4 +1,5 @@
 import { createRng } from '@/core/random';
+import { smoothstep } from '@/core/vec3';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
 import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
 import { Tissue, type TissueSample } from '@/simulator/anatomy/tissue';
@@ -24,7 +25,7 @@ import {
 } from '@/simulator/doppler/spectral/spectrum';
 import { valveClickSignal, valveClickWeight } from '@/simulator/doppler/spectral/valveClicks';
 import type { BeamFrame } from '@/simulator/probe/pose';
-import { beamHalfWidthCm } from '@/simulator/renderer/acoustic/acoustics';
+import { beamHalfWidthCm, focusingGain } from '@/simulator/renderer/acoustic/acoustics';
 import { MODALITIES } from '@/simulator/renderer/modality';
 import { DUPLEX_BMODE_SHARE } from '@/simulator/renderer/pulseTiming';
 import type { PolarFrameSpec } from '@/simulator/renderer/types';
@@ -144,7 +145,9 @@ export function sampleSpectralColumn(
       sampleVolumeWeight(r, focusCm, dr, du, dv, gateLenOrNull) * backscatterScale * tapNorm;
     if (isTdi) {
       if (inScene && tissueSample.tissue === Tissue.Myocardium) {
-        const power = received(r) ** 2 * beamWeight;
+        // Myocardial parenchyma scatters ~30–40 dB more strongly than blood, keeping deep basal
+        // annuli (11–13 cm in dilated LV) well above thermal noise across [-8, +8] dB gain.
+        const power = received(r) ** 2 * beamWeight * 12;
         if (power <= 0) return;
         const tv = sampleTissueVelocity(
           ctx.heart,
@@ -162,7 +165,7 @@ export function sampleSpectralColumn(
         samples.push({
           v: -axial,
           weight: power,
-          dispersion: 0.05,
+          dispersion: 0.035,
           vPerp,
           depthCm: r,
           focusCm,
@@ -173,7 +176,10 @@ export function sampleSpectralColumn(
       return;
     }
     if (!inScene || tissueSample.tissue !== Tissue.Blood) return;
-    const power = received(r) ** 2 * beamWeight;
+    // Split-aperture CW probes have a broad, weakly focused depth sensitivity compared to PW,
+    // preventing deep valve jets (11–14 cm) from being crushed relative to proximal LVOT blood.
+    const cwDepthBalance = isCw ? 1 / Math.max(0.45, focusingGain(r, focusCm)) : 1;
+    const power = received(r) ** 2 * beamWeight * cwDepthBalance;
     if (power <= 0) return;
     sampleFlow(ctx.flow, ctx.tables, hp, phase, hx, hy, hz, flowSample);
     if (!flowSample.present) {
@@ -190,9 +196,14 @@ export function sampleSpectralColumn(
           axial * axial,
       ),
     );
+    // High-velocity turbulent stenotic/regurgitant jets (vena contracta shear) produce elevated
+    // acoustic backscatter density relative to slow laminar cavity flow along a CW ray.
+    const cwJetBoost = isCw
+      ? 1 + 2.6 * smoothstep(0.18, 0.52, flowSample.dispersion) * smoothstep(1.2, 2.8, Math.abs(axial))
+      : 1;
     samples.push({
       v: -axial,
-      weight: power,
+      weight: power * cwJetBoost,
       dispersion: flowSample.dispersion,
       vPerp,
       depthCm: r,
@@ -225,14 +236,21 @@ export function sampleSpectralColumn(
   };
 
   if (isCw) {
-    // CW integrates along the entire focused beam with 3 transverse taps to capture cross-beam shear.
-    const latOffsets = [-0.65, 0, 0.65];
-    for (let r = 1.0; r < spec.depthCm; r += 0.25) {
+    // CW integrates along the entire focused beam with jittered 0.16 cm axial stations and 5-tap
+    // 3D cross-beam quadrature (center + lateral + elevation) so narrow vena contractas (AS, MR,
+    // HOCM SAM) are resolved smoothly on every column without axial aliasing.
+    const rng = createRng(ctx.caseDef.seed ^ (col * 104729));
+    const drStep = 0.16;
+    const rJitter = rng.next() * drStep;
+    for (let r = 1.0 + rJitter; r < spec.depthCm; r += drStep) {
       if (received(r) === 0) break;
       const wl = beamHalfWidthCm(r, focusCm);
-      for (let t = 0; t < latOffsets.length; t++) {
-        classify(r, 0, latOffsets[t]! * wl, 0, 1 / latOffsets.length);
-      }
+      const we = sliceHalfWidthCm(r);
+      classify(r, 0, 0, 0, 0.4);
+      classify(r, 0, -0.55 * wl, 0, 0.16);
+      classify(r, 0, 0.55 * wl, 0, 0.16);
+      classify(r, 0, 0, -0.5 * we, 0.14);
+      classify(r, 0, 0, 0.5 * we, 0.14);
       clickPoint(r);
     }
   } else {

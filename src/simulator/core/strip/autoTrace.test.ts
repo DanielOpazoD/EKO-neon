@@ -84,6 +84,55 @@ describe('Extracted G1/G2 pure modules: autoTraceSpectralEnvelope & buildChained
       Math.abs(pwModal.velocitiesMps[10]! - pwModal.velocitiesMps[9]!) < 0.02,
       `Expected bridged dropout near ${pwModal.velocitiesMps[9]!.toFixed(3)}, got ${pwModal.velocitiesMps[10]!.toFixed(3)}`,
     );
+
+    // Inject an isolated 1-column noise island at x=5 (flanked by 0s) and verify PW modal rejects it
+    const islandStrip = new Float32Array(strip);
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      if (Math.abs(v - 0.35) < 0.06) islandStrip[5 * SPECTRAL_BINS + b] = 0.85;
+    }
+    const withIsland = autoTraceSpectralEnvelope(islandStrip, cols, cols, spectral, 2, 30, true);
+    assert.equal(withIsland.velocitiesMps[3], 0, 'Isolated 1-column PW noise island should be suppressed');
+
+    // Extreme baseline shift pushing zero to the edge must remain finite and well-bounded
+    const shifted = autoTraceSpectralEnvelope(
+      strip,
+      cols,
+      cols,
+      { ...spectral, baselineShiftMps: 1.5 },
+      10,
+      30,
+      true,
+    );
+    assert.ok(shifted.velocitiesMps.every((v) => Number.isFinite(v)));
+  });
+
+  it('traces the true high-velocity outer jet in bimodal CW double-envelopes (LVOT + AS) while rejecting single-bin noise', () => {
+    const spectral = { ...DEFAULT_SPECTRAL, scaleMps: 6.0, baselineShiftMps: 0, wallFilterMps: 0.2 };
+    const { vMin, vMax } = spectralRange(spectral);
+    const span = vMax - vMin;
+    const cols = 30;
+    const strip = new Float32Array(cols * SPECTRAL_BINS);
+
+    for (let x = 6; x <= 24; x++) {
+      for (let b = 0; b < SPECTRAL_BINS; b++) {
+        const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        // Bright proximal LVOT band (-0.8 m/s, peak 0.95) + spectral dip at -1.5 m/s + outer AS jet (-4.2 m/s, peak 0.65)
+        const lvot = 0.95 * Math.exp(-0.5 * ((v + 0.8) / 0.22) ** 2);
+        const avJet = 0.65 * Math.exp(-0.5 * ((v + 4.2) / 0.35) ** 2);
+        strip[x * SPECTRAL_BINS + b] = Math.max(lvot, avJet);
+      }
+      // Inject an isolated single-bin noise pixel at -5.7 m/s (must NOT pull CW outer trace)
+      const noiseBin = Math.min(SPECTRAL_BINS - 1, Math.floor(((vMax - -5.7) / span) * SPECTRAL_BINS));
+      strip[x * SPECTRAL_BINS + noiseBin] = 0.9;
+    }
+
+    const cw = autoTraceSpectralEnvelope(strip, cols, cols, spectral, 6, 24, false);
+    const mid = Math.abs(cw.velocitiesMps[9]!);
+    assert.ok(
+      mid >= 4.2 && mid <= 4.85,
+      `CW bimodal outer-jet detector should trace the -4.2 m/s AS jet (not stop at -0.8 m/s LVOT or jump to -5.7 m/s single-bin noise), got ${mid.toFixed(2)} m/s`,
+    );
   });
 
   it('chains free-breathing tamponade beats with respiratory mitral/tricuspid modulation and finite phase marks', () => {

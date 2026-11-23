@@ -569,6 +569,16 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.measure-row .m-sub {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .measure-row .m-value {
   font-family: var(--mono);
   color: var(--text);

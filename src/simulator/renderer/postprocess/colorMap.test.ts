@@ -36,3 +36,27 @@ test('colorMapDefinesGlsl exports every COLOR_MAP constant and COLOR_BLEND as GL
   }
   assert.ok(glsl.includes(`#define COLOR_BLEND ${COLOR_BLEND}`));
 });
+
+test('colorMap maps asymmetric baseline-shifted ranges cleanly and keeps laminar flow free of variance tint', () => {
+  const scale = 0.6;
+  const shift = 0.25; // range [-0.35, +0.85] m/s (clinical PISA baseline shift)
+  const slowPos: [number, number, number] = [0, 0, 0];
+  const peakPos: [number, number, number] = [0, 0, 0];
+  const peakNeg: [number, number, number] = [0, 0, 0];
+  const lamNoVar: [number, number, number] = [0, 0, 0];
+  const lamLowVar: [number, number, number] = [0, 0, 0];
+
+  colorMap(0.08, scale, 0, false, slowPos, shift);
+  colorMap(0.85, scale, 0, false, peakPos, shift);
+  colorMap(-0.35, scale, 0, false, peakNeg, shift);
+  colorMap(0.4, scale, 0, true, lamNoVar, shift);
+  colorMap(0.4, scale, 0.18, true, lamLowVar, shift);
+
+  // Slow flow near baseline starts deep dark maroon rather than harsh neon red
+  assert.ok(slowPos[0] < 100 && slowPos[0] > slowPos[2], `expected deep maroon near baseline, got ${slowPos}`);
+  // Positive peak (+0.85 m/s) saturates to bright yellow-red; negative peak (-0.35 m/s) saturates to bright cyan-blue
+  assert.ok(peakPos[0] >= 250 && peakPos[1] >= 220, `expected bright yellow-red at +0.85, got ${peakPos}`);
+  assert.ok(peakNeg[2] >= 250 && peakNeg[1] >= 220, `expected bright cyan-blue at -0.35, got ${peakNeg}`);
+  // Laminar low variance (< VARIANCE_MIN) adds zero green shift
+  assert.deepEqual(lamLowVar, lamNoVar, 'low laminar variance must remain pure BART without green tint');
+});

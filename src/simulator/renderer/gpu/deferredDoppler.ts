@@ -8,7 +8,12 @@ import {
   UPLOAD_UNIT,
   type Locations,
 } from './glHelpers';
-import { GLSL_DOPPLER_AUTOCORR_FRAG, GLSL_DOPPLER_SHADE_FRAG } from './glslDoppler';
+import { DEFAULT_COLOR_SMOOTHING } from '@/simulator/doppler/color/spatiotemporalFilter';
+import {
+  GLSL_DOPPLER_AUTOCORR_FRAG,
+  GLSL_DOPPLER_SHADE_FRAG,
+  GLSL_DOPPLER_SPATIAL_FRAG,
+} from './glslDoppler';
 import { GLSL_VERT } from './glslPasses';
 
 export const DOPPLER_AUTOCORR_UNIFORMS = [
@@ -37,8 +42,16 @@ export const DOPPLER_SHADE_UNIFORMS = [
   'uWallFilterMps',
   'uGainLin',
   'uPersist',
+  'uSmoothing',
   'uUseHistory',
   'uUseKasai',
+] as const;
+
+export const DOPPLER_SPATIAL_UNIFORMS = [
+  'uShade',
+  'uCorr',
+  'uBoxBounds',
+  'uSmoothing',
 ] as const;
 
 /** GPU-resident Polar G-Buffer produced independently by B-mode anatomical reconstruction. */
@@ -71,6 +84,7 @@ export interface DeferredDopplerSettings extends ColorPresentSettings {
   wallFilterMps: number;
   gainDb: number;
   persistence: number;
+  smoothing?: number;
   invert: boolean;
 }
 
@@ -172,16 +186,20 @@ export function computeDopplerBoxBounds(
 export class DeferredDopplerPipeline {
   private progAutocorr: WebGLProgram | null = null;
   private progShade: WebGLProgram | null = null;
+  private progSpatial: WebGLProgram | null = null;
   private ua: Locations<typeof DOPPLER_AUTOCORR_UNIFORMS> | null = null;
   private us: Locations<typeof DOPPLER_SHADE_UNIFORMS> | null = null;
+  private usp: Locations<typeof DOPPLER_SPATIAL_UNIFORMS> | null = null;
 
   private texFlowRaw: WebGLTexture | null = null;
   private texCorr: WebGLTexture | null = null;
-  private texOut: [WebGLTexture | null, WebGLTexture | null] = [null, null];
+  private texRawShade: WebGLTexture | null = null;
+  private texOut: WebGLTexture | null = null;
   private texHist: [WebGLTexture | null, WebGLTexture | null] = [null, null];
 
   private fbCorr: WebGLFramebuffer | null = null;
   private fbShade: [WebGLFramebuffer | null, WebGLFramebuffer | null] = [null, null];
+  private fbOut: WebGLFramebuffer | null = null;
 
   private w = 0;
   private h = 0;
@@ -203,20 +221,20 @@ export class DeferredDopplerPipeline {
   constructor(private readonly gl: WebGL2RenderingContext) {}
 
   get allocated(): boolean {
-    return this.progAutocorr !== null && this.fbCorr !== null;
+    return this.progAutocorr !== null && this.progSpatial !== null && this.fbCorr !== null;
   }
 
   get valid(): boolean {
-    return this._valid && this.texOut[this.current] !== null;
+    return this._valid && this.texOut !== null;
   }
 
   get version(): number {
     return this._version;
   }
 
-  /** Latest GPU-resident `RGBA16F` complex-phasor Doppler texture `(cos φ, sin φ, var, valid)`. */
+  /** Latest GPU-resident `RGBA16F` complex-phasor Doppler texture `(cos φ, sin φ, var, powConf)`. */
   get outputTexture(): WebGLTexture | null {
-    return this._valid ? this.texOut[this.current] : null;
+    return this._valid ? this.texOut : null;
   }
 
   get hasRawFlow(): boolean {
@@ -251,12 +269,14 @@ export class DeferredDopplerPipeline {
   }
 
   private ensurePrograms(): void {
-    if (this.progAutocorr && this.progShade) return;
+    if (this.progAutocorr && this.progShade && this.progSpatial) return;
     const gl = this.gl;
     this.progAutocorr = buildProgram(gl, GLSL_VERT, GLSL_DOPPLER_AUTOCORR_FRAG);
     this.progShade = buildProgram(gl, GLSL_VERT, GLSL_DOPPLER_SHADE_FRAG);
+    this.progSpatial = buildProgram(gl, GLSL_VERT, GLSL_DOPPLER_SPATIAL_FRAG);
     this.ua = uniformLocations(gl, this.progAutocorr, DOPPLER_AUTOCORR_UNIFORMS);
     this.us = uniformLocations(gl, this.progShade, DOPPLER_SHADE_UNIFORMS);
+    this.usp = uniformLocations(gl, this.progSpatial, DOPPLER_SPATIAL_UNIFORMS);
 
     gl.useProgram(this.progAutocorr);
     gl.uniform1i(this.ua.uGbufEnv, 2);
@@ -266,10 +286,14 @@ export class DeferredDopplerPipeline {
     gl.useProgram(this.progShade);
     gl.uniform1i(this.us.uCorr, 2);
     gl.uniform1i(this.us.uHist, 3);
+
+    gl.useProgram(this.progSpatial);
+    gl.uniform1i(this.usp.uShade, 2);
+    gl.uniform1i(this.usp.uCorr, 3);
   }
 
   private ensureTargets(w: number, h: number): boolean {
-    if (this.w === w && this.h === h && this.fbCorr) return false;
+    if (this.w === w && this.h === h && this.fbCorr && this.fbOut) return false;
     this.disposeTargets();
     const gl = this.gl;
     const mk = (internal: number, format: number, type: number): WebGLTexture => {
@@ -293,14 +317,14 @@ export class DeferredDopplerPipeline {
 
     this.texFlowRaw = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
     this.texCorr = mk(gl.RGBA32F, gl.RGBA, gl.FLOAT);
-    const out0 = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
-    const out1 = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
+    this.texRawShade = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
+    this.texOut = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
     const hist0 = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
     const hist1 = mk(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT);
-    this.texOut = [out0, out1];
     this.texHist = [hist0, hist1];
     this.fbCorr = mkFb(this.texCorr);
-    this.fbShade = [mkFb(out0, hist0), mkFb(out1, hist1)];
+    this.fbShade = [mkFb(this.texRawShade, hist0), mkFb(this.texRawShade, hist1)];
+    this.fbOut = mkFb(this.texOut);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     this.w = w;
@@ -334,6 +358,7 @@ export class DeferredDopplerPipeline {
     this.ensureTargets(w, h);
     const ua = this.ua!;
     const us = this.us!;
+    const usp = this.usp!;
 
     const box = computeDopplerBoxBounds(spec, settings);
     if (box.empty) {
@@ -342,6 +367,8 @@ export class DeferredDopplerPipeline {
       gl.disable(gl.SCISSOR_TEST);
       gl.clearBufferfv(gl.COLOR, 0, ZERO4);
       gl.clearBufferfv(gl.COLOR, 1, ZERO4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbOut);
+      gl.clearBufferfv(gl.COLOR, 0, ZERO4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this.current = next;
       this._valid = true;
@@ -421,7 +448,9 @@ export class DeferredDopplerPipeline {
     this.bindAt(4, this.texFlowRaw);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ---- Pass D2: Resolution-cell averaging + aliasing + circular phasor persistence ----
+    const smoothing = Math.max(0, Math.min(1, settings.smoothing ?? DEFAULT_COLOR_SMOOTHING));
+
+    // ---- Pass D2: Resolution-cell averaging + aliasing + adaptive temporal hysteresis persistence ----
     const next: 0 | 1 = this.current === 0 ? 1 : 0;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbShade[next]);
     // Fast TBDR tile-clear outside the ROI box so shrinking/moving the box leaves zero ghost pixels
@@ -437,10 +466,24 @@ export class DeferredDopplerPipeline {
     gl.uniform1f(us.uWallFilterMps, settings.wallFilterMps);
     gl.uniform1f(us.uGainLin, gainLin);
     gl.uniform1f(us.uPersist, useHistory ? settings.persistence : 0);
+    gl.uniform1f(us.uSmoothing, smoothing);
     gl.uniform1i(us.uUseHistory, useHistory ? 1 : 0);
     gl.uniform1i(us.uUseKasai, useKasai);
     this.bindAt(2, this.texCorr);
     this.bindAt(3, this.texHist[this.current]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // ---- Pass D3: Coherence- & variance-adaptive circular spatial filter (scissor-clipped!) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbOut);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clearBufferfv(gl.COLOR, 0, ZERO4);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(box.siMin, box.liMin, box.boxW, box.boxH);
+    gl.useProgram(this.progSpatial);
+    gl.uniform4i(usp.uBoxBounds, box.siMin, box.liMin, box.siMax, box.liMax);
+    gl.uniform1f(usp.uSmoothing, smoothing);
+    this.bindAt(2, this.texRawShade);
+    this.bindAt(3, this.texCorr);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     gl.disable(gl.SCISSOR_TEST);
@@ -474,7 +517,7 @@ export class DeferredDopplerPipeline {
   ): boolean {
     const gl = this.gl;
     const box = this.lastBox;
-    if (!this._valid || !box || !this.fbShade[this.current]) return false;
+    if (!this._valid || !box || !this.fbOut) return false;
     velOut.fill(NaN);
     varOut.fill(0);
     if (box.empty) return true;
@@ -484,7 +527,7 @@ export class DeferredDopplerPipeline {
     const buf =
       this.readbackBuf.length === needed ? this.readbackBuf : this.readbackBuf.subarray(0, needed);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbShade[this.current]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbOut);
     gl.readBuffer(gl.COLOR_ATTACHMENT0);
     gl.readPixels(box.siMin, box.liMin, box.boxW, box.boxH, gl.RGBA, gl.FLOAT, buf);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -500,7 +543,7 @@ export class DeferredDopplerPipeline {
       for (let dx = 0; dx < box.boxW; dx++) {
         const o = rowOff + dx * 4;
         if (buf[o + 3]! < 0.5) continue;
-        const vRaw = invPiScale * Math.atan2(buf[o + 1]!, buf[o]!);
+        const vRaw = baselineShiftMps + invPiScale * Math.atan2(buf[o + 1]!, buf[o]!);
         velOut[polarRow + dx] = aliasVelocity(vRaw, scale, baselineShiftMps);
         varOut[polarRow + dx] = buf[o + 2]!;
       }
@@ -510,15 +553,23 @@ export class DeferredDopplerPipeline {
 
   private disposeTargets(): void {
     const gl = this.gl;
-    for (const t of [this.texFlowRaw, this.texCorr, ...this.texOut, ...this.texHist])
+    for (const t of [
+      this.texFlowRaw,
+      this.texCorr,
+      this.texRawShade,
+      this.texOut,
+      ...this.texHist,
+    ])
       if (t) gl.deleteTexture(t);
-    for (const f of [this.fbCorr, ...this.fbShade]) if (f) gl.deleteFramebuffer(f);
+    for (const f of [this.fbCorr, ...this.fbShade, this.fbOut]) if (f) gl.deleteFramebuffer(f);
     this.texFlowRaw = null;
     this.texCorr = null;
-    this.texOut = [null, null];
+    this.texRawShade = null;
+    this.texOut = null;
     this.texHist = [null, null];
     this.fbCorr = null;
     this.fbShade = [null, null];
+    this.fbOut = null;
     this.w = 0;
     this.h = 0;
     this._valid = false;
@@ -530,10 +581,13 @@ export class DeferredDopplerPipeline {
     const gl = this.gl;
     if (this.progAutocorr) gl.deleteProgram(this.progAutocorr);
     if (this.progShade) gl.deleteProgram(this.progShade);
+    if (this.progSpatial) gl.deleteProgram(this.progSpatial);
     this.progAutocorr = null;
     this.progShade = null;
+    this.progSpatial = null;
     this.ua = null;
     this.us = null;
+    this.usp = null;
     this.disposeTargets();
     this.historyKey = '';
     this.lastGBufferVersion = -1;

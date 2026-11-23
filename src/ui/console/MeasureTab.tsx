@@ -118,12 +118,32 @@ function MeasureList({
   s: Pick<SimStore, 'measurements' | 'removeMeasurement'>;
   showView: boolean;
 }) {
-  const line = (m: SimStore['measurements'][number]) =>
-    `${m.value.toFixed(m.kind === 'time' || m.kind === 'volume' ? 0 : 2)} ${m.units}` +
-    (m.derived?.gradientMmHg !== undefined ? ` · ${m.derived.gradientMmHg.toFixed(0)} mmHg` : '') +
-    (m.derived?.meanGradientMmHg !== undefined
-      ? ` · media ${m.derived.meanGradientMmHg.toFixed(0)} mmHg`
-      : '');
+  const primaryValue = (m: SimStore['measurements'][number]) => {
+    const decimals = m.kind === 'time' || m.kind === 'volume' ? 0 : m.kind === 'vti' ? 1 : 2;
+    return `${m.value.toFixed(decimals)} ${m.units}`;
+  };
+  const secondaryMeta = (m: SimStore['measurements'][number]) => {
+    const parts: string[] = [];
+    if (m.derived?.gradientMmHg !== undefined) {
+      parts.push(`ΔP ${m.derived.gradientMmHg.toFixed(0)} mmHg`);
+    }
+    if (m.derived?.vmaxMps !== undefined && m.derived.vmaxMps > 0) {
+      parts.push(
+        m.modality === 'pw' || m.modality === 'tdi'
+          ? `Vmáx ${Math.round(m.derived.vmaxMps * 100)} cm/s`
+          : `Vmáx ${m.derived.vmaxMps.toFixed(2)} m/s`,
+      );
+    }
+    if (m.derived?.meanGradientMmHg !== undefined) {
+      const mg = m.derived.meanGradientMmHg;
+      parts.push(`ΔPm ${mg < 10 ? mg.toFixed(1) : mg.toFixed(0)} mmHg`);
+    }
+    return parts.join(' · ');
+  };
+  const line = (m: SimStore['measurements'][number]) => {
+    const sub = secondaryMeta(m);
+    return sub ? `${primaryValue(m)} · ${sub}` : primaryValue(m);
+  };
   const [status, setStatus] = useState<string | null>(null);
   const statusTimer = useRef<number | null>(null);
   useEffect(() => () => window.clearTimeout(statusTimer.current ?? undefined), []);
@@ -153,25 +173,29 @@ function MeasureList({
           Copiar mediciones
         </button>
       </div>
-      {s.measurements.map((m) => (
-        <div key={m.id} className="measure-row">
-          <span className="m-label">
-            {m.label}
-            <span className="m-src">
-              {modalityLabel(m.modality)}
-              {showView && m.sourceViewId ? ` · ${viewLabel(m.sourceViewId)}` : ''}
+      {s.measurements.map((m) => {
+        const sub = secondaryMeta(m);
+        return (
+          <div key={m.id} className="measure-row">
+            <span className="m-label">
+              {m.label}
+              <span className="m-src">
+                {modalityLabel(m.modality)}
+                {showView && m.sourceViewId ? ` · ${viewLabel(m.sourceViewId)}` : ''}
+              </span>
+              {sub && <span className="m-sub">{sub}</span>}
             </span>
-          </span>
-          <span className="m-value">{line(m)}</span>
-          <button
-            className="icon-btn"
-            aria-label="Eliminar medición"
-            onClick={() => s.removeMeasurement(m.id)}
-          >
-            ×
-          </button>
-        </div>
-      ))}
+            <span className="m-value">{primaryValue(m)}</span>
+            <button
+              className="icon-btn"
+              aria-label="Eliminar medición"
+              onClick={() => s.removeMeasurement(m.id)}
+            >
+              ×
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

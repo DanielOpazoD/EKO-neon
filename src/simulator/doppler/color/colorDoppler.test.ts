@@ -5,10 +5,12 @@ import {
   computeColorField,
   DEFAULT_COLOR,
   DOPPLER_SHADOW_TRANSMISSION,
+  overlayColorField,
   wallFilterResponse,
   type ColorAcquisition,
   type ColorSettings,
 } from './colorDoppler';
+import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   buildFlowParams,
   sampleFlow,
@@ -299,5 +301,100 @@ test('flowField reflects aortic stenosis jet acceleration and severe MR systolic
   assert.ok(
     mrLaSpeed > 2.5 && mrLaSpeed > normalLaSpeed + 2.0,
     `expected severe MR regurgitant jet (${mrLaSpeed.toFixed(2)} m/s) >> normal LA (${normalLaSpeed.toFixed(2)} m/s)`,
+  );
+
+  // Mid-systole: LV-side PISA convergence hemisphere 0.9 cm upstream of mitral orifice stays laminar and accelerates past 0.40 m/s
+  const pisaPt = (
+    flow: ReturnType<typeof buildFlowParams>,
+    hp: ReturnType<typeof computeHeartPose>,
+  ): [number, number, number] => [
+    flow.mvCenter.x,
+    flow.mvCenter.y,
+    hp.zAnn + 0.85,
+  ];
+  const mrPisa = sampleMidSystole(severeMr, pisaPt);
+  const mrPisaSpeed = Math.hypot(mrPisa.vx, mrPisa.vy, mrPisa.vz);
+  assert.ok(
+    mrPisaSpeed >= 0.35 && mrPisaSpeed <= 1.2 && mrPisa.dispersion <= 0.12,
+    `expected laminar PISA shell around 0.40 m/s at 0.85 cm upstream, got v=${mrPisaSpeed.toFixed(2)} m/s disp=${mrPisa.dispersion.toFixed(2)}`,
+  );
+});
+
+test('overlayColorField preserves unaliased baseline-shifted velocity, interpolates shifted aliasing seams, and maintains laminar Kasai fill', () => {
+  // 1. Baseline-shifted overlay: scale=0.60, baseline=+0.35 -> range [-0.25, +0.95] m/s
+  const lut: ScanLut = {
+    key: 'baseline-test',
+    lines: 2,
+    samples: 2,
+    idx: new Int32Array([0, 0]),
+    inPix: new Int32Array([0, 1]),
+    inIdx: new Int32Array([0, 0]),
+    inWl: new Uint16Array([512, 512]),
+    inWs: new Uint16Array([0, 0]),
+    inDl: new Uint8Array([1, 1]),
+    inDs: new Uint8Array([0, 0]),
+    wl: new Float32Array([0.5, 0.5]),
+    ws: new Float32Array([0.0, 0.0]),
+    li: new Int16Array([0, 0]),
+    si: new Int16Array([0, 0]),
+    rCm: new Float32Array([6, 6]),
+    theta: new Float32Array([0, 0]),
+  };
+  const shiftedSettings: ColorSettings = {
+    ...FULL_BOX,
+    scaleMps: 0.6,
+    baselineShiftMps: 0.35,
+    showVariance: false,
+  };
+
+  // Unaliased +0.85 m/s must paint bright red/yellow (R >> B), NOT wrap into blue
+  const rgbaUnaliased = new Uint8ClampedArray([20, 20, 20, 255, 20, 20, 20, 255]);
+  const velPos = new Float32Array([0.85, 0.85, 0.85, 0.85]);
+  const zeroVar = new Float32Array(4);
+  const fullPow = new Float32Array([1, 1, 1, 1]);
+  overlayColorField(rgbaUnaliased, lut, velPos, zeroVar, shiftedSettings, fullPow);
+  assert.ok(
+    rgbaUnaliased[0]! > 190 && rgbaUnaliased[0]! > rgbaUnaliased[2]! + 120,
+    `expected bright red/yellow for unaliased +0.85 m/s under shifted baseline, got rgb=(${rgbaUnaliased[0]},${rgbaUnaliased[1]},${rgbaUnaliased[2]})`,
+  );
+
+  // Straddling the shifted aliasing boundary (+0.92 and -0.22 around seam +0.95/-0.25) must stay bright, never dark zero
+  const rgbaSeam = new Uint8ClampedArray([20, 20, 20, 255, 20, 20, 20, 255]);
+  const velSeam = new Float32Array([0.92, 0.92, -0.22, -0.22]);
+  overlayColorField(rgbaSeam, lut, velSeam, zeroVar, shiftedSettings, fullPow);
+  const seamPeak = Math.max(rgbaSeam[0]!, rgbaSeam[1]!, rgbaSeam[2]!);
+  assert.ok(
+    seamPeak > 160,
+    `expected bright shifted aliasing seam interpolation > 160, got rgb=(${rgbaSeam[0]},${rgbaSeam[1]},${rgbaSeam[2]})`,
+  );
+
+  // 2. Multi-look Kasai laminar fill continuity at 0 dB gain (minimal drop-out holes inside strong laminar flow)
+  const frame = makeBloodFrame(20, 40, 16);
+  const out = allocColorField(frame.spec.lines * frame.spec.samples);
+  computeColorField(
+    frame,
+    { ...FULL_BOX, gainDb: 0 },
+    null,
+    (_idx, _li, _si, res) => {
+      res.v = 0.45;
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    out,
+    ACQ,
+    { realization: 5, seed: 42 },
+  );
+  let filled = 0;
+  let total = 0;
+  for (let li = 4; li < 16; li++) {
+    for (let si = 8; si < 32; si++) {
+      total++;
+      if (Number.isFinite(out.vel[li * 40 + si])) filled++;
+    }
+  }
+  const fillFrac = filled / total;
+  assert.ok(
+    fillFrac >= 0.92,
+    `expected >= 92% laminar fill continuity at 0 dB gain, got ${(fillFrac * 100).toFixed(1)}%`,
   );
 });

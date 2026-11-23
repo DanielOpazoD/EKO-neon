@@ -78,6 +78,7 @@ export interface PresentColorCpu {
   deferred?: false;
   vel: Float32Array;
   variance: Float32Array;
+  power?: Float32Array;
   /** Changes whenever the field is recomputed, so an unchanged field is not uploaded again. */
   version: number;
   settings: ColorPresentSettings;
@@ -773,7 +774,7 @@ export class Webgl2Renderer implements RendererBackend {
     if (colorActive) {
       const c = color.settings;
       gl.uniform4f(u.uBox, c.boxRMinCm, c.boxRMaxCm, c.boxThetaMinRad, c.boxThetaMaxRad);
-      gl.uniform2f(u.uColorMap, c.scaleMps, c.showVariance ? 1 : 0);
+      gl.uniform3f(u.uColorMap, c.scaleMps, c.showVariance ? 1 : 0, c.baselineShiftMps ?? 0);
     }
     this.bindAt(2, t.texPacked);
     this.bindAt(3, this.uploads.lutTex);

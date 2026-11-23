@@ -147,11 +147,13 @@ export function aorticSectionFlow(n: AorticNetwork, edge: number, u: number): nu
       if (j.segment === edge && u >= j.u) q -= n.startMlps[48 + j.branch]!;
   return q;
 }
-/** Normalized Poiseuille profile: disk average one, no slip at the moving wall.
- * Quasi-steady laminar approximation; pulsatile Womersley flattening and secondary flow are absent.
+/** Normalized pulsatile aortic (Womersley-like blunt) profile: disk average = ∫₀¹ 2r·(4/3)(1−r⁶) dr = 1,
+ * no slip at the moving wall, realistic peak-to-mean ratio (~1.33) instead of steady parabolic Poiseuille (2.0).
  */
 export function aorticVelocityProfile(relativeRadius: number): number {
-  return relativeRadius >= 1 ? 0 : 2 * (1 - relativeRadius * relativeRadius);
+  if (relativeRadius >= 1) return 0;
+  const r2 = relativeRadius * relativeRadius;
+  return (4 / 3) * (1 - r2 * r2 * r2);
 }
 const cache = new WeakMap<
   HeartPose,

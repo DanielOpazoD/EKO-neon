@@ -205,6 +205,10 @@ export function accumulateSpectrum(
     const zeroBin = (vMax / span) * SPECTRAL_BINS;
     const crossesAt = !aliasing && (zeroBin - centerBin) * baselineSide > 0 ? zeroBin : NaN;
     const weighted = smp.weight * wfGain;
+    // In CW high-velocity turbulent jets, erythrocytes traversing the vena contracta potential core
+    // create a crisper outer velocity rim atop the broad turbulent shear fill toward baseline.
+    const isCwJetRim = !aliasing && smp.dispersion > 0.22 && Math.abs(smp.v) > 1.2;
+    const rimDownBins = isCwJetRim ? Math.min(downBins, Math.max(upBins * 2.1, 1.8)) : downBins;
     for (let b = lo; b <= hi; b++) {
       const o = b + 0.5 - centerBin;
       const towardBaseline = o * baselineSide > 0;
@@ -213,6 +217,10 @@ export function accumulateSpectrum(
         const d0 = (crossesAt - centerBin) / downBins;
         const beyond = (b + 0.5 - crossesAt) / upBins;
         w = Math.exp(-0.5 * (d0 * d0 + beyond * beyond));
+      } else if (isCwJetRim && towardBaseline) {
+        const dFill = o / downBins;
+        const dRim = o / rimDownBins;
+        w = 0.62 * Math.exp(-0.5 * dFill * dFill) + 0.38 * Math.exp(-0.5 * dRim * dRim);
       } else {
         const d = o / (towardBaseline ? downBins : upBins);
         w = Math.exp(-0.5 * d * d);
@@ -250,6 +258,13 @@ const SPECTRAL_NOISE = 0.05;
 export const PW_MODAL_EDGE_FRAC = 0.58;
 
 /**
+ * ASE outer-edge threshold fraction on the compressed `power^0.7` envelope buffer for CW Doppler.
+ * Tracks the crisp outer rim of stenotic/regurgitant jets even in bimodal LVOT+AV spectra while
+ * remaining strictly above the noise ceiling across [-8 dB, +8 dB] gain.
+ */
+export const CW_OUTER_EDGE_FRAC = 0.32;
+
+/**
  * Display level above which a bin belongs to the envelope (decision 96): 35% of the column's brightest bin, and 1.5× the
  * brightest the noise can draw at this gain, so a column without flow has no envelope. A floor of 0.12 sat under the
  * noise ceiling (0.123 at 0 dB), and an auto-trace starting from the brightest bin read noise as velocities up to 1.1 m/s.
@@ -259,6 +274,16 @@ export function envelopeThreshold(columnMax: number, s: SpectralSettings): numbe
     1.5 * Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7),
     0.35 * columnMax,
   );
+}
+
+/**
+ * Noise-safe CW outer-envelope threshold: uses 1.25× the exact noise ceiling (still strictly above
+ * every noise-only bin at any gain) and `CW_OUTER_EDGE_FRAC * columnMax` so active CW jets remain
+ * gain-invariant from -8 dB to +8 dB.
+ */
+export function cwEnvelopeThreshold(columnMax: number, s: SpectralSettings): number {
+  const noiseCeil = Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7);
+  return Math.max(1.25 * noiseCeil, CW_OUTER_EDGE_FRAC * columnMax);
 }
 
 /**
@@ -399,7 +424,10 @@ export function displaySpectrum(
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, expected[b] ?? 0);
   const snr = acousticSnrScale(max);
   const norm = max > 0 ? snr / (max * 0.8 + 0.2) : 0;
-  const tCells = timeS / (SPECKLE_HOP_FRACTION * estimateDurationS(s, frequencyMHz, activeFraction));
+  // Cap STFT speckle correlation window at 32 ms (matching pulsedIq low-PRF TDI windowing) so
+  // ±20 cm/s TDI renders crisp ultrasound texture instead of 60 ms horizontal dashes.
+  const speckleDurS = Math.min(0.032, estimateDurationS(s, frequencyMHz, activeFraction));
+  const tCells = timeS / (SPECKLE_HOP_FRACTION * speckleDurS);
   const noise = Math.pow(10, NOISE_DB / 10);
   const dir = s.invert ? -clickDirection : clickDirection;
   if (addFlowSpeckle) estimateSpeckleColumn(tCells, seed, 17, speckleFlow);

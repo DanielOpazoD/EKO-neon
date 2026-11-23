@@ -136,17 +136,25 @@ export function kasaiEstimate(
 ): KasaiResult {
   const n = nL * nS;
   const stream = estimate.realization * 64;
-  // the blood's speckle amplitude: a complex Gaussian of unit power, correlated over about two samples and two lines
+  // the blood's speckle amplitude: 2-look incoherent range-cell envelope (multi-cycle Color Doppler
+  // transmit burst spans ~2 axial scatterer sub-volumes), unit mean power, correlated over the resolution cell
   const zr = colorScratch('zr', n);
   const zi = colorScratch('zi', n);
+  const zr2 = colorScratch('zr2', n);
+  const zi2 = colorScratch('zi2', n);
   const tmp = colorScratch('tmp', n);
   for (let l = 0; l < nL; l++)
     for (let k = 0; k < nS; k++) {
-      zr[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream, estimate.seed);
-      zi[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream + 2, estimate.seed);
+      const idx = l * nS + k;
+      zr[idx] = hashGaussian(liMin + l, siMin + k, stream, estimate.seed);
+      zi[idx] = hashGaussian(liMin + l, siMin + k, stream + 2, estimate.seed);
+      zr2[idx] = hashGaussian(liMin + l, siMin + k, stream + 40, estimate.seed);
+      zi2[idx] = hashGaussian(liMin + l, siMin + k, stream + 42, estimate.seed);
     }
   smoothGrid(zr, nL, nS, tmp);
   smoothGrid(zi, nL, nS, tmp);
+  smoothGrid(zr2, nL, nS, tmp);
+  smoothGrid(zi2, nL, nS, tmp);
   // the pulse-to-pulse jitter of each pulse, correlated over the same cell: neighbouring samples share their scatterers
   const N = COLOR_PACKET;
   for (let p = 0; p < N; p++) {
@@ -166,7 +174,7 @@ export function kasaiEstimate(
   // slider had three states: 0.01-0.09 m/s drew the same image, and so did 0.10-0.30
   const cut = Math.max(0, wallFilterMps / scaleMps);
   const meanShare = Math.min(1, cut / 0.1);
-  const trendShare = Math.min(1, Math.max(0, (cut - 0.1) / 0.25));
+  const trendShare = Math.min(1, Math.max(0, (cut - 0.16) / 0.24));
   const r0 = colorScratch('r0', n);
   const r1r = colorScratch('r1r', n);
   const r1i = colorScratch('r1i', n);
@@ -182,8 +190,15 @@ export function kasaiEstimate(
     const li = liMin + l;
     const si = siMin + k;
     const amp = Math.sqrt(cellRel[g]!);
-    const ar = amp * zr[g]! * unit;
-    const ai = amp * zi[g]! * unit;
+    const z1r = zr[g]!;
+    const z1i = zi[g]!;
+    const z2r = zr2[g]!;
+    const z2i = zi2[g]!;
+    const p1 = z1r * z1r + z1i * z1i;
+    const p2 = z2r * z2r + z2i * z2i;
+    const lookBoost = Math.sqrt(0.5 * (1 + p2 / Math.max(1e-8, p1)));
+    const ar = amp * z1r * unit * lookBoost;
+    const ai = amp * z1i * unit * lookBoost;
     const phi = (Math.PI * v) / scaleMps;
     const turbulent = (Math.PI * 0.9 * cellDisp[g]! * Math.abs(v)) / scaleMps / Math.SQRT2;
     const jitter = Math.hypot(TRANSIT_JITTER_RAD, turbulent);

@@ -23,9 +23,15 @@ import {
   type PolarGBuffer,
 } from './deferredDoppler';
 import {
+  ST_HYSTERESIS_RATIO,
+  ST_SPATIAL_LAMINAR_MIX,
+  ST_SPATIAL_TURB_MIX,
+} from '@/simulator/doppler/color/spatiotemporalFilter';
+import {
   dopplerDefinesGlsl,
   GLSL_DOPPLER_AUTOCORR_FRAG,
   GLSL_DOPPLER_SHADE_FRAG,
+  GLSL_DOPPLER_SPATIAL_FRAG,
 } from './glslDoppler';
 import { Webgl2Renderer } from './webgl2Renderer';
 
@@ -252,12 +258,17 @@ test('GLSL deferred Doppler shaders synchronize all physical constants with Type
   assert.ok(defs.includes(`#define NOISE_POWER_GATE ${NOISE_POWER_GATE}`));
   assert.ok(defs.includes(`#define ATTEN_NP_PER_DB ${ATTEN_NP_PER_DB}`));
   assert.ok(defs.includes(`#define SOFT_TISSUE_ATTEN_DB ${SOFT_TISSUE_ATTEN_DB}`));
+  assert.ok(defs.includes(`#define ST_HYSTERESIS_RATIO ${ST_HYSTERESIS_RATIO}`));
+  assert.ok(defs.includes(`#define ST_SPATIAL_LAMINAR_MIX ${ST_SPATIAL_LAMINAR_MIX}`));
+  assert.ok(defs.includes(`#define ST_SPATIAL_TURB_MIX ${ST_SPATIAL_TURB_MIX}`));
   assert.ok(defs.includes('const float KASAI_LIN_BASIS[COLOR_PACKET]'));
 
   assert.ok(GLSL_DOPPLER_AUTOCORR_FRAG.startsWith('#version 300 es'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.startsWith('#version 300 es'));
-  assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 0) out vec4 outDisplay;'));
+  assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.startsWith('#version 300 es'));
+  assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 0) out vec4 outShade;'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 1) out vec4 outHist;'));
+  assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.includes('layout(location = 0) out vec4 outDisplay;'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('safeAtan2'));
 });
 
@@ -293,7 +304,7 @@ test('DeferredDopplerPipeline allocates lazily, clips to ROI scissor box, upload
   assert.equal(ok1, true);
   assert.equal(pipe.allocated, true);
   assert.equal(pipe.valid, true);
-  assert.equal(mock.log.programsCreated, 2, 'Pass D1 + Pass D2 programs');
+  assert.equal(mock.log.programsCreated, 3, 'Pass D1 + Pass D2 + Pass D3 spatial programs');
   assert.equal(mock.log.subImageCalls.length, 1, 'uploads only the ROI box sub-rectangle');
   assert.deepEqual(mock.log.subImageCalls[0], {
     x: box.siMin,
@@ -301,10 +312,11 @@ test('DeferredDopplerPipeline allocates lazily, clips to ROI scissor box, upload
     w: box.boxW,
     h: box.boxH,
   });
-  assert.equal(mock.log.scissorCalls.length, 2, 'both Pass D1 and Pass D2 must be scissor-clipped');
+  assert.equal(mock.log.scissorCalls.length, 3, 'all 3 passes (D1, D2, D3) must be scissor-clipped');
   assert.deepEqual(mock.log.scissorCalls[0], [box.siMin, box.liMin, box.boxW, box.boxH]);
   assert.deepEqual(mock.log.scissorCalls[1], [box.siMin, box.liMin, box.boxW, box.boxH]);
-  assert.equal(mock.log.drawCalls, 2);
+  assert.deepEqual(mock.log.scissorCalls[2], [box.siMin, box.liMin, box.boxW, box.boxH]);
+  assert.equal(mock.log.drawCalls, 3);
   assert.equal(mock.log.uniform1i.get('uUseHistory'), 0, 'first frame has no prior phasor history');
   assert.equal(pipe.stats().independentPasses, 0);
 
@@ -384,6 +396,19 @@ test('DeferredDopplerPipeline.readbackBox decodes complex phasors back into alia
   assert.ok(Math.abs(velOut[polarIdx]! - vExpected) < 1e-5);
   assert.ok(Math.abs(varOut[polarIdx]! - 0.35) < 1e-6);
   assert.ok(Number.isNaN(velOut[0]!), 'outside ROI box stays NaN');
+
+  // Verify non-zero baselineShiftMps decodes baseline-centered phase without wrap distortion
+  const shift = 0.25;
+  const vShiftedExpected = 0.82; // inside [-0.35, +0.85] at scale=0.60, baseline=+0.25
+  const phiShifted = (Math.PI * (vShiftedExpected - shift)) / scale;
+  fakeReadback[idx] = Math.cos(phiShifted);
+  fakeReadback[idx + 1] = Math.sin(phiShifted);
+  fakeReadback[idx + 3] = 0.78; // valid power-modulated alpha >= 0.5
+  assert.equal(pipe.readbackBox(TEST_SPEC, scale, shift, velOut, varOut), true);
+  assert.ok(
+    Math.abs(velOut[polarIdx]! - vShiftedExpected) < 1e-5,
+    `expected shifted readback ${vShiftedExpected}, got ${velOut[polarIdx]}`,
+  );
   pipe.dispose();
 });
 

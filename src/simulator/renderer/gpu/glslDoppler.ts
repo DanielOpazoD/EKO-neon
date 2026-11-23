@@ -12,6 +12,7 @@ import {
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
 } from '@/simulator/doppler/color/kasaiEstimator';
+import { spatiotemporalDefinesGlsl } from '@/simulator/doppler/color/spatiotemporalFilter';
 import {
   ATTEN_NP_PER_DB,
   glslFloat,
@@ -21,7 +22,7 @@ import {
 /**
  * Shared GLSL physical constants for the deferred Color Doppler pipeline.
  * Every numeric constant is imported directly from the TypeScript acoustic and Doppler
- * modules so CPU (`computeColorField` / `kasaiEstimate`) and GPU deferred passes stay locked in sync.
+ * modules so CPU (`computeColorField` / `kasaiEstimate` / `spatiotemporalFilter`) and GPU deferred passes stay locked in sync.
  */
 export function dopplerDefinesGlsl(): string {
   const linBasisLiterals = Array.from(KASAI_LIN_BASIS, (v) => glslFloat(v)).join(', ');
@@ -37,6 +38,7 @@ export function dopplerDefinesGlsl(): string {
     `#define NOISE_COHERENCE ${glslFloat(NOISE_COHERENCE)}`,
     `#define NOISE_POWER_GATE ${glslFloat(NOISE_POWER_GATE)}`,
     `#define LAMINAR_DECORRELATION ${glslFloat(LAMINAR_DECORRELATION)}`,
+    spatiotemporalDefinesGlsl(),
     `const float KASAI_LIN_BASIS[COLOR_PACKET] = float[COLOR_PACKET](${linBasisLiterals});`,
   ].join('\n');
 }
@@ -172,8 +174,10 @@ void main() {
   uint baseStream = uRealization * 64u;
   float amp = sqrt(rel);
   vec2 zSpec = correlatedGaussianPair(li, si, baseStream, uSeed) * (amp * INV_SQRT2);
-  float ar = zSpec.x;
-  float ai = zSpec.y;
+  vec2 zSpec2 = correlatedGaussianPair(li, si, baseStream + 40u, uSeed) * (amp * INV_SQRT2);
+  float lookBoost = sqrt(0.5 * (1.0 + dot(zSpec2, zSpec2) / max(1e-8, dot(zSpec, zSpec))));
+  float ar = zSpec.x * lookBoost;
+  float ai = zSpec.y * lookBoost;
 
   float jit[COLOR_PACKET];
   vec2 jp0 = correlatedGaussianPair(li, si, baseStream + 2u, uSeed);
@@ -204,7 +208,7 @@ void main() {
   // Continuous regression wall filter (mean + orthonormal linear trend removal)
   float cut = max(0.0, uWallFilterMps / scale);
   float meanShare = min(1.0, cut / 0.1);
-  float trendShare = min(1.0, max(0.0, (cut - 0.1) / 0.25));
+  float trendShare = min(1.0, max(0.0, (cut - 0.16) / 0.24));
   if (meanShare > 0.0) {
     float mr = 0.0;
     float mi = 0.0;
@@ -257,13 +261,13 @@ void main() {
 
 /**
  * Deferred Doppler Pass D2 — Resolution-Cell Autocorrelation Averaging, Coherence & Power Gating,
- * Nyquist Phase Aliasing & GPU-Native Circular Phasor Temporal Persistence.
+ * Nyquist Phase Aliasing & GPU-Native Flow-Regime-Adaptive Circular Temporal Persistence
+ * (asymmetric attack/decay + blood-safe hysteresis decay on momentary stochastic drop-outs).
  *
  * Outputs MRT (`RGBA16F`):
- *  - location 0 (`outDisplay`): `(cos(phi_disp), sin(phi_disp), variance, valid)` ready for direct
- *    binding to `GLSL_PRESENT_FRAG`'s `uColor` sampler with zero CPU readback or repack.
- *  - location 1 (`outHist`): `(cos(phi_base) * power, sin(phi_base) * power, variance, power)`
- *    ping-ponged across Doppler updates for aliasing-safe circular temporal persistence.
+ *  - location 0 (`outShade`): `(cos(phi_base), sin(phi_base), variance, powOut)` fed into Pass D3.
+ *  - location 1 (`outHist`): `(cos(phi_base) * powOut, sin(phi_base) * powOut, variance, powOut)`
+ *    ping-ponged across Doppler updates (pre-spatial, preventing recursive spatial blur drift).
  */
 export const GLSL_DOPPLER_SHADE_FRAG = /* glsl */ `#version 300 es
 precision highp float;
@@ -278,10 +282,11 @@ uniform float uBaselineMps;
 uniform float uWallFilterMps;
 uniform float uGainLin;
 uniform float uPersist;
+uniform float uSmoothing;
 uniform int uUseHistory;
 uniform int uUseKasai;
 
-layout(location = 0) out vec4 outDisplay;
+layout(location = 0) out vec4 outShade;
 layout(location = 1) out vec4 outHist;
 
 const float PI = 3.141592653589793;
@@ -310,14 +315,16 @@ void main() {
   int si = int(gl_FragCoord.x);
   int li = int(gl_FragCoord.y);
 
+  // Non-blood or shadowed sample: cut immediately so moving valves/myocardium never carry color trails
   vec4 center = texelFetch(uCorr, ivec2(si, li), 0);
   if (center.a < 0.5) {
-    outDisplay = vec4(0.0);
+    outShade = vec4(0.0);
     outHist = vec4(0.0);
     return;
   }
 
   float scale = max(1e-3, uScaleMps);
+  bool hasCurr = false;
   float power = 0.0;
   float vEstimate = 0.0;
   float variance = 0.0;
@@ -344,71 +351,263 @@ void main() {
         wSum += wt;
       }
     }
-    if (wSum <= 0.0) {
-      outDisplay = vec4(0.0);
-      outHist = vec4(0.0);
-      return;
+    if (wSum > 0.0) {
+      float R0 = sumR0 / wSum;
+      if (R0 > 0.0) {
+        float R1r = sumR1r / wSum;
+        float R1i = sumR1i / wSum;
+        vEstimate = (scale * safeAtan2(R1i, R1r)) / PI;
+        float rawPow = max(0.0, R0 - NOISE_POWER);
+        power = min(1.0, uGainLin * rawPow);
+        float coherence = length(vec2(R1r, R1i)) / R0;
+        bool rejectedNoise = coherence < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD;
+        float rawVar = 1.0 - coherence;
+        variance = clamp((rawVar - LAMINAR_DECORRELATION) / (1.0 - LAMINAR_DECORRELATION), 0.0, 1.0);
+        hasCurr = !rejectedNoise && power >= COLOR_THRESHOLD;
+      }
     }
-    float R0 = sumR0 / wSum;
-    if (R0 <= 0.0) {
-      outDisplay = vec4(0.0);
-      outHist = vec4(0.0);
-      return;
-    }
-    float R1r = sumR1r / wSum;
-    float R1i = sumR1i / wSum;
-    vEstimate = (scale * safeAtan2(R1i, R1r)) / PI;
-    float rawPow = max(0.0, R0 - NOISE_POWER);
-    power = min(1.0, uGainLin * rawPow);
-    float coherence = length(vec2(R1r, R1i)) / R0;
-    if (coherence < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD) {
-      outDisplay = vec4(0.0);
-      outHist = vec4(0.0);
-      return;
-    }
-    float rawVar = 1.0 - coherence;
-    variance = clamp((rawVar - LAMINAR_DECORRELATION) / (1.0 - LAMINAR_DECORRELATION), 0.0, 1.0);
   } else {
     float vTrue = center.r;
     float disp = center.g;
     float rel = center.b;
-    if (abs(vTrue) < uWallFilterMps) {
-      outDisplay = vec4(0.0);
-      outHist = vec4(0.0);
-      return;
+    if (abs(vTrue) >= uWallFilterMps) {
+      power = min(1.0, uGainLin * rel * wallFilterResponse(abs(vTrue), uWallFilterMps));
+      vEstimate = vTrue;
+      variance = min(1.0, disp * 1.6);
+      hasCurr = power >= COLOR_THRESHOLD;
     }
-    power = min(1.0, uGainLin * rel * wallFilterResponse(abs(vTrue), uWallFilterMps));
-    vEstimate = vTrue;
-    variance = min(1.0, disp * 1.6);
   }
 
-  if (power < COLOR_THRESHOLD) {
-    outDisplay = vec4(0.0);
-    outHist = vec4(0.0);
+  float pBase = clamp(uPersist, 0.0, 0.95);
+  float sm = clamp(uSmoothing, 0.0, 1.0);
+  vec4 prev = (uUseHistory != 0) ? texelFetch(uHist, ivec2(si, li), 0) : vec4(0.0);
+  bool hasPrev = (uUseHistory != 0) && prev.a > 0.0;
+
+  if (hasCurr) {
+    float v = aliasVelocity(vEstimate, scale, uBaselineMps);
+    float a1 = (PI * (v - uBaselineMps)) / scale;
+    vec2 ph1 = vec2(cos(a1), sin(a1));
+    vec2 phOut = ph1;
+    float varOut = variance;
+    float powOut = power;
+
+    if (hasPrev && pBase > 0.0) {
+      float prevMag = max(1e-6, length(prev.rg));
+      vec2 ph0 = prev.rg / prevMag;
+      float cosDelta = clamp(dot(ph1, ph0), -1.0, 1.0);
+      float phaseDelta = acos(cosDelta);
+      float phaseJump = smoothstep(0.45, ST_PHASE_JUMP_REF_RAD, phaseDelta);
+      float steadyPhase = 1.0 - phaseJump;
+      float maxVar = max(variance, prev.b);
+      float laminarCue = clamp(1.0 - maxVar * 2.2, 0.0, 1.0) * steadyPhase;
+      float turbCue = clamp(maxVar * 1.6, 0.0, 1.0);
+
+      float rise = clamp((power - prev.a - 0.08) / 0.35, 0.0, 1.0);
+      float attackScale = 1.0 - (1.0 - ST_ATTACK_PERSIST_SCALE) * rise * sm;
+      float dynamicCue = max(turbCue, phaseJump);
+      float pRegime = pBase + sm * (
+        ST_LAMINAR_PERSIST_BOOST * laminarCue * (1.0 - pBase) -
+        (1.0 - ST_TURB_PERSIST_SCALE) * dynamicCue * pBase
+      );
+      float pEff = clamp(pRegime * attackScale, 0.0, 0.92);
+
+      vec2 blended = (1.0 - pEff) * power * ph1 + pEff * prev.rg;
+      float bLen = length(blended);
+      phOut = bLen > 1e-6 ? blended / bLen : ph1;
+
+      float pVar = clamp(pEff + 0.12 * sm * laminarCue, 0.0, 0.92);
+      varOut = variance * (1.0 - pVar) + prev.b * pVar;
+      powOut = power * (1.0 - pEff) + prev.a * pEff;
+    }
+
+    outShade = vec4(phOut, varOut, powOut);
+    outHist = vec4(phOut * powOut, varOut, powOut);
     return;
   }
 
-  float v = aliasVelocity(vEstimate, scale, uBaselineMps);
-  float vel = v;
-  float powOut = power;
-  float a1 = (PI * (v - uBaselineMps)) / scale;
-
-  // Circular power-weighted phasor persistence against previous deferred Doppler frame
-  if (uUseHistory != 0 && uPersist > 0.0) {
-    vec4 prev = texelFetch(uHist, ivec2(si, li), 0);
-    if (prev.a > 0.0) {
-      float p = clamp(uPersist, 0.0, 0.99);
-      float re = (1.0 - p) * power * cos(a1) + p * prev.r;
-      float im = (1.0 - p) * power * sin(a1) + p * prev.g;
-      vel = aliasVelocity(uBaselineMps + (scale * safeAtan2(im, re)) / PI, scale, uBaselineMps);
-      variance = variance * (1.0 - p) + prev.b * p;
-      powOut = power * (1.0 - p) + prev.a * p;
+  // Momentary stochastic drop-out over valid blood: smooth hysteresis decay instead of binary blink
+  if (hasPrev && pBase > 0.0 && sm > 0.0) {
+    float decay = (ST_DROPOUT_DECAY_BASE + ST_DROPOUT_DECAY_PERSIST * pBase) * (0.75 + 0.25 * sm);
+    float decayedPow = prev.a * decay;
+    if (decayedPow >= COLOR_THRESHOLD * ST_HYSTERESIS_RATIO) {
+      float prevMag = max(1e-6, length(prev.rg));
+      vec2 ph0 = prev.rg / prevMag;
+      outShade = vec4(ph0, prev.b, decayedPow);
+      outHist = vec4(ph0 * decayedPow, prev.b, decayedPow);
+      return;
     }
   }
 
-  float phiDisp = (PI * vel) / scale;
-  float phiBase = (PI * (vel - uBaselineMps)) / scale;
-  outDisplay = vec4(cos(phiDisp), sin(phiDisp), variance, 1.0);
-  outHist = vec4(cos(phiBase) * powOut, sin(phiBase) * powOut, variance, powOut);
+  outShade = vec4(0.0);
+  outHist = vec4(0.0);
 }
 `;
+
+/**
+ * Deferred Doppler Pass D3 — Coherence- & Variance-Adaptive Circular Spatial Filter
+ * (isolated-speckle rejection, blood-safe pinhole closure, edge-preserving circular bilateral
+ * smoothing, and laminar-vs-turbulent variance contrast enhancement).
+ *
+ * Output (`RGBA16F`, location 0 `outDisplay`):
+ *  `(cos(phi_base), sin(phi_base), variance, 0.5 + 0.5 * powConf)` ready for direct zero-readback
+ *  binding to `GLSL_PRESENT_FRAG`'s `uColor` sampler.
+ */
+export const GLSL_DOPPLER_SPATIAL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+
+uniform sampler2D uShade;    // Pass D2 output (RGBA16F): cos(phi), sin(phi), var, power
+uniform sampler2D uCorr;     // Pass D1 output (RGBA32F): .a >= 0.5 marks unshadowed blood
+uniform ivec4 uBoxBounds;    // (siMin, liMin, siMax, liMax) inclusive
+uniform float uSmoothing;    // [0..1]
+
+layout(location = 0) out vec4 outDisplay;
+
+${dopplerDefinesGlsl()}
+
+float colorPowerConf(float p) {
+  return smoothstep(COLOR_THRESHOLD * ST_HYSTERESIS_RATIO, COLOR_THRESHOLD + 0.30, p);
+}
+
+void main() {
+  int si = int(gl_FragCoord.x);
+  int li = int(gl_FragCoord.y);
+
+  vec4 c = texelFetch(uShade, ivec2(si, li), 0);
+  float sm = clamp(uSmoothing, 0.0, 1.0);
+
+  if (sm <= 0.0) {
+    if (c.a <= 0.0) {
+      outDisplay = vec4(0.0);
+    } else {
+      outDisplay = vec4(c.rg, c.b, 0.5 + 0.5 * colorPowerConf(c.a));
+    }
+    return;
+  }
+
+  int nCount = 0;
+  float nGeomW = 0.0;
+  float nPowSum = 0.0;
+  float nVarPowSum = 0.0;
+  vec2 nPhSum = vec2(0.0);
+
+  for (int dl = -1; dl <= 1; dl++) {
+    int ll = li + dl;
+    if (ll < uBoxBounds.y || ll > uBoxBounds.w) continue;
+    float wl = (dl == 0) ? 2.0 : 1.0;
+    for (int ds = -1; ds <= 1; ds++) {
+      if (dl == 0 && ds == 0) continue;
+      int ss = si + ds;
+      if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
+      vec4 tap = texelFetch(uShade, ivec2(ss, ll), 0);
+      if (tap.a <= 0.0) continue;
+      float wGeom = wl * ((ds == 0) ? 2.0 : 1.0);
+      float wp = wGeom * tap.a;
+      nCount++;
+      nGeomW += wGeom;
+      nPowSum += wp;
+      nVarPowSum += wp * tap.b;
+      nPhSum += wp * tap.rg;
+    }
+  }
+
+  // Case 1: Center uncolored -> safe blood-pool pinhole closure only (never bleeds into tissue/shadow)
+  if (c.a <= 0.0) {
+    float isBlood = texelFetch(uCorr, ivec2(si, li), 0).a;
+    int minPinhole = (sm >= 0.5) ? ST_PINHOLE_MIN_COUNT : 6;
+    if (isBlood >= 0.5 && sm >= 0.25 && nCount >= minPinhole && nGeomW >= 7.0 && nPowSum > 1e-6) {
+      float meanPow = nPowSum / nGeomW;
+      if (meanPow >= ST_PINHOLE_MIN_POWER) {
+        float phLen = length(nPhSum);
+        vec2 phFill = phLen > 1e-6 ? (nPhSum / phLen) : vec2(1.0, 0.0);
+        float varFill = nVarPowSum / nPowSum;
+        float powFill = min(1.0, meanPow * (0.65 + 0.25 * sm));
+        outDisplay = vec4(phFill, varFill, 0.5 + 0.5 * colorPowerConf(powFill));
+        return;
+      }
+    }
+    outDisplay = vec4(0.0);
+    return;
+  }
+
+  // Case 2: Center colored -> isolated-speckle flicker rejection
+  bool isolatedSingle = sm >= 0.2 && nCount == 0;
+  bool isolatedWeakPair =
+    sm >= 0.4 &&
+    (nCount < ST_MIN_NEIGHBOR_COUNT || nGeomW < ST_MIN_NEIGHBOR_WEIGHT * sm) &&
+    c.a < 0.72;
+  if (isolatedSingle || isolatedWeakPair) {
+    outDisplay = vec4(0.0);
+    return;
+  }
+
+  // Local circular phase coherence & laminar/turbulent regime classification
+  float cWeight = 4.0 * c.a;
+  float allPowSum = nPowSum + cWeight;
+  vec2 allPh = nPhSum + cWeight * c.rg;
+  float spatialCoherence = allPowSum > 1e-6 ? min(1.0, length(allPh) / allPowSum) : 1.0;
+  float varLocal = allPowSum > 1e-6 ? (nVarPowSum + cWeight * c.b) / allPowSum : c.b;
+  float varLaminar = clamp(1.0 - varLocal / 0.42, 0.0, 1.0);
+  float cohLaminar = smoothstep(0.55, 0.92, spatialCoherence);
+  float laminarFactor = varLaminar * cohLaminar;
+
+  // Edge-preserving circular phase-similarity bilateral gather
+  float bCenterW = 2.0 * c.a;
+  vec2 bPh = bCenterW * c.rg;
+  float bVar = bCenterW * c.b;
+  float bW = bCenterW;
+  float bPow = 2.0 * c.a;
+  float bGeomW = 2.0;
+
+  for (int dl = -1; dl <= 1; dl++) {
+    int ll = li + dl;
+    if (ll < uBoxBounds.y || ll > uBoxBounds.w) continue;
+    float wl = (dl == 0) ? 2.0 : 1.0;
+    for (int ds = -1; ds <= 1; ds++) {
+      if (dl == 0 && ds == 0) continue;
+      int ss = si + ds;
+      if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
+      vec4 tap = texelFetch(uShade, ivec2(ss, ll), 0);
+      if (tap.a <= 0.0) continue;
+      float wGeom = wl * ((ds == 0) ? 2.0 : 1.0);
+      float cosDiff = clamp(dot(tap.rg, c.rg), -1.0, 1.0);
+      float wPhase = exp(-(1.0 - cosDiff) * ST_PHASE_BILATERAL_K);
+      float wBilat = wGeom * tap.a * wPhase;
+      bPh += wBilat * tap.rg;
+      bVar += wBilat * tap.b;
+      bW += wBilat;
+      bPow += wGeom * wPhase * tap.a;
+      bGeomW += wGeom * wPhase;
+    }
+  }
+
+  float bLen = length(bPh);
+  vec2 fPh = bLen > 1e-6 ? (bPh / bLen) : c.rg;
+  float velMix = sm * mix(ST_SPATIAL_TURB_MIX, ST_SPATIAL_LAMINAR_MIX, laminarFactor);
+  vec2 outPhRaw = mix(c.rg, fPh, velMix);
+  float outLen = length(outPhRaw);
+  vec2 outPh = outLen > 1e-6 ? (outPhRaw / outLen) : c.rg;
+
+  float varSmooth = bW > 1e-6 ? (bVar / bW) : c.b;
+  float varLamBase = mix(c.b, varSmooth, min(1.0, sm * 0.85));
+  float varLaminarClean =
+    varLamBase * (1.0 - sm * ST_LAMINAR_VAR_CLEANUP * laminarFactor * clamp(1.0 - varSmooth / 0.25, 0.0, 1.0));
+
+  float turbConfirm = smoothstep(0.18, 0.45, varLocal);
+  float varTurb = clamp(
+    max(varSmooth, c.b * 0.88 + varSmooth * 0.12) +
+      sm * ST_TURB_VAR_BOOST * turbConfirm * (1.0 - spatialCoherence),
+    0.0,
+    1.0
+  );
+  float varOut = mix(varTurb, varLaminarClean, laminarFactor);
+
+  float powSmooth = bGeomW > 1e-6 ? (bPow / bGeomW) : c.a;
+  float powMix = sm * (0.25 + 0.45 * laminarFactor);
+  float powOut = clamp(mix(c.a, powSmooth, powMix), 0.0, 1.0);
+
+  outDisplay = vec4(outPh, varOut, 0.5 + 0.5 * colorPowerConf(powOut));
+}
+`;
+

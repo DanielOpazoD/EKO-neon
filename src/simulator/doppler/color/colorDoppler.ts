@@ -12,8 +12,17 @@ import {
   NOISE_POWER_GATE,
   type ColorEstimate,
 } from './kasaiEstimator';
+import {
+  adaptiveTemporalStep,
+  applyColorSpatialFilter,
+  colorPowerConfidence,
+  DEFAULT_COLOR_SMOOTHING,
+  ST_POW_ALPHA_MIN,
+  type TemporalStepInput,
+  type TemporalStepOutput,
+} from './spatiotemporalFilter';
 
-export { COLOR_PACKET, type ColorEstimate };
+export { COLOR_PACKET, DEFAULT_COLOR_SMOOTHING, type ColorEstimate };
 
 export interface ColorSettings {
   boxThetaMinRad: number;
@@ -25,6 +34,8 @@ export interface ColorSettings {
   wallFilterMps: number;
   gainDb: number;
   persistence: number;
+  /** Spatiotemporal adaptive smoothing strength in [0, 1] (0 = off, 0.6 = clinical default). */
+  smoothing: number;
   showVariance: boolean;
   invert: boolean;
 }
@@ -34,11 +45,12 @@ export const DEFAULT_COLOR: ColorSettings = {
   boxThetaMaxRad: 0.32,
   boxRMinCm: 5,
   boxRMaxCm: 13,
-  scaleMps: 0.62,
+  scaleMps: 0.66,
   baselineShiftMps: 0,
   wallFilterMps: 0.06,
   gainDb: 0,
-  persistence: 0.3,
+  persistence: 0.35,
+  smoothing: DEFAULT_COLOR_SMOOTHING,
   showVariance: true,
   invert: false,
 };
@@ -78,6 +90,10 @@ export interface ColorField {
   vel: Float32Array;
   variance: Float32Array;
   power: Float32Array;
+  /** Pre-spatial temporally filtered history buffers (prevents recursive spatial blur drift across frames). */
+  rawVel?: Float32Array;
+  rawVariance?: Float32Array;
+  rawPower?: Float32Array;
   /** Velocity scale, baseline and inversion the field was formed with: its phases mean nothing under other ones. */
   scaleMps: number;
   baselineShiftMps: number;
@@ -92,6 +108,9 @@ export function allocColorField(n: number): ColorField {
     vel: new Float32Array(n).fill(NaN),
     variance: new Float32Array(n),
     power: new Float32Array(n),
+    rawVel: new Float32Array(n).fill(NaN),
+    rawVariance: new Float32Array(n),
+    rawPower: new Float32Array(n),
     scaleMps: 0,
     baselineShiftMps: 0,
     invert: false,
@@ -132,9 +151,18 @@ export function computeColorField(
   const liMax = Math.min(lines - 1, Math.ceil(((s.boxThetaMaxRad + half) / sectorRad) * lines));
   const siMin = Math.max(0, Math.floor((s.boxRMinCm / depthCm) * samples));
   const siMax = Math.min(samples - 1, Math.ceil((s.boxRMaxCm / depthCm) * samples));
+  const totalSamples = lines * samples;
+  if (!out.rawVel || out.rawVel.length !== totalSamples) {
+    out.rawVel = new Float32Array(totalSamples);
+    out.rawVariance = new Float32Array(totalSamples);
+    out.rawPower = new Float32Array(totalSamples);
+  }
   out.vel.fill(NaN);
   out.power.fill(0);
   out.variance.fill(0);
+  out.rawVel.fill(NaN);
+  out.rawPower!.fill(0);
+  out.rawVariance!.fill(0);
   out.scaleMps = s.scaleMps;
   out.baselineShiftMps = s.baselineShiftMps;
   out.invert = s.invert;
@@ -146,6 +174,10 @@ export function computeColorField(
     prev.invert === s.invert
       ? prev
       : null;
+  const histVel = history ? (history.rawVel ?? history.vel) : null;
+  const histVar = history ? (history.rawVariance ?? history.variance) : null;
+  const histPow = history ? (history.rawPower ?? history.power) : null;
+  const smoothing = s.smoothing ?? DEFAULT_COLOR_SMOOTHING;
   const gainLin = Math.pow(10, s.gainDb / 20);
   const bloomSamples = Math.max(0, Math.round((s.gainDb - 2) * 0.6)); // dilation radius grows with gain
   const nL = Math.max(0, liMax - liMin + 1);
@@ -155,6 +187,7 @@ export function computeColorField(
   const cellV = colorScratch('cellV', nL * nS).fill(NaN);
   const cellDisp = colorScratch('cellDisp', nL * nS).fill(0);
   const cellRel = colorScratch('cellRel', nL * nS).fill(0);
+  const bloodMask = colorScratch('bloodMask', nL * nS).fill(0);
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {
       const idx = li * samples + si;
@@ -180,6 +213,7 @@ export function computeColorField(
       cellV[g] = s.invert ? -tmp.v : tmp.v;
       cellDisp[g] = tmp.disp;
       cellRel[g] = Math.min(1, relTrans);
+      bloodMask[g] = 1;
     }
   }
   // the estimate of this update (decision 300): a packet of echoes per sample, wall-filtered and autocorrelated
@@ -198,60 +232,107 @@ export function computeColorField(
           estimate,
         )
       : null;
+
+  const tIn: TemporalStepInput = {
+    isBloodValid: false,
+    hasCurr: false,
+    vCurr: 0,
+    varCurr: 0,
+    powCurr: 0,
+    hasPrev: false,
+    vPrev: 0,
+    varPrev: 0,
+    powPrev: 0,
+    scaleMps: s.scaleMps,
+    baselineShiftMps: s.baselineShiftMps,
+    persistence: s.persistence,
+    smoothing,
+    colorThreshold: COLOR_THRESHOLD,
+  };
+  const tOut: TemporalStepOutput = { valid: false, vel: NaN, variance: 0, power: 0 };
+
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {
       const g = (li - liMin) * nS + (si - siMin);
       const vTrue = cellV[g]!;
-      if (Number.isNaN(vTrue)) continue;
+      const isBloodValid = !Number.isNaN(vTrue);
+      if (!isBloodValid) continue;
+
       const idx = li * samples + si;
-      let power: number;
-      let vEstimate: number;
-      let variance: number;
+      let hasCurr = false;
+      let power = 0;
+      let vEstimate = 0;
+      let variance = 0;
+
       if (kasai) {
-        if (Number.isNaN(kasai.velocity[g]!)) continue;
-        power = Math.min(1, gainLin * kasai.power[g]!);
-        vEstimate = kasai.velocity[g]!;
-        variance = kasai.variance[g]!;
-        // noise rejection, as a scanner's: a weak echo whose packet has lost its coherence is noise and leaks of the
-        // wall filter, not flow (they drew green and red confetti over slow intracavitary blood). A strong incoherent
-        // echo is turbulence and keeps its mosaic
-        if (kasai.coherence[g]! < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD)
-          continue;
+        const kv = kasai.velocity[g]!;
+        if (!Number.isNaN(kv)) {
+          power = Math.min(1, gainLin * kasai.power[g]!);
+          vEstimate = kv;
+          variance = kasai.variance[g]!;
+          // noise rejection, as a scanner's: a weak echo whose packet has lost its coherence is noise and leaks of the
+          // wall filter, not flow (they drew green and red confetti over slow intracavitary blood). A strong incoherent
+          // echo is turbulence and keeps its mosaic
+          const rejectedNoise =
+            kasai.coherence[g]! < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD;
+          hasCurr = !rejectedNoise && power >= COLOR_THRESHOLD;
+        }
       } else {
         // the expected field: the wall filter's response on the true velocity, its spectral spread as variance
-        if (Math.abs(vTrue) < s.wallFilterMps) continue;
-        power = Math.min(
-          1,
-          gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), s.wallFilterMps),
-        );
-        vEstimate = vTrue;
-        variance = Math.min(1, cellDisp[g]! * 1.6);
+        if (Math.abs(vTrue) >= s.wallFilterMps) {
+          power = Math.min(
+            1,
+            gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), s.wallFilterMps),
+          );
+          vEstimate = vTrue;
+          variance = Math.min(1, cellDisp[g]! * 1.6);
+          hasCurr = power >= COLOR_THRESHOLD;
+        }
       }
-      if (power < COLOR_THRESHOLD) continue; // below the display threshold: weak signal not shown
-      const v = aliasVelocity(vEstimate, s.scaleMps, s.baselineShiftMps);
-      let vel = v;
-      let pow = power;
-      const pv = history ? (history.vel[idx] ?? NaN) : NaN;
-      if (history && !Number.isNaN(pv)) {
-        const p = s.persistence;
-        const pp = history.power[idx] ?? power;
-        const a1 = (Math.PI * (v - s.baselineShiftMps)) / s.scaleMps;
-        const a0 = (Math.PI * (pv - s.baselineShiftMps)) / s.scaleMps;
-        const re = (1 - p) * power * Math.cos(a1) + p * pp * Math.cos(a0);
-        const im = (1 - p) * power * Math.sin(a1) + p * pp * Math.sin(a0);
-        vel = aliasVelocity(
-          s.baselineShiftMps + (s.scaleMps * Math.atan2(im, re)) / Math.PI,
-          s.scaleMps,
-          s.baselineShiftMps,
-        );
-        variance = variance * (1 - p) + (history.variance[idx] ?? variance) * p;
-        pow = power * (1 - p) + pp * p;
+
+      const pv = histVel ? (histVel[idx] ?? NaN) : NaN;
+      const pp = histPow ? (histPow[idx] ?? 0) : 0;
+      const hasPrev = !Number.isNaN(pv) && pp > 0;
+      if (!hasCurr && !hasPrev) continue;
+
+      tIn.isBloodValid = true;
+      tIn.hasCurr = hasCurr;
+      tIn.vCurr = hasCurr ? aliasVelocity(vEstimate, s.scaleMps, s.baselineShiftMps) : 0;
+      tIn.varCurr = variance;
+      tIn.powCurr = power;
+      tIn.hasPrev = hasPrev;
+      tIn.vPrev = hasPrev ? pv : 0;
+      tIn.varPrev = hasPrev ? (histVar![idx] ?? 0) : 0;
+      tIn.powPrev = pp;
+
+      adaptiveTemporalStep(tIn, tOut);
+      if (tOut.valid) {
+        out.rawVel[idx] = tOut.vel;
+        out.rawVariance![idx] = tOut.variance;
+        out.rawPower![idx] = tOut.power;
       }
-      out.vel[idx] = vel;
-      out.variance[idx] = variance;
-      out.power[idx] = pow;
     }
   }
+
+  // Pass 3 (CPU mirror of GPU Pass D3): coherence- & variance-adaptive circular spatial filter
+  applyColorSpatialFilter({
+    samples,
+    liMin,
+    liMax,
+    siMin,
+    siMax,
+    scaleMps: s.scaleMps,
+    baselineShiftMps: s.baselineShiftMps,
+    smoothing,
+    bloodMask,
+    srcVel: out.rawVel,
+    srcVar: out.rawVariance!,
+    srcPow: out.rawPower!,
+    dstVel: out.vel,
+    dstVar: out.variance,
+    dstPow: out.power,
+  });
+
   return { colorLines: Math.max(0, liMax - liMin + 1) };
 }
 
@@ -259,9 +340,10 @@ export { colorMap } from '@/simulator/renderer/postprocess/colorMap';
 
 /**
  * Blend a polar colour field over a scan-converted grey image inside the colour box using
- * bilinear circular interpolation in the Nyquist complex plane (e^{i·π·v/scale}) so aliased
- * +Nyquist/−Nyquist transitions never produce false zero-velocity bands, with smooth sub-pixel
- * jet boundaries and clinical tissue priority over bright walls/valves.
+ * bilinear circular interpolation in the baseline-centered Nyquist complex plane
+ * (`e^{i·π·(v − baseline)/scale}`) so aliased transitions across `baseline ± scale` (including
+ * shifted PISA aliasing shells) never produce false zero-velocity bands or spurious wraps,
+ * with smooth power-modulated jet boundaries and clinical tissue write priority over leaflets/walls.
  * The GPU present pass (gpu/glslImage.ts) evaluates the same math.
  */
 export function overlayColorField(
@@ -270,6 +352,7 @@ export function overlayColorField(
   vel: Float32Array,
   variance: Float32Array,
   c: ColorSettings,
+  power?: Float32Array,
 ): void {
   const rgb: [number, number, number] = [0, 0, 0];
   const S = lut.samples;
@@ -277,8 +360,14 @@ export function overlayColorField(
   const maxS = S - 1;
   const n = lut.idx.length;
   const scale = Math.max(1e-3, c.scaleMps);
+  const baseline = c.baselineShiftMps;
   const kPhi = Math.PI / scale;
   const invPiScale = scale / Math.PI;
+  const powAlphaAt = (idx: number): number => {
+    if (!power) return 1;
+    const conf = colorPowerConfidence(power[idx] ?? 1, COLOR_THRESHOLD);
+    return ST_POW_ALPHA_MIN + (1 - ST_POW_ALPHA_MIN) * conf;
+  };
   for (let p = 0, o = 0; p < n; p++, o += 4) {
     const i0 = lut.idx[p] ?? -1;
     if (i0 < 0) continue;
@@ -308,40 +397,46 @@ export function overlayColorField(
     let re = 0;
     let im = 0;
     let varAcc = 0;
+    let powAcc = 0;
     let wSum = 0;
     if (v00 === v00) {
-      const ph = v00 * kPhi;
+      const ph = (v00 - baseline) * kPhi;
       re += w00 * Math.cos(ph);
       im += w00 * Math.sin(ph);
       varAcc += w00 * (variance[i0] ?? 0);
+      powAcc += w00 * powAlphaAt(i0);
       wSum += w00;
     }
     if (v10 === v10) {
-      const ph = v10 * kPhi;
+      const ph = (v10 - baseline) * kPhi;
       re += w10 * Math.cos(ph);
       im += w10 * Math.sin(ph);
       varAcc += w10 * (variance[i0 + dl] ?? 0);
+      powAcc += w10 * powAlphaAt(i0 + dl);
       wSum += w10;
     }
     if (v01 === v01) {
-      const ph = v01 * kPhi;
+      const ph = (v01 - baseline) * kPhi;
       re += w01 * Math.cos(ph);
       im += w01 * Math.sin(ph);
       varAcc += w01 * (variance[i0 + ds] ?? 0);
+      powAcc += w01 * powAlphaAt(i0 + ds);
       wSum += w01;
     }
     if (v11 === v11) {
-      const ph = v11 * kPhi;
+      const ph = (v11 - baseline) * kPhi;
       re += w11 * Math.cos(ph);
       im += w11 * Math.sin(ph);
       varAcc += w11 * (variance[i0 + dl + ds] ?? 0);
+      powAcc += w11 * powAlphaAt(i0 + dl + ds);
       wSum += w11;
     }
     if (wSum <= 0.18) continue;
 
-    const v = invPiScale * Math.atan2(im, re);
+    const v = baseline + invPiScale * Math.atan2(im, re);
     const vari = varAcc / wSum;
-    colorMap(v, scale, vari, c.showVariance, rgb);
+    const powAlpha = powAcc / wSum;
+    colorMap(v, scale, vari, c.showVariance, rgb, baseline);
 
     const edgeT = Math.min(1, Math.max(0, (wSum - 0.18) / 0.54));
     const edgeAlpha = edgeT * edgeT * (3 - 2 * edgeT);
@@ -349,8 +444,13 @@ export function overlayColorField(
     const g0 = rgba[o + 1] ?? 0;
     const b0 = rgba[o + 2] ?? 0;
     const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
-    const tissuePrio = lum <= 165 ? 1 : Math.max(0.28, (235 - lum) / 70);
-    const blend = COLOR_BLEND * edgeAlpha * tissuePrio;
+    // Clinical tissue write priority: full color over dark blood pool, smoothly dropping to 0 on bright endocardium/valves
+    const tpU = Math.min(1, Math.max(0, (lum - 98) / 74));
+    const tissuePrio = 1 - tpU * tpU * (3 - 2 * tpU);
+    // Gentle low-velocity opacity feathering so near-baseline flow dissolves organically into dark chamber blood
+    const velU = Math.min(1, Math.max(0, (Math.abs(v) / scale - 0.05) / 0.17));
+    const velAlpha = 0.62 + 0.38 * velU * velU * (3 - 2 * velU);
+    const blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * tissuePrio;
     const inv = 1 - blend;
     rgba[o] = Math.round(rgb[0] * blend + r0 * inv);
     rgba[o + 1] = Math.round(rgb[1] * blend + g0 * inv);

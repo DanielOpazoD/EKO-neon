@@ -2,16 +2,23 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { loadCaseById } from '@/cases';
 import { heartAnchors, computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
+import { makeSample, Tissue } from '@/simulator/anatomy/tissue';
 import { baseInput } from '@/simulator/core/baseInput';
 import { SimulatorCore } from '@/simulator/core/simulatorCore';
+import { autoTraceSpectralEnvelope } from '@/simulator/core/strip/autoTrace';
+import { sampleSpectralColumn } from '@/simulator/core/strip/spectralSampler';
+import type { StripCtx } from '@/simulator/core/stripEngine';
 import { buildFlowParams, sampleFlow } from '@/simulator/doppler/flow-primitives/flowField';
 import {
   displaySpectrum,
   SPECTRAL_BINS,
   spectralDefaultsFor,
+  spectralRange,
 } from '@/simulator/doppler/spectral/spectrum';
 import { valveClickSignal } from '@/simulator/doppler/spectral/valveClicks';
 import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
+import { summarizeEnvelope } from '@/simulator/measurements/vti';
 import { beamFrameFromPose, poseFromControl } from '@/simulator/probe/pose';
 import { controlThroughCrux, getViewTarget } from '@/simulator/windows/viewTargets';
 import { cycleStateAt, valveEventTimes } from './cycleModel';
@@ -399,6 +406,269 @@ describe('Cardiac cycle model & Doppler hemodynamic physiology', () => {
     assert.ok(
       Math.abs(vtiSlowSweep - vtiLowGain) / Math.max(1e-6, vtiLowGain) < 0.03,
       `PW VTI must remain invariant across 25 vs 50 mm/s sweep (${vtiSlowSweep.toFixed(2)} vs ${vtiLowGain.toFixed(2)} cm)`,
+    );
+  });
+
+  it('achieves ASE outer-envelope CW fidelity across severe AS, HOCM dagger, and severe MR with gain and sweep invariance', () => {
+    const sampleCwBeat = (
+      core: SimulatorCore,
+      viewId: 'a5c' | 'a4c',
+      thetaDeg: number,
+      scaleMps: number,
+      gainDb = 0,
+      sweepMmPerS = 50,
+    ) => {
+      const { heart, thorax, tables } = core.models;
+      const ctrl = controlThroughCrux(getViewTarget(viewId), heart, thorax, null);
+      const beam = beamFrameFromPose(poseFromControl(thorax, ctrl), 1);
+      const inp = baseInput();
+      inp.modality = 'cw';
+      inp.probe = ctrl;
+      inp.cursorThetaRad = (thetaDeg * Math.PI) / 180;
+      inp.spectral = { ...spectralDefaultsFor('cw'), scaleMps, gainDb, sweepSpeedMmPerS: sweepMmPerS };
+      core.setInput(inp);
+      const ctx = (core as unknown as { stripCtx(): StripCtx }).stripCtx();
+      const spec = {
+        lines: 128,
+        samples: 256,
+        depthCm: inp.settings.depthCm,
+        sectorRad: (inp.settings.sectorDeg * Math.PI) / 180,
+        focusCm: inp.settings.focusCm,
+        elevationSamples: 1,
+      };
+      const cols = 160;
+      const spc = (100 / sweepMmPerS) / cols;
+      const strip = new Float32Array(cols * SPECTRAL_BINS);
+      const fs = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+      const ts = makeSample();
+      for (let col = 0; col < cols; col++) {
+        const t = col * spc;
+        const phase = (t % tables.rrS) / tables.rrS;
+        const { column } = sampleSpectralColumn(beam, spec, phase, col, col, t, ctx, fs, ts);
+        strip.set(column, col * SPECTRAL_BINS);
+      }
+      const trace = autoTraceSpectralEnvelope(strip, cols, cols, inp.spectral, 0, cols - 1, false);
+      const beatCols = Math.min(cols, Math.round(tables.rrS / spc));
+      const beatVel = trace.velocitiesMps.slice(0, beatCols);
+      let peakCol = 0;
+      let peakMag = 0;
+      for (let i = 0; i < beatVel.length; i++) {
+        if (Math.abs(beatVel[i]!) > peakMag) {
+          peakMag = Math.abs(beatVel[i]!);
+          peakCol = i;
+        }
+      }
+      return { summary: summarizeEnvelope(beatVel, spc), tPeakMs: peakCol * spc * 1000 };
+    };
+
+    // 1. Severe Aortic Stenosis (A5C): traces outer AV jet (not LVOT), gain- and sweep-invariant
+    const asCore = new SimulatorCore(loadCaseById('aortic-stenosis-severe'), baseInput());
+    const asLow = sampleCwBeat(asCore, 'a5c', -2.0, 6.0, -8, 50);
+    const asMid = sampleCwBeat(asCore, 'a5c', -2.0, 6.0, 0, 50);
+    const asHigh = sampleCwBeat(asCore, 'a5c', -2.0, 6.0, 8, 50);
+    const asSlow = sampleCwBeat(asCore, 'a5c', -2.0, 6.0, 0, 25);
+    const asFast = sampleCwBeat(asCore, 'a5c', -2.0, 6.0, 0, 100);
+    asCore.dispose();
+
+    assert.ok(
+      asMid.summary.vmaxMps >= 4.0 && asMid.summary.vmaxMps <= 4.55,
+      `Severe AS CW Vmax should reflect the ~4.1–4.3 m/s projected AV jet, got ${asMid.summary.vmaxMps.toFixed(2)} m/s`,
+    );
+    assert.ok(
+      asMid.summary.vtiCm >= 85 && asMid.summary.vtiCm <= 105,
+      `Severe AS CW VTI should lie in [85, 105] cm, got ${asMid.summary.vtiCm.toFixed(1)} cm`,
+    );
+    assert.ok(
+      asMid.summary.meanGradientMmHg >= 40,
+      `Severe AS CW mean gradient should exceed 40 mmHg, got ${asMid.summary.meanGradientMmHg.toFixed(1)} mmHg`,
+    );
+    assert.ok(
+      Math.abs(asHigh.summary.vmaxMps - asLow.summary.vmaxMps) < 0.05 &&
+        Math.abs(asHigh.summary.vtiCm - asLow.summary.vtiCm) < 1.0,
+      `Severe AS CW must be gain-invariant (-8 dB: ${asLow.summary.vtiCm.toFixed(1)} vs +8 dB: ${asHigh.summary.vtiCm.toFixed(1)} cm)`,
+    );
+    assert.ok(
+      Math.abs(asSlow.summary.vtiCm - asMid.summary.vtiCm) / asMid.summary.vtiCm < 0.05 &&
+        Math.abs(asFast.summary.vtiCm - asMid.summary.vtiCm) / asMid.summary.vtiCm < 0.05,
+      `Severe AS CW VTI must be sweep-invariant (25:${asSlow.summary.vtiCm.toFixed(1)}, 50:${asMid.summary.vtiCm.toFixed(1)}, 100:${asFast.summary.vtiCm.toFixed(1)} cm)`,
+    );
+
+    // 2. HOCM with SAM (A5C): dynamic late-peaking dagger peaks later in systole than severe AS
+    const hocmCore = new SimulatorCore(loadCaseById('hocm-sam'), baseInput());
+    const hocmLow = sampleCwBeat(hocmCore, 'a5c', 0, 6.0, -8, 50);
+    const hocmHigh = sampleCwBeat(hocmCore, 'a5c', 0, 6.0, 8, 50);
+    hocmCore.dispose();
+    assert.ok(
+      hocmLow.summary.vmaxMps >= 3.4 && hocmLow.summary.vmaxMps <= 4.1,
+      `HOCM CW LVOT dagger Vmax should lie in [3.4, 4.1] m/s, got ${hocmLow.summary.vmaxMps.toFixed(2)} m/s`,
+    );
+    assert.ok(
+      hocmLow.tPeakMs > asMid.tPeakMs + 50,
+      `HOCM dagger should peak markedly later in systole (${hocmLow.tPeakMs.toFixed(0)} ms) than AS dome (${asMid.tPeakMs.toFixed(0)} ms)`,
+    );
+    assert.ok(
+      Math.abs(hocmHigh.summary.vmaxMps - hocmLow.summary.vmaxMps) < 0.05,
+      'HOCM CW Vmax must be gain-invariant',
+    );
+
+    // 3. Primary MR (A4C): holosystolic high-velocity regurgitant jet, gain-invariant
+    const mrCore = new SimulatorCore(loadCaseById('mvp-primary-mr'), baseInput());
+    const mrLow = sampleCwBeat(mrCore, 'a4c', 0, 6.5, -8, 50);
+    const mrHigh = sampleCwBeat(mrCore, 'a4c', 0, 6.5, 8, 50);
+    mrCore.dispose();
+    assert.ok(
+      mrLow.summary.vmaxMps >= 4.4 && mrLow.summary.vtiCm >= 140,
+      `Primary MR CW should capture holosystolic high-velocity jet, got Vmax=${mrLow.summary.vmaxMps.toFixed(2)} m/s VTI=${mrLow.summary.vtiCm.toFixed(1)} cm`,
+    );
+    assert.ok(
+      Math.abs(mrHigh.summary.vmaxMps - mrLow.summary.vmaxMps) < 0.05,
+      'Primary MR CW Vmax must be gain-invariant',
+    );
+  });
+
+  it('reproduces clinically accurate, gain-invariant TDI mitral and tricuspid annular velocities across normal and HFrEF', () => {
+    const measureTdi = (caseId: 'normal-excellent-window' | 'hfref-severe-mr', side: 'septal' | 'lateral' | 'rv', gainDb: number) => {
+      const c = loadCaseById(caseId);
+      const core = new SimulatorCore(c, baseInput());
+      const { heart, thorax, tables } = core.models;
+      const ctrl = controlThroughCrux(getViewTarget('a4c'), heart, thorax, null);
+      const beam = beamFrameFromPose(poseFromControl(thorax, ctrl), 1);
+      const A = heartAnchors(heart);
+      const hf = heart.frame;
+      const ctx = (core as unknown as { stripCtx(): StripCtx }).stripCtx();
+      const ts = makeSample();
+      const hp0 = computeHeartPose(heart, cycleStateAt(tables, 0.5));
+      const sign = side === 'lateral' ? 1 : -1;
+      const cx = side === 'rv' ? A.tvCenter.x : A.mvCenter.x;
+      const cy = side === 'rv' ? A.tvCenter.y : A.mvCenter.y;
+      const r0 = side === 'rv' ? A.tvR : A.mvR;
+      let bestPt = { x: cx + sign * (r0 + 0.5), y: cy, z: hp0.zAnn + 0.8 };
+      let bestHits = -1;
+      for (let dz = 0.4; dz <= 1.6; dz += 0.2) {
+        for (let dr = 0.25; dr <= 1.2; dr += 0.1) {
+          const hx = cx + sign * (r0 + dr);
+          const hz = (side === 'rv' ? A.tvCenter.z : 0) + hp0.zAnn * 0.5 + dz;
+          const wx = hf.origin.x + hf.ex.x * hx + hf.ey.x * cy + hf.ez.x * hz;
+          const wy = hf.origin.y + hf.ex.y * hx + hf.ey.y * cy + hf.ez.y * hz;
+          const wz = hf.origin.z + hf.ex.z * hx + hf.ey.z * cy + hf.ez.z * hz;
+          let hits = 0;
+          for (const ph of [0.15, 0.25, 0.52, 0.62, 0.88]) {
+            if (sceneClassifier(ctx.scene(ph))(wx, wy, wz, ts) !== 0 && ts.tissue === Tissue.Myocardium)
+              hits++;
+          }
+          if (hits > bestHits) {
+            bestHits = hits;
+            bestPt = { x: hx, y: cy, z: hz };
+          }
+        }
+      }
+      const wx = hf.origin.x + hf.ex.x * bestPt.x + hf.ey.x * bestPt.y + hf.ez.x * bestPt.z;
+      const wy = hf.origin.y + hf.ex.y * bestPt.x + hf.ey.y * bestPt.y + hf.ez.y * bestPt.z;
+      const wz = hf.origin.z + hf.ex.z * bestPt.x + hf.ey.z * bestPt.y + hf.ez.z * bestPt.z;
+      const vx = wx - beam.origin.x;
+      const vy = wy - beam.origin.y;
+      const vz = wz - beam.origin.z;
+      const fwd = vx * beam.forward.x + vy * beam.forward.y + vz * beam.forward.z;
+      const lat = vx * beam.lateral.x + vy * beam.lateral.y + vz * beam.lateral.z;
+
+      const inp = baseInput();
+      inp.modality = 'tdi';
+      inp.probe = ctrl;
+      inp.gateDepthCm = Math.hypot(fwd, lat);
+      inp.cursorThetaRad = Math.atan2(lat, fwd);
+      inp.spectral = { ...spectralDefaultsFor('tdi'), gainDb, sweepSpeedMmPerS: 50 };
+      core.setInput(inp);
+      const tdiCtx = (core as unknown as { stripCtx(): StripCtx }).stripCtx();
+      const spec = {
+        lines: 128,
+        samples: 256,
+        depthCm: inp.settings.depthCm,
+        sectorRad: (inp.settings.sectorDeg * Math.PI) / 180,
+        focusCm: inp.settings.focusCm,
+        elevationSamples: 1,
+      };
+      const cols = 140;
+      const spc = (100 / 50) / cols;
+      const { vMin, vMax } = spectralRange(inp.spectral);
+      const beatCols = Math.min(cols, Math.round(tables.rrS / spc));
+      const fs = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+      const tm = tables.timings;
+      let sPrime = 0;
+      let ePrime = 0;
+      let aPrime = 0;
+      for (let col = 0; col < beatCols; col++) {
+        const t = col * spc;
+        const phase = (t % tables.rrS) / tables.rrS;
+        const { column } = sampleSpectralColumn(beam, spec, phase, col, col, t, tdiCtx, fs, ts);
+        let maxVal = 0;
+        let bestV = 0;
+        for (let b = 0; b < SPECTRAL_BINS; b++) {
+          const val = column[b]!;
+          const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin);
+          if (Math.abs(v) > 0.015 && val > maxVal) {
+            maxVal = val;
+            bestV = v;
+          }
+        }
+        if (maxVal > 0.35) {
+          if (t >= tm.ejectionStartS && t <= tm.ejectionEndS + 0.02 && bestV > sPrime) sPrime = bestV;
+          if (t >= tm.mitralOpenS && t < tm.aStartS && -bestV > ePrime) ePrime = -bestV;
+          if (t >= tm.aStartS && -bestV > aPrime) aPrime = -bestV;
+        }
+      }
+      core.dispose();
+      return { sCmps: sPrime * 100, eCmps: ePrime * 100, aCmps: aPrime * 100 };
+    };
+
+    const normSepLow = measureTdi('normal-excellent-window', 'septal', -8);
+    const normSepHigh = measureTdi('normal-excellent-window', 'septal', 8);
+    const normLat = measureTdi('normal-excellent-window', 'lateral', 0);
+    const normRv = measureTdi('normal-excellent-window', 'rv', 0);
+
+    assert.ok(
+      normSepLow.eCmps >= 9.8 && normSepLow.eCmps <= 11.4,
+      `Normal septal e' should read ~10.5 cm/s (target 11.0), got ${normSepLow.eCmps.toFixed(1)} cm/s`,
+    );
+    assert.ok(
+      normLat.eCmps >= 12.4 && normLat.eCmps <= 14.3 && normLat.eCmps > normSepLow.eCmps + 1.5,
+      `Normal lateral e' (${normLat.eCmps.toFixed(1)}) should exceed septal e' (${normSepLow.eCmps.toFixed(1)})`,
+    );
+    assert.ok(
+      normSepLow.sCmps >= 6.0 && normSepLow.aCmps >= 6.0,
+      `Normal septal s' (${normSepLow.sCmps.toFixed(1)}) and a' (${normSepLow.aCmps.toFixed(1)}) should be clearly preserved`,
+    );
+    assert.ok(
+      Math.abs(normSepHigh.eCmps - normSepLow.eCmps) < 0.3 &&
+        Math.abs(normSepHigh.sCmps - normSepLow.sCmps) < 0.3,
+      `TDI septal e'/s' must be gain-invariant (-8 dB vs +8 dB)`,
+    );
+    const avgEPrime = 0.5 * (normSepLow.eCmps + normLat.eCmps);
+    const eOverEPrime = 80 / avgEPrime;
+    assert.ok(eOverEPrime < 8.0, `Normal average E/e' should be < 8, got ${eOverEPrime.toFixed(1)}`);
+    assert.ok(
+      normRv.sCmps >= 11.5 && normRv.sCmps <= 13.5,
+      `Normal RV tricuspid S' should read ~12.3 cm/s (target 13.0), got ${normRv.sCmps.toFixed(1)} cm/s`,
+    );
+
+    const hfSepLow = measureTdi('hfref-severe-mr', 'septal', -8);
+    const hfSepHigh = measureTdi('hfref-severe-mr', 'septal', 8);
+    const hfLat = measureTdi('hfref-severe-mr', 'lateral', 0);
+    const hfRv = measureTdi('hfref-severe-mr', 'rv', 0);
+    assert.ok(
+      hfSepLow.eCmps >= 3.4 && hfSepLow.eCmps <= 4.5,
+      `HFrEF septal e' at -8 dB should read ~3.9 cm/s (target 4.0), got ${hfSepLow.eCmps.toFixed(1)} cm/s`,
+    );
+    assert.ok(
+      Math.abs(hfSepHigh.eCmps - hfSepLow.eCmps) < 0.3,
+      `HFrEF deep-gate TDI e' must stay gain-invariant (-8 dB: ${hfSepLow.eCmps.toFixed(1)} vs +8 dB: ${hfSepHigh.eCmps.toFixed(1)} cm/s)`,
+    );
+    assert.ok(
+      hfLat.eCmps >= 4.2 && hfLat.eCmps <= 5.5 && hfLat.eCmps > hfSepLow.eCmps,
+      `HFrEF lateral e' (${hfLat.eCmps.toFixed(1)}) should reflect reduced ~4.8 cm/s relaxation`,
+    );
+    assert.ok(
+      hfRv.sCmps >= 7.5 && hfRv.sCmps <= 9.5,
+      `HFrEF RV S' should reflect impaired RV systolic velocity (~8.3 cm/s), got ${hfRv.sCmps.toFixed(1)} cm/s`,
     );
   });
 });

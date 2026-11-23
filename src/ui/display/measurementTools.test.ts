@@ -16,6 +16,7 @@ import {
   stripVelocityAtY,
   summarizeManualVti,
 } from './measurementTools';
+import { computeSpectralTicks } from './overlayDraw';
 
 describe('Display measurement tools math', () => {
   it('computes 2D caliper linear distance and M-mode TAPSE excursion in cm', () => {
@@ -131,5 +132,34 @@ describe('Display measurement tools math', () => {
       assert.ok(Math.abs(summary.vmaxMps - 1.0) < 1e-9);
       assert.ok(Math.abs(summary.meanGradientMmHg - 4 / 3) < 1e-9);
     }
+  });
+
+  it('computes ASE baseline-anchored velocity ticks in cm/s (PW/TDI) and m/s (CW)', () => {
+    // Symmetric PW ±100 cm/s => +100 cm/s, 50, 0, -50, -100 with 0 dead-on frac 0.5
+    const pwSym = computeSpectralTicks(1.0, -1.0, true);
+    assert.deepEqual(
+      pwSym.map((t) => t.label),
+      ['100 cm/s', '50', '0', '-50', '-100'],
+    );
+    const zeroSym = pwSym.find((t) => Math.abs(t.valueMps) < 1e-6);
+    assert.ok(zeroSym && Math.abs(zeroSym.frac - 0.5) < 1e-9);
+
+    // Shifted PW baseline (+140 to -60 cm/s) => 0 stays locked exactly at frac = 1.4 / 2.0 = 0.7
+    const pwShifted = computeSpectralTicks(1.4, -0.6, true);
+    const zeroShifted = pwShifted.find((t) => Math.abs(t.valueMps) < 1e-6);
+    assert.ok(zeroShifted && Math.abs(zeroShifted.frac - 0.7) < 1e-9);
+    assert.ok(pwShifted[0]!.label.endsWith(' cm/s'));
+
+    // Depth-limited PW Nyquist (±86 cm/s) => clean 40 cm/s or 50 cm/s ticks anchored at 0
+    const pwDepth = computeSpectralTicks(0.86, -0.86, true);
+    assert.ok(pwDepth.some((t) => Math.abs(t.valueMps) < 1e-6));
+    assert.ok(pwDepth.length >= 3 && pwDepth.length <= 7);
+
+    // CW ±6.0 m/s => clean 2 m/s steps in m/s anchored at 0
+    const cw = computeSpectralTicks(6.0, -6.0, false);
+    assert.deepEqual(
+      cw.map((t) => t.label),
+      ['6 m/s', '4', '2', '0', '-2', '-4', '-6'],
+    );
   });
 });

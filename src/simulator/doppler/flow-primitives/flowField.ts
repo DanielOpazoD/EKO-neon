@@ -33,10 +33,6 @@ import {
   LVOT_ENTRANCE_T,
   LVOT_OBSTRUCTION_SIGMA_CM,
   LVOT_OBSTRUCTION_T,
-  LVOT_SINK_COS_FROM,
-  LVOT_SINK_COS_TO,
-  LVOT_SINK_FADE_FROM_CM,
-  LVOT_SINK_FADE_TO_CM,
   pulmonaryVeinPeaks,
   SLOW_SHEAR,
   solveInflowWave,
@@ -171,6 +167,9 @@ export function buildFlowParams(
   };
 }
 
+/** Reusable scratch sample for aortic-network blending (zero per-sample allocation). */
+const AORTA_TMP: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
 /** Sample the flow field at heart-frame point (x,y,z) for the given phase. */
 export function sampleFlow(
   p: FlowFieldParams,
@@ -187,18 +186,36 @@ export function sampleFlow(
   out.vz = 0;
   out.dispersion = 0;
   out.present = 0;
-  if (sampleAorticNetwork(p.heart, p.thorax, tables, hp, phase, x, y, z, out)) {
-    if (p.enabled['lvot'] === false && p.enabled['aortic-valve'] === false) {
-      out.vx = out.vy = out.vz = out.dispersion = out.present = 0;
-    }
-    return;
-  }
+  const aortaEnabled = p.enabled['lvot'] !== false || p.enabled['aortic-valve'] !== false;
+  const inAorta = sampleAorticNetwork(p.heart, p.thorax, tables, hp, phase, x, y, z, AORTA_TMP);
+  if (inAorta && !aortaEnabled) return;
+
   const qao = sampleTable(tables.aorticFlowMlps, phase);
   const zAnn = hp.zAnn;
+
+  // ---- LVOT → aortic valve → ascending aorta (unified with aortic network across the STJ) ----
+  const ax = p.avAxis;
+  const cz = p.avCenter.z + zAnn * ROOT_EXCURSION;
+  const dxAv = x - p.avCenter.x,
+    dyAv = y - p.avCenter.y,
+    dzAv = z - cz;
+  const tAv = dxAv * ax.x + dyAv * ax.y + dzAv * ax.z;
+  const hasStenoticJet = p.avAreaCm2 < 2.0 || p.lvotObstruction !== null;
+
+  // Far downstream in the arch / descending aorta / branches: pure mass-conserving aortic network.
+  if (inAorta && (tAv >= (hasStenoticJet ? 5.5 : 3.2) || qao <= 1)) {
+    out.vx = AORTA_TMP.vx;
+    out.vy = AORTA_TMP.vy;
+    out.vz = AORTA_TMP.vz;
+    out.dispersion = AORTA_TMP.dispersion;
+    out.present = AORTA_TMP.present;
+    return;
+  }
 
   // ---- Mitral inflow: from the LA through the annulus into the LV toward the apex ----
   const zrMv = z - zAnn; // distance beyond the annulus into the LV
   if (
+    !inAorta &&
     p.enabled['mitral-inflow'] !== false &&
     zrMv > -FUNNEL_FADE_TO_CM &&
     zrMv < hp.lengthNow - 0.2
@@ -218,17 +235,11 @@ export function sampleFlow(
       out,
     );
 
-  // ---- LVOT → aortic valve → ascending aorta ----
-  if ((p.enabled['lvot'] !== false || p.enabled['aortic-valve'] !== false) && qao > 1) {
-    const ax = p.avAxis;
-    const cz = p.avCenter.z + zAnn * ROOT_EXCURSION;
-    const dx = x - p.avCenter.x,
-      dy = y - p.avCenter.y,
-      dz = z - cz;
-    const t = dx * ax.x + dy * ax.y + dz * ax.z;
-    const qx = dx - ax.x * t,
-      qy = dy - ax.y * t,
-      qz = dz - ax.z * t;
+  // ---- LVOT → aortic valve → proximal ascending aorta ----
+  if (aortaEnabled && qao > 1) {
+    const qx = dxAv - ax.x * tAv,
+      qy = dyAv - ax.y * tAv,
+      qz = dzAv - ax.z * tAv;
     const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
     const rLvot = Math.sqrt(p.lvotAreaCm2 / Math.PI);
     const tmE = tables.timings;
@@ -240,79 +251,170 @@ export function sampleFlow(
     const narrowAt = (tt: number): number =>
       narrowPeak *
       Math.exp(-((tt - LVOT_OBSTRUCTION_T) ** 2) / (2 * LVOT_OBSTRUCTION_SIGMA_CM ** 2));
-    if (t < LVOT_ENTRANCE_T) {
-      const up = LVOT_ENTRANCE_T - t;
-      const d = Math.hypot(rho, up);
-      if (d < LVOT_SINK_FADE_TO_CM) {
-        const vEntrance = qao / (p.lvotAreaCm2 * (1 - narrowAt(LVOT_ENTRANCE_T))) / 100;
-        const v =
-          Math.min(vEntrance, qao / (2 * Math.PI * d * d) / 100) *
-          fadeOut(d, LVOT_SINK_FADE_FROM_CM, LVOT_SINK_FADE_TO_CM) *
-          convergenceWeight(rho, up, rLvot, LVOT_SINK_COS_FROM, LVOT_SINK_COS_TO);
-        if (v > 0) {
-          out.vx += ((-qx + ax.x * up) / d) * v;
-          out.vy += ((-qy + ax.y * up) / d) * v;
-          out.vz += ((-qz + ax.z * up) / d) * v;
-          out.dispersion = Math.max(out.dispersion, p.turbulence['lvot'] ?? 0.04);
-          out.present = 1;
+
+    let rootVx = 0,
+      rootVy = 0,
+      rootVz = 0,
+      rootDisp = 0,
+      rootSpeed = 0,
+      rootPresent = 0;
+
+    if (tAv < LVOT_ENTRANCE_T) {
+      // Smooth anatomically tapered LV → LVOT laminar acceleration corridor (no spherical point-sink bullseye
+      // or PLAX double-lobed butterfly, and zero backward bleed onto the mitral annulus in A4C).
+      const up = LVOT_ENTRANCE_T - tAv;
+      if (up < 2.8) {
+        const taper = 1 + 0.34 * up;
+        const rUp = rLvot * taper;
+        const rHalfUp = 0.88 * rUp;
+        if (rho < jetReach(rHalfUp, up * 0.5, SLOW_SHEAR)) {
+          const vEntrance = qao / (p.lvotAreaCm2 * (1 - narrowAt(LVOT_ENTRANCE_T))) / 100;
+          const rNorm = Math.min(1.4, rho / Math.max(0.25, rUp));
+          const radialCore = 1 / (1 + 0.45 * rNorm * rNorm);
+          const v =
+            (vEntrance / (taper * taper)) *
+            radialCore *
+            jetProfile(rho, rHalfUp, up * 0.5, SLOW_SHEAR) *
+            fadeOut(up, 1.8, 2.8);
+          if (v > 0.01) {
+            // Streamline-following gentle inward tilt toward the LVOT axis (never reverses sign in PLAX)
+            const inward = rho > 1e-4 ? (0.34 * Math.min(1, rho / rUp)) / taper : 0;
+            const invRho = rho > 1e-4 ? 1 / rho : 0;
+            const dirX = ax.x - qx * invRho * inward;
+            const dirY = ax.y - qy * invRho * inward;
+            const dirZ = ax.z - qz * invRho * inward;
+            const dirL = Math.hypot(dirX, dirY, dirZ) || 1;
+            rootVx = (dirX / dirL) * v;
+            rootVy = (dirY / dirL) * v;
+            rootVz = (dirZ / dirL) * v;
+            rootSpeed = v;
+            rootDisp = p.turbulence['lvot'] ?? 0.04;
+            rootPresent = 1;
+          }
         }
       }
-    } else if (t < 5.5) {
+    } else if (tAv < 5.5) {
+      const isStenotic = p.avAreaCm2 < 2.0;
+      const areaAsc = Math.PI * (p.avR * 1.25) * (p.avR * 1.25);
       let area: number;
       let R: number;
-      if (t < 0) {
-        const widen = lvotRadiusAt(p.avR, rLvot, t) / rLvot;
-        const narrow = narrowAt(t);
-        R = rLvot * widen * Math.sqrt(1 - narrow);
-        area = p.lvotAreaCm2 * widen * widen * (1 - narrow);
-      } else if (t < 1.0) {
+      if (tAv < 0.2) {
+        const widen = lvotRadiusAt(p.avR, rLvot, Math.min(0, tAv)) / rLvot;
+        const narrow = narrowAt(tAv);
+        const lvotRNow = rLvot * widen * Math.sqrt(1 - narrow);
+        const lvotAreaNow = p.lvotAreaCm2 * widen * widen * (1 - narrow);
+        const avOrifR = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
+        // Exact lvotAreaCm2 at t = -0.5 cm (PW LVOT VTI plane) and exact avAreaCm2 at t >= 0.2 cm (CW/PW AV peak)
+        const uValve = isStenotic
+          ? smoothstep(-0.18, 0.12, tAv)
+          : smoothstep(-0.35, 0.2, tAv);
+        area = lvotAreaNow + (p.avAreaCm2 - lvotAreaNow) * uValve;
+        R = lvotRNow + (avOrifR - lvotRNow) * uValve;
+      } else if (tAv < 0.95) {
         R = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
         area = p.avAreaCm2;
+      } else if (!isStenotic) {
+        // Normal aortic root: smooth recovery from valve orifice to ascending aorta lumen (matches aorticNetwork at STJ)
+        const uRec = smoothstep(0.95, 2.35, tAv);
+        const avOrifR = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
+        const rAsc = p.avR * 1.25;
+        area = p.avAreaCm2 + (areaAsc - p.avAreaCm2) * uRec;
+        R = avOrifR + (rAsc - avOrifR) * uRec;
       } else {
-        const spread = 1 + (t - 1.0) * 0.45;
-        R = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15 * spread;
-        area = p.avAreaCm2 * spread * spread;
+        // Stenotic post-valvular free jet: preserves crisp high-velocity turbulent core well into the ascending aorta
+        const alongAv = tAv - 0.95;
+        const spread = 1 + alongAv * 0.34;
+        R = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.12 * spread;
+        area = p.avAreaCm2 * (1 + alongAv * 0.24) * (1 + alongAv * 0.24);
       }
-      const rHalf = 0.917 * R;
-      const sShear = Math.max(0, t - 1);
-      const shear = p.avAreaCm2 < 2.0 ? FAST_JET_SHEAR : SLOW_SHEAR;
+      const rHalf = (isStenotic && tAv > 0 ? 0.86 : 0.88) * R;
+      const sShear = Math.max(0, tAv - 0.95);
+      const shear = isStenotic ? FAST_JET_SHEAR : SLOW_SHEAR;
       let vJet = 0;
-      if (narrowPeak > 0 && t > LVOT_OBSTRUCTION_T) {
+      if (narrowPeak > 0 && tAv > LVOT_OBSTRUCTION_T) {
         const aEff = p.lvotAreaCm2 * (1 - narrowPeak);
         const rEff = Math.sqrt(aEff / Math.PI);
-        const along = t - LVOT_OBSTRUCTION_T;
-        const rHalfJet = 0.917 * rEff * (1 + along * 0.45);
+        const along = tAv - LVOT_OBSTRUCTION_T;
+        const rHalfJet = 0.86 * rEff * (1 + along * 0.32);
         if (rho < jetReach(rHalfJet, along, FAST_JET_SHEAR))
           vJet =
             (qao / aEff / 100) *
             freeJetCentreline(along, 2 * rEff) *
             jetProfile(rho, rHalfJet, along, FAST_JET_SHEAR) *
-            fadeOut(t, 4, 5.5);
+            fadeOut(tAv, 3.8, 5.4);
       }
       const reach = rho < jetReach(rHalf, sShear, shear);
       if (reach || vJet > 0) {
         const v = qao / area / 100;
-        const vTract = reach ? v * jetProfile(rho, rHalf, sShear, shear) * fadeOut(t, 4, 5.5) : 0;
+        // Physiologic radial core rounding for laminar LVOT/AV (= 1.00 on centerline rho = 0, so PW/CW Vmax is exact)
+        const rNorm = Math.min(1.4, rho / Math.max(0.25, R));
+        const radialCore = isStenotic && tAv > 0 ? 1 : 1 / (1 + 0.45 * rNorm * rNorm);
+        const vTract = reach
+          ? v * radialCore * jetProfile(rho, rHalf, sShear, shear) * fadeOut(tAv, 3.8, 5.4)
+          : 0;
         const vOut = Math.max(vTract, vJet);
-        out.vx += ax.x * vOut;
-        out.vy += ax.y * vOut;
-        out.vz += ax.z * vOut;
+        rootVx = ax.x * vOut;
+        rootVy = ax.y * vOut;
+        rootVz = ax.z * vOut;
+        rootSpeed = vOut;
         const stenotic =
-          p.avAreaCm2 < 2.0 && t > 0
-            ? Math.min(0.6, (2.0 - p.avAreaCm2) * 0.5)
-            : p.lvotObstruction && t < 0
-              ? 0.4 * (1 - area / p.lvotAreaCm2)
+          isStenotic && tAv > 0
+            ? Math.min(0.65, (2.0 - p.avAreaCm2) * 0.52)
+            : p.lvotObstruction && tAv > LVOT_OBSTRUCTION_T - 0.4
+              ? Math.max(
+                  0.4 * Math.max(0, 1 - area / p.lvotAreaCm2),
+                  vJet > 1.5 ? Math.min(0.55, (vJet - 1.2) * 0.16) : 0,
+                )
               : 0;
-        out.dispersion = Math.max(
-          out.dispersion,
+        rootDisp = Math.max(
           (p.turbulence['lvot'] ?? 0.04) +
-            stenotic * (t > 0 ? 1 : 0.3) +
-            0.1 * Math.pow(Math.min(1, rho / R), 4),
-          t > 0 ? (p.turbulence['aortic-valve'] ?? 0) : 0,
+            stenotic * (tAv > 0 ? 1 : 0.35) +
+            (isStenotic ? 0.12 : 0.04) * Math.pow(Math.min(1, rho / Math.max(0.25, R)), 4),
+          tAv > 0 ? (p.turbulence['aortic-valve'] ?? 0) : 0,
         );
-        out.present = 1;
+        rootPresent = 1;
       }
     }
+
+    if (inAorta) {
+      if (hasStenoticJet && rootPresent && rootSpeed > 1.35) {
+        // Post-stenotic / SAM turbulent jet rides over the laminar ascending-aorta network instead of getting clipped at STJ
+        const archSpeed = Math.hypot(AORTA_TMP.vx, AORTA_TMP.vy, AORTA_TMP.vz);
+        const jetWeight = smoothstep(1.2, 2.2, rootSpeed) * fadeOut(tAv, 3.6, 5.2);
+        if (rootSpeed >= archSpeed) {
+          out.vx = AORTA_TMP.vx * (1 - jetWeight) + rootVx * jetWeight;
+          out.vy = AORTA_TMP.vy * (1 - jetWeight) + rootVy * jetWeight;
+          out.vz = AORTA_TMP.vz * (1 - jetWeight) + rootVz * jetWeight;
+          out.dispersion = Math.max(AORTA_TMP.dispersion, rootDisp * jetWeight);
+          out.present = 1;
+          return;
+        }
+      }
+      // Smooth cross-fade across the sinotubular junction (t = 1.7..3.0 cm): eliminates both the A5C velocity cliff
+      // and the PLAX straight diagonal knife-edge cutoff.
+      const wArch = rootPresent ? smoothstep(1.7, 3.0, tAv) : 1;
+      out.vx = rootVx * (1 - wArch) + AORTA_TMP.vx * wArch;
+      out.vy = rootVy * (1 - wArch) + AORTA_TMP.vy * wArch;
+      out.vz = rootVz * (1 - wArch) + AORTA_TMP.vz * wArch;
+      out.dispersion = Math.max(rootDisp * (1 - wArch), AORTA_TMP.dispersion);
+      out.present = 1;
+      return;
+    }
+
+    if (rootPresent) {
+      out.vx += rootVx;
+      out.vy += rootVy;
+      out.vz += rootVz;
+      out.dispersion = Math.max(out.dispersion, rootDisp);
+      out.present = 1;
+    }
+  } else if (inAorta) {
+    out.vx = AORTA_TMP.vx;
+    out.vy = AORTA_TMP.vy;
+    out.vz = AORTA_TMP.vz;
+    out.dispersion = AORTA_TMP.dispersion;
+    out.present = AORTA_TMP.present;
+    return;
   }
 
   // ---- Tricuspid inflow ----
@@ -337,13 +439,13 @@ export function sampleFlow(
   if (p.enabled['rvot'] !== false) {
     const qpv = sampleTable(tables.pulmonaryFlowMlps, phase);
     if (qpv > 1) {
-      const ax = p.rvotB.x - p.rvotA.x,
-        ay = p.rvotB.y - p.rvotA.y,
-        az = p.rvotB.z - p.rvotA.z;
-      const L = Math.hypot(ax, ay, az);
-      const ux = ax / L,
-        uy = ay / L,
-        uz = az / L;
+      const axR = p.rvotB.x - p.rvotA.x,
+        ayR = p.rvotB.y - p.rvotA.y,
+        azR = p.rvotB.z - p.rvotA.z;
+      const L = Math.hypot(axR, ayR, azR);
+      const ux = axR / L,
+        uy = ayR / L,
+        uz = azR / L;
       const dx = x - p.rvotA.x,
         dy = y - p.rvotA.y,
         dz = z - hp.pvZ - p.rvotA.z;
@@ -355,8 +457,13 @@ export function sampleFlow(
         const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
         if (rho < jetReach(0.89 * 1.05, 0)) {
           const v = qpv / p.rvotAreaCm2 / 100;
+          const rNorm = Math.min(1.4, rho / 1.05);
+          const radialCore = 1 / (1 + 0.38 * rNorm * rNorm);
           const prof =
-            jetProfile(rho, 0.89 * 1.05, 0) * smoothstep(-1, 0, t) * fadeOut(t, L, L + 1);
+            radialCore *
+            jetProfile(rho, 0.89 * 1.05, 0) *
+            smoothstep(-1, 0, t) *
+            fadeOut(t, L, L + 1);
           out.vx += ux * v * prof;
           out.vy += uy * v * prof;
           out.vz += uz * v * prof;
@@ -378,20 +485,32 @@ export function sampleFlow(
         dy = y - oy,
         dzj = oz - z;
       const rho = Math.hypot(dx, dy);
-      if (dzj > -1.4 && dzj < 4.5) {
-        const r0 = p.trEroCm2 ? Math.sqrt(p.trEroCm2 / Math.PI) * 1.1 : 0.25;
-        const Rj = r0 + Math.max(0, dzj) * 0.28;
+      // Physiologic trivial TR (normal hearts, no regurgitant EROA and low PASP/Vmax) stays compact right behind
+      // coaptation so it never paints false mid-RA pathology while keeping full CW peak velocity at the orifice.
+      const isTraceTr = p.trEroCm2 === null && p.trVmaxMps < 2.6;
+      const maxReach = isTraceTr ? 1.6 : 4.5;
+      const fadeStart = isTraceTr ? 0.7 : 3.3;
+      if (dzj > -1.4 && dzj < maxReach) {
+        const r0 = p.trEroCm2
+          ? Math.sqrt(p.trEroCm2 / Math.PI) * 1.1
+          : isTraceTr
+            ? 0.1
+            : 0.24;
+        const spreadSlope = isTraceTr ? 0.16 : 0.26 * (1 - 0.055 * Math.min(4, Math.max(0, dzj)));
+        const Rj = r0 + Math.max(0, dzj) * spreadSlope;
         const rHalf = 0.84 * Rj;
         if (dzj >= 0 && rho < jetReach(rHalf, dzj, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, dzj, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(dzj, (2 * r0) / 1.1) * fadeOut(dzj, 3.5, 4.5);
+          const decay =
+            freeJetCentreline(dzj, (2 * r0) / 1.1) * fadeOut(dzj, fadeStart, maxReach);
           out.vz -= vmax * prof * decay;
           out.dispersion = Math.max(
             out.dispersion,
-            (p.turbulence['tr-jet'] ?? 0.25) + 0.2 * Math.min(1, rho / Rj),
+            (isTraceTr ? 0.16 : (p.turbulence['tr-jet'] ?? 0.25)) +
+              (isTraceTr ? 0.08 : 0.2) * Math.min(1, rho / Math.max(0.08, Rj)),
           );
           out.present = 1;
-        } else if (dzj < 0) {
+        } else if (dzj < 0 && !isTraceTr) {
           const d = Math.hypot(rho, -dzj) + 0.2;
           if (d < 1.4) {
             const conv =

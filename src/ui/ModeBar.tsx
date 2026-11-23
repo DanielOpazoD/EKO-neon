@@ -182,12 +182,18 @@ function CineControls() {
 function ContextChip() {
   const modality = useSimStore((s) => s.modality);
   const scaleMps = useSimStore((s) => s.color.scaleMps);
+  const baselineShiftMps = useSimStore((s) => s.color.baselineShiftMps);
   const gateDepthCm = useSimStore((s) => s.gateDepthCm);
   const sweepSpeed = useSimStore((s) => s.spectral.sweepSpeedMmPerS);
+  const fmtSigned = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
+  const colorText =
+    Math.abs(baselineShiftMps) < 0.005
+      ? `±${scaleMps.toFixed(2)} m/s`
+      : `${fmtSigned(baselineShiftMps + scaleMps)}/${fmtSigned(baselineShiftMps - scaleMps)} m/s`;
   const spec: Record<string, { text: string; title: string } | undefined> = {
     color: {
-      text: `±${scaleMps.toFixed(2)} m/s`,
-      title: 'Escala de Nyquist de la caja de color (pestaña Doppler)',
+      text: colorText,
+      title: 'Escala de Nyquist y línea base de la caja de color (pestaña Doppler)',
     },
     pw: { text: `Gate ${gateDepthCm.toFixed(1)} cm`, title: 'Profundidad de la compuerta PW' },
     cw: { text: 'Cursor', title: 'Cursor CW activo — sin compuerta' },

@@ -53,9 +53,9 @@ const SHEAR_ORIFICE_CM = 0.25;
 const SHEAR_GROWTH = 0.25;
 
 /**
- * Shear layer of a regurgitant or stenotic jet: 1 mm wide at its orifice, growing 0.05 cm per cm.
+ * Shear layer of a regurgitant or stenotic jet: ~1.1 mm wide at its orifice, feathering organically downstream.
  */
-export const FAST_JET_SHEAR = { orifice: 0.1, growth: 0.05 } as const;
+export const FAST_JET_SHEAR = { orifice: 0.11, growth: 0.085 } as const;
 export const SLOW_SHEAR = { orifice: SHEAR_ORIFICE_CM, growth: SHEAR_GROWTH } as const;
 export type Shear = { orifice: number; growth: number };
 
@@ -164,18 +164,27 @@ export function inflowJet(
   const rho = Math.hypot(dx, dy);
   const re = Math.sqrt(areaCm2 / Math.PI);
   if (zr < 0) {
-    const d = Math.hypot(rho, zr);
+    // Smooth atrial convergence funnel with shifted virtual origin just past the annulus so velocity and
+    // width meet the transmitral core continuously at zr = 0 without a flat horizontal seam.
+    const up = -zr;
+    const d = Math.hypot(rho, up);
     if (d >= FUNNEL_FADE_TO_CM) return;
     const q = inflowFlow(tables, phase, 0, waveCmps, table);
     if (q <= 1) return;
+    const rFunnel = re * 0.92 * (1 + 0.36 * up);
+    const rNorm = Math.min(1.5, rho / Math.max(0.25, rFunnel));
+    const radialCore = 1 / (1 + 0.52 * rNorm * rNorm);
+    const dEff = Math.hypot(rho * 0.72, up + 0.72 * re);
     const mag =
       (q / areaCm2 / 100) *
-      Math.min(1, (re * re) / (2 * d * d)) *
+      Math.min(1, (0.52 * re * re) / (dEff * dEff)) *
+      radialCore *
       fadeOut(d, FUNNEL_FADE_FROM_CM, FUNNEL_FADE_TO_CM) *
-      convergenceWeight(rho, -zr, r);
-    const sx = -dx,
-      sy = -dy,
-      sz = r - zr;
+      convergenceWeight(rho, up + 0.22, r * 0.96, 0.2, 0.55);
+    if (mag <= 0.01) return;
+    const sx = -dx * 0.65,
+      sy = -dy * 0.65,
+      sz = r + up;
     const n = Math.hypot(sx, sy, sz);
     out.vx += (sx / n) * mag;
     out.vy += (sy / n) * mag;
@@ -184,13 +193,17 @@ export function inflowJet(
     out.present = 1;
     return;
   }
-  const rHalf = re + Math.min(4, Math.max(0, zr - INFLOW_CORE_CM)) * 0.35;
+  // Sculpted transmitral/tricuspid filling flame: exact centerline velocity at rho = 0 (preserves PW E/A/DT/VTI
+  // and CMM Vp) with natural radial rolloff toward the leaflet margins and LV walls instead of a wall-to-wall boxcar.
+  const rHalf = re * 0.92 + Math.min(2.5, Math.max(0, zr - INFLOW_CORE_CM)) * 0.16;
   if (rho >= jetReach(rHalf, zr)) return;
   const q = inflowFlow(tables, phase, Math.hypot(zr, rho), waveCmps, table);
   if (q <= 1) return;
-  out.vz += (q / areaCm2 / 100) * jetProfile(rho, rHalf, zr) * axial(zr);
-  // Subtle transmitral/tricuspid vortex-ring roll-up during E deceleration mildly feathers the inner flank
-  // (toward baseline only) while leaving E-wave acceleration and peak razor-focused.
+  const rNorm = Math.min(1.5, rho / Math.max(0.25, rHalf));
+  const radialCore = 1 / (1 + 0.52 * rNorm * rNorm);
+  out.vz += (q / areaCm2 / 100) * radialCore * jetProfile(rho, rHalf, zr) * axial(zr);
+  // Subtle transmitral/tricuspid vortex-ring roll-up during E deceleration stays well inside the laminar
+  // regime so healthy leaflets never trigger false green variance turbulence.
   let decelShear = 0;
   if (table === tables.mitralFlowMlps || table === tables.tricuspidFlowMlps) {
     const tm = tables.timings;
@@ -199,10 +212,10 @@ export function inflowJet(
     const eEndT = Math.min(tables.rrS, ePeakT + tm.eDecelS * 1.1);
     if (tBeat > ePeakT && tBeat < eEndT && tm.eDecelS > 0.02) {
       const u = Math.min(1, (tBeat - ePeakT) / tm.eDecelS);
-      decelShear = 0.065 * Math.sin(Math.PI * u);
+      decelShear = 0.03 * Math.sin(Math.PI * u);
     }
   }
-  out.dispersion = Math.max(out.dispersion, turbulence + decelShear + 0.15 * Math.min(1, rho / r));
+  out.dispersion = Math.max(out.dispersion, turbulence + decelShear + 0.05 * Math.min(1, rho / r));
   out.present = 1;
 }
 

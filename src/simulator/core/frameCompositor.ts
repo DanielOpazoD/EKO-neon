@@ -133,6 +133,8 @@ export class FrameCompositor {
       : inp.modality === 'color' && ctx.colorCurrent
         ? ctx.colorCurrent.variance
         : null;
+    const colorPower =
+      !cf && inp.modality === 'color' && ctx.colorCurrent ? ctx.colorCurrent.power : undefined;
     const tintMap = inp.settings.tintMap;
 
     let bitmap: ImageBitmap | null = null;
@@ -145,6 +147,7 @@ export class FrameCompositor {
             ? {
                 vel: colorVel,
                 variance: colorVar,
+                power: colorPower,
                 version: ctx.colorVersion,
                 settings: colorSettings,
               }
@@ -160,7 +163,7 @@ export class FrameCompositor {
       const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
       scanConvertLut(display, this.lut, sectorRgba, tintMap);
       if (colorVel && colorVar)
-        overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings);
+        overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings, colorPower);
     }
     if (isStrip) {
       rgba.fill(0, W * sectorH * 4);

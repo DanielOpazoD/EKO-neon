@@ -14,6 +14,7 @@ import { sriDefinesGlsl } from '../postprocess/sriFilter';
 import { tintMapGlsl } from '../postprocess/tintMap';
 import { psfDefinesGlsl } from '../acoustic/psf';
 import { TRANS_K } from '../transmissionCode';
+import { ST_POW_ALPHA_MIN } from '@/simulator/doppler/color/spatiotemporalFilter';
 
 /**
  * GPU image chain after envelope detection (decision 54), mirroring the CPU code step by step:
@@ -250,7 +251,7 @@ uniform int uSamples;
 uniform int uColorOn;
 uniform int uTintMap;       // 0 gray, 1 cool-blue, 2 sepia, 3 amber
 uniform vec4 uBox;          // rMin, rMax, thetaMin, thetaMax
-uniform vec2 uColorMap;     // scale (m/s), show variance (0/1)
+uniform vec3 uColorMap;     // scale (m/s), show variance (0/1), baselineShift (m/s)
 out vec4 outColor;
 ${colorMapDefinesGlsl()}
 ${tintMapGlsl()}
@@ -258,13 +259,15 @@ ${tintMapGlsl()}
 float greyF(int s, int l) { return floor(texelFetch(uPacked, ivec2(s, l), 0).r * 255.0 + 0.5); }
 
 // postprocess/colorMap.ts colorMap
-vec3 colorMap(float v, float scale, float variance, bool showVariance) {
-  float t = clamp(v / scale, -1.0, 1.0);
+vec3 colorMap(float v, float scale, float variance, bool showVariance, float baselineShift) {
+  float posSpan = max(1e-3, scale + baselineShift);
+  float negSpan = max(1e-3, scale - baselineShift);
+  float t = v >= 0.0 ? min(1.0, v / posSpan) : -min(1.0, -v / negSpan);
   float a = abs(t);
   float dominant = CM_DOMINANT_BASE + CM_DOMINANT_RANGE * min(1.0, a * CM_DOMINANT_GAIN);
   vec3 c = t >= 0.0
-    ? vec3(dominant, CM_GREEN_BASE_TOWARD + CM_GREEN_RANGE_TOWARD * max(0.0, a - CM_GREEN_KNEE) * CM_GREEN_GAIN, CM_QUIET)
-    : vec3(CM_QUIET, CM_GREEN_BASE_AWAY + CM_GREEN_RANGE_AWAY * max(0.0, a - CM_GREEN_KNEE) * CM_GREEN_GAIN, dominant);
+    ? vec3(dominant, min(255.0, CM_GREEN_BASE_TOWARD + CM_GREEN_RANGE_TOWARD * max(0.0, a - CM_GREEN_KNEE) * CM_GREEN_GAIN), CM_QUIET)
+    : vec3(CM_QUIET, min(255.0, CM_GREEN_BASE_AWAY + CM_GREEN_RANGE_AWAY * max(0.0, a - CM_GREEN_KNEE) * CM_GREEN_GAIN), dominant);
   if (showVariance && variance > CM_VARIANCE_MIN) {
     float g = min(1.0, (variance - CM_VARIANCE_MIN) * CM_VARIANCE_GAIN);
     c.g = c.g * (1.0 - g) + CM_VARIANCE_GREEN * g;
@@ -330,21 +333,32 @@ void main() {
       vec4 d10 = texelFetch(uColor, ivec2(s0, cl1), 0);
       vec4 d01 = texelFetch(uColor, ivec2(cs1, l0), 0);
       vec4 d11 = texelFetch(uColor, ivec2(cs1, cl1), 0);
-      float w00 = (1.0 - fl) * (1.0 - fs) * d00.a;
-      float w10 = fl * (1.0 - fs) * d10.a;
-      float w01 = (1.0 - fl) * fs * d01.a;
-      float w11 = fl * fs * d11.a;
+      float v00 = step(0.5, d00.a);
+      float v10 = step(0.5, d10.a);
+      float v01 = step(0.5, d01.a);
+      float v11 = step(0.5, d11.a);
+      float w00 = (1.0 - fl) * (1.0 - fs) * v00;
+      float w10 = fl * (1.0 - fs) * v10;
+      float w01 = (1.0 - fl) * fs * v01;
+      float w11 = fl * fs * v11;
       float wSum = w00 + w10 + w01 + w11;
       if (wSum > 0.18) {
         vec2 ph = d00.rg * w00 + d10.rg * w10 + d01.rg * w01 + d11.rg * w11;
         float vari = (d00.b * w00 + d10.b * w10 + d01.b * w01 + d11.b * w11) / wSum;
+        float p00 = mix(${glslFloat(ST_POW_ALPHA_MIN)}, 1.0, clamp((d00.a - 0.5) * 2.0, 0.0, 1.0));
+        float p10 = mix(${glslFloat(ST_POW_ALPHA_MIN)}, 1.0, clamp((d10.a - 0.5) * 2.0, 0.0, 1.0));
+        float p01 = mix(${glslFloat(ST_POW_ALPHA_MIN)}, 1.0, clamp((d01.a - 0.5) * 2.0, 0.0, 1.0));
+        float p11 = mix(${glslFloat(ST_POW_ALPHA_MIN)}, 1.0, clamp((d11.a - 0.5) * 2.0, 0.0, 1.0));
+        float powAlpha = (p00 * w00 + p10 * w10 + p01 * w01 + p11 * w11) / wSum;
         float scale = max(1e-3, uColorMap.x);
-        float v = (scale / 3.141592653589793) * atan(ph.y, ph.x);
+        float baseline = uColorMap.z;
+        float v = baseline + (scale / 3.141592653589793) * atan(ph.y, ph.x);
         float edgeAlpha = smoothstep(0.18, 0.72, wSum);
         float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
-        float tissuePrio = clamp((235.0 - lum) / 70.0, 0.28, 1.0);
-        float blend = COLOR_BLEND * edgeAlpha * tissuePrio;
-        rgb = floor(colorMap(v, scale, vari, uColorMap.y > 0.5) * blend + rgb * (1.0 - blend) + 0.5);
+        float tissuePrio = 1.0 - smoothstep(98.0, 172.0, lum);
+        float velAlpha = 0.62 + 0.38 * smoothstep(0.05, 0.22, abs(v) / scale);
+        float blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * tissuePrio;
+        rgb = floor(colorMap(v, scale, vari, uColorMap.y > 0.5, baseline) * blend + rgb * (1.0 - blend) + 0.5);
       }
     }
   }

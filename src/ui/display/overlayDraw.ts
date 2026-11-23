@@ -3,6 +3,7 @@ import { imageSegmentsOn, useSegmentOrientation, type SimStore } from '@/app/sto
 import type { SimOutput } from '@/simulator/core/protocol';
 import { reprojectGeometry } from '@/simulator/measurements/geometry';
 import { hasGate, isStripModality, MODALITIES } from '@/simulator/renderer/modality';
+import { colorMap } from '@/simulator/renderer/postprocess/colorMap';
 import { tgcAtDepth } from '@/simulator/renderer/postprocess/consolePipeline';
 import { polarToPixel, type SectorMapping } from '@/simulator/renderer/scanConvert';
 import { canvasFont } from '../canvasFonts';
@@ -16,6 +17,61 @@ export function markerScreenPosition(
 ): { x: number; y: number } {
   if (mk.strip || !mk.captureSector) return { x: mk.x, y: mk.y };
   return reprojectGeometry([{ x: mk.x, y: mk.y }], mk.captureSector, m)[0] ?? { x: mk.x, y: mk.y };
+}
+
+export interface SpectralAxisTick {
+  valueMps: number;
+  frac: number; // 0 = top of strip, 1 = bottom of strip
+  label: string;
+}
+
+const ASE_CMPS_STEPS = [5, 10, 20, 25, 50, 100, 200] as const;
+const ASE_MPS_STEPS = [0.2, 0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
+
+/**
+ * ASE-standard spectral velocity axis ticks anchored strictly at 0 (baseline), so shifting the
+ * baseline or depth-limiting PRF always keeps `0` locked on the baseline with clean clinical steps.
+ */
+export function computeSpectralTicks(
+  topValueMps: number,
+  bottomValueMps: number,
+  useCmps: boolean,
+): SpectralAxisTick[] {
+  const spanMps = topValueMps - bottomValueMps;
+  if (!(spanMps > 1e-6)) return [];
+  const scale = useCmps ? 100 : 1;
+  const top = topValueMps * scale;
+  const bottom = bottomValueMps * scale;
+  const steps = useCmps ? ASE_CMPS_STEPS : ASE_MPS_STEPS;
+  let step = steps[steps.length - 1]!;
+  for (const candidate of steps) {
+    const count = Math.floor(top / candidate) - Math.ceil(bottom / candidate) + 1;
+    if (count <= 7) {
+      step = candidate;
+      break;
+    }
+  }
+  const kMin = Math.ceil(bottom / step - 1e-6);
+  const kMax = Math.floor(top / step + 1e-6);
+  const ticks: SpectralAxisTick[] = [];
+  for (let k = kMax; k >= kMin; k--) {
+    const val = k * step;
+    const valueMps = val / scale;
+    const frac = (topValueMps - valueMps) / spanMps;
+    if (frac < -1e-4 || frac > 1 + 1e-4) continue;
+    const text = useCmps
+      ? `${Math.round(val)}`
+      : Math.abs(val) < 1e-6
+        ? '0'
+        : Number.isInteger(val)
+          ? `${val.toFixed(0)}`
+          : `${val.toFixed(1)}`;
+    ticks.push({ valueMps, frac: Math.max(0, Math.min(1, frac)), label: text });
+  }
+  if (ticks.length > 0) {
+    ticks[0] = { ...ticks[0]!, label: `${ticks[0]!.label} ${useCmps ? 'cm/s' : 'm/s'}` };
+  }
+  return ticks;
 }
 
 export function drawOverlay(
@@ -111,29 +167,70 @@ export function drawOverlay(
       color.boxThetaMaxRad,
       color.boxRMinCm,
       color.boxRMaxCm,
-      '#57d38c',
+      'rgba(102, 224, 160, 0.88)',
     );
-    // below the telemetry the HUD prints in the top-right corner (two lines, ~60 px), clear of the focus marker
-    const bx = W - 30,
-      by = Math.max(m.apexY + 20, 76),
-      bh = 90;
-    const grad = ctx.createLinearGradient(0, by, 0, by + bh);
-    grad.addColorStop(0, '#ffd23c');
-    grad.addColorStop(0.45, '#c81e1e');
-    grad.addColorStop(0.5, '#000');
-    grad.addColorStop(0.55, '#1e3cc8');
-    grad.addColorStop(1, '#3ce0ff');
-    ctx.fillStyle = grad;
-    ctx.fillRect(bx, by, 8, bh);
-    ctx.fillStyle = '#b9c3d0';
+    // Physical Color Doppler bar rendered directly from colorMap (reflects baseline shift, invert & variance)
+    const scale = Math.max(0.01, color.scaleMps);
+    const baseline = color.baselineShiftMps;
+    const vTop = baseline + scale;
+    const vBot = baseline - scale;
+    const bw = color.showVariance ? 12 : 9;
+    const velW = color.showVariance ? 8 : 9;
+    const bx = (inward ? rightX - 30 : W - 18) - bw;
+    const by = Math.max(m.apexY + 42, 128);
+    const bh = 104;
+    const rgb: [number, number, number] = [0, 0, 0];
+    for (let py = 0; py < bh; py++) {
+      const frac = (py + 0.5) / bh;
+      const v = vTop - frac * 2 * scale;
+      if (Math.abs(v) < 0.025 * scale) {
+        ctx.fillStyle = '#05070a';
+        ctx.fillRect(bx, by + py, bw, 1);
+      } else {
+        colorMap(v, scale, 0, false, rgb, baseline);
+        ctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(rgb[1])},${Math.round(rgb[2])})`;
+        ctx.fillRect(bx, by + py, velW, 1);
+        if (color.showVariance) {
+          colorMap(v, scale, 0.85, true, rgb, baseline);
+          ctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(rgb[1])},${Math.round(rgb[2])})`;
+          ctx.fillRect(bx + velW, by + py, bw - velW, 1);
+        }
+      }
+    }
+    ctx.strokeStyle = 'rgba(185, 195, 208, 0.35)';
+    ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
+    const zeroFrac = Math.max(0, Math.min(1, vTop / (2 * scale)));
+    const yZero = by + zeroFrac * bh;
+    ctx.strokeStyle = '#d7e0ea';
+    ctx.beginPath();
+    ctx.moveTo(bx - 3, yZero);
+    ctx.lineTo(bx + bw + 2, yZero);
+    ctx.stroke();
+
+    const fmtVel = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
+    const prevBase = ctx.textBaseline;
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#cfd8e4';
     ctx.font = canvasFont(10, 'mono');
     ctx.textAlign = 'right';
-    ctx.fillText(`+${color.scaleMps.toFixed(2)}`, bx - 5, by + 7);
-    ctx.fillText(`−${color.scaleMps.toFixed(2)}`, bx - 5, by + bh);
+    ctx.fillText(fmtVel(vTop), bx - 6, by + 5);
+    ctx.fillText(fmtVel(vBot), bx - 6, by + bh - 5);
+    if (Math.abs(baseline) >= 0.03 && yZero > by + 32 && yZero < by + bh - 32) {
+      ctx.fillStyle = '#9aa8ba';
+      ctx.fillText('0', bx - 6, yZero);
+    }
     ctx.fillStyle = '#7f8a9a';
     ctx.font = canvasFont(9.5);
-    ctx.fillText('hacia', bx - 5, by + bh / 2 - 6);
-    ctx.fillText('desde', bx - 5, by + bh / 2 + 12);
+    ctx.fillText(color.invert ? 'desde' : 'hacia', bx - 6, by + 20);
+    ctx.fillText(color.invert ? 'hacia' : 'desde', bx - 6, by + bh - 20);
+    ctx.fillText('m/s', bx + bw, by + bh + 12);
+    if (color.showVariance) {
+      ctx.fillStyle = '#7ce0a8';
+      ctx.font = canvasFont(8.5, 'mono');
+      ctx.textAlign = 'center';
+      ctx.fillText('V', bx + velW + (bw - velW) / 2, by - 7);
+    }
+    ctx.textBaseline = prevBase;
     ctx.textAlign = 'left';
     ctx.font = canvasFont(11);
   }
@@ -166,16 +263,25 @@ export function drawOverlay(
     const strip = hud.strip;
     if (strip.kind === 'spectral') {
       const useCmpsAxis = Boolean(strip.aliasing);
-      ctx.fillStyle = '#9aa4b5';
+      const ticks = computeSpectralTicks(strip.topValue, strip.bottomValue, useCmpsAxis);
       ctx.font = canvasFont(10, 'mono');
       ctx.textAlign = 'right';
-      const n = 4;
-      for (let i = 0; i <= n; i++) {
-        const v = strip.topValue + ((strip.bottomValue - strip.topValue) * i) / n;
-        const y = strip.y + (strip.height * i) / n;
-        const valText = useCmpsAxis ? `${Math.round(v * 100)}` : `${v.toFixed(2)}`;
-        const label = i === 0 ? `${valText} ${useCmpsAxis ? 'cm/s' : 'm/s'}` : valText;
-        ctx.fillText(label, W - 4, Math.min(H - 8, Math.max(strip.y + 7, y)));
+      for (const tick of ticks) {
+        const y = strip.y + strip.height * tick.frac;
+        // Right-edge calibration tick mark
+        ctx.strokeStyle =
+          Math.abs(tick.valueMps) < 1e-6 ? 'rgba(130,210,145,0.75)' : 'rgba(154,164,181,0.45)';
+        ctx.beginPath();
+        ctx.moveTo(W - 4, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+        const labelY = Math.min(H - 8, Math.max(strip.y + 8, y));
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+        ctx.strokeText(tick.label, W - 7, labelY);
+        ctx.lineWidth = 1;
+        ctx.fillStyle = Math.abs(tick.valueMps) < 1e-6 ? '#b7e4c2' : '#aeb8c7';
+        ctx.fillText(tick.label, W - 7, labelY);
       }
       ctx.textAlign = 'left';
       ctx.font = canvasFont(10.5, 'mono');
@@ -186,26 +292,32 @@ export function drawOverlay(
         strip.aliasing && strip.gateDepthCm !== undefined
           ? `  ±${Math.round((strip.nyquistMps ?? scaleHalf) * 100)} cm/s${prfKhz}  gate ${strip.gateDepthCm.toFixed(1)} cm`
           : `  ±${scaleHalf.toFixed(2)} m/s`;
-      ctx.fillText(
-        `${modality.toUpperCase()}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s${pulsedMeta}  WF ${wfText} cm/s`,
-        6,
-        strip.y + 8,
-      );
-      // ASE time-scale calibration marks: minor ticks every 200 ms, major ticks every 1000 ms
+      const headerText = `${modality.toUpperCase()}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s (200 ms/div)${pulsedMeta}  WF ${wfText} cm/s`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.strokeText(headerText, 6, strip.y + 8);
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#aeb8c7';
+      ctx.fillText(headerText, 6, strip.y + 8);
+      // ASE time-scale calibration ticks directly on the zero baseline (200 ms minor, 1000 ms major):
+      // matches clinical echo monitors and keeps the bottom ECG strip completely unobstructed.
       const cols200ms = strip.secondsPerColumn > 0 ? 0.2 / strip.secondsPerColumn : 0;
+      const spanMps = strip.topValue - strip.bottomValue;
+      const zeroY =
+        spanMps > 1e-6
+          ? strip.y + Math.max(0, Math.min(1, strip.topValue / spanMps)) * strip.height
+          : strip.y + strip.height / 2;
       if (cols200ms > 4) {
-        for (let k = 0; k * cols200ms < strip.width; k++) {
+        for (let k = 1; k * cols200ms < strip.width; k++) {
           const x = strip.x + k * cols200ms;
           const major = k % 5 === 0;
-          ctx.strokeStyle = major ? 'rgba(185,195,208,0.55)' : 'rgba(154,164,181,0.28)';
+          const halfTick = major ? 4.5 : 2.2;
+          ctx.strokeStyle = major ? 'rgba(165,220,175,0.62)' : 'rgba(130,190,145,0.34)';
           ctx.beginPath();
-          ctx.moveTo(x, strip.y + strip.height - (major ? 9 : 4));
-          ctx.lineTo(x, strip.y + strip.height);
+          ctx.moveTo(x, zeroY - halfTick);
+          ctx.lineTo(x, zeroY + halfTick);
           ctx.stroke();
         }
-        ctx.fillStyle = 'rgba(154,164,181,0.68)';
-        ctx.font = canvasFont(9.5, 'mono');
-        ctx.fillText('200 ms/div', 6, strip.y + strip.height - 10);
       }
       ctx.font = canvasFont(11);
     } else if (strip.kind === 'm-mode') {
@@ -278,6 +390,15 @@ export function drawOverlay(
   ctx.lineWidth = 1.5;
   // the value chips first and every caliper over them: with the 12 px minimum of the design review a chip could cover
   // a cross of another measurement, or of its own after a zoom
+  const stripBaselineY =
+    hud.strip.kind === 'spectral' && hud.strip.topValue > hud.strip.bottomValue
+      ? hud.strip.y +
+        Math.max(
+          0,
+          Math.min(1, hud.strip.topValue / (hud.strip.topValue - hud.strip.bottomValue)),
+        ) *
+          hud.strip.height
+      : undefined;
   const shown = measurements
     .filter(
       (ms) =>
@@ -287,17 +408,45 @@ export function drawOverlay(
     )
     .map((ms) => ({ ms, geometry: reprojectGeometry(ms.geometry, ms.captureSector, m) }));
   for (const { ms, geometry } of shown) {
-    const p = geometry[geometry.length - 1];
-    if (p)
+    drawGeometry(ctx, geometry, ms.kind, '#ffc857', ms.kind === 'vti' ? stripBaselineY : undefined);
+  }
+  for (const { ms, geometry } of shown) {
+    let anchor = geometry[geometry.length - 1];
+    if (ms.kind === 'vti' && geometry.length > 2 && stripBaselineY !== undefined) {
+      let bestDist = -1;
+      for (const q of geometry) {
+        const d = Math.abs(q.y - stripBaselineY);
+        if (d > bestDist) {
+          bestDist = d;
+          anchor = q;
+        }
+      }
+    }
+    if (anchor) {
+      const vmaxText =
+        ms.kind === 'vti' && ms.derived?.vmaxMps !== undefined && ms.derived.vmaxMps > 0
+          ? ms.modality === 'pw' || ms.modality === 'tdi'
+            ? ` · Vmáx ${Math.round(ms.derived.vmaxMps * 100)} cm/s`
+            : ` · Vmáx ${ms.derived.vmaxMps.toFixed(2)} m/s`
+          : '';
+      const gradText =
+        ms.kind === 'vti' &&
+        ms.modality === 'cw' &&
+        ms.derived?.meanGradientMmHg !== undefined &&
+        ms.derived.meanGradientMmHg >= 1
+          ? ` · ΔPm ${Math.round(ms.derived.meanGradientMmHg)} mmHg`
+          : '';
+      const decimals =
+        ms.kind === 'time' ? 0 : ms.kind === 'vti' || ms.units === 'cm/s' ? 1 : 2;
       drawValueChip(
         ctx,
-        `${ms.label} ${ms.value.toFixed(ms.kind === 'time' ? 0 : ms.kind === 'vti' ? 1 : 2)} ${ms.units}`,
-        p.x,
-        p.y,
+        `${ms.label} ${ms.value.toFixed(decimals)} ${ms.units}${vmaxText}${gradText}`,
+        anchor.x,
+        anchor.y,
         '#ffc857',
       );
+    }
   }
-  for (const { ms, geometry } of shown) drawGeometry(ctx, geometry, ms.kind, '#ffc857');
   if (pending.length)
     drawGeometry(
       ctx,
@@ -308,6 +457,7 @@ export function drawOverlay(
           ? 'vti'
           : 'time',
       '#5cc8ff',
+      activeTool === 'vti' ? stripBaselineY : undefined,
     );
   ctx.lineWidth = 1;
   // review markers (decision 134): numbered, with the structure the model holds under each one.
@@ -469,44 +619,81 @@ function drawGeometry(
   pts: { x: number; y: number }[],
   kind: string,
   color: string,
+  baselineY?: number,
 ): void {
-  // calipers as on a scanner (decision 200): a cross at each point and a dashed line between them, both over a dark
+  if (!pts.length) return;
+  const denseVti = kind === 'vti' && pts.length > 24;
+  let drawPts = pts;
+  let caliperPts = pts;
+  if (denseVti) {
+    let first = 0;
+    let last = pts.length - 1;
+    if (baselineY !== undefined) {
+      const idxFirst = pts.findIndex((p) => Math.abs(p.y - baselineY) > 1.5);
+      if (idxFirst >= 0) {
+        first = Math.max(0, idxFirst - 1);
+        for (let i = pts.length - 1; i >= idxFirst; i--) {
+          if (Math.abs(pts[i]!.y - baselineY) > 1.5) {
+            last = Math.min(pts.length - 1, i + 1);
+            break;
+          }
+        }
+        drawPts = pts.slice(first, last + 1);
+      }
+    }
+    caliperPts = [drawPts[0]!, drawPts[drawPts.length - 1]!];
+  }
+  // Dense auto-traced spectral envelopes draw a sleek clinical curve + translucent area fill to the
+  // zero baseline, placing caliper crosses only at the active flow boundaries instead of every column.
+  if (kind === 'vti' && drawPts.length >= 2 && baselineY !== undefined) {
+    ctx.beginPath();
+    ctx.moveTo(drawPts[0]!.x, baselineY);
+    for (const p of drawPts) ctx.lineTo(p.x, p.y);
+    ctx.lineTo(drawPts[drawPts.length - 1]!.x, baselineY);
+    ctx.closePath();
+    ctx.fillStyle = color === '#ffc857' ? 'rgba(255, 200, 87, 0.14)' : 'rgba(92, 200, 255, 0.14)';
+    ctx.fill();
+  }
+  // calipers as on a scanner (decision 200): a cross at each point and a line between them, both over a dark
   // halo so they read on bright tissue as well as in the cavity
   const crosses = () => {
     ctx.beginPath();
-    for (const p of pts) {
-      ctx.moveTo(p.x - 5, p.y);
-      ctx.lineTo(p.x + 5, p.y);
-      ctx.moveTo(p.x, p.y - 5);
-      ctx.lineTo(p.x, p.y + 5);
+    for (const p of caliperPts) {
+      ctx.moveTo(p.x - 4.5, p.y);
+      ctx.lineTo(p.x + 4.5, p.y);
+      ctx.moveTo(p.x, p.y - 4.5);
+      ctx.lineTo(p.x, p.y + 4.5);
     }
     ctx.stroke();
   };
   const joined =
-    pts.length >= 2 &&
+    drawPts.length >= 2 &&
     (kind === 'linear' || kind === 'time' || kind === 'vti' || kind === 'volume');
   const line = () => {
     ctx.beginPath();
-    ctx.moveTo(pts[0]!.x, pts[0]!.y);
-    for (const p of pts.slice(1)) ctx.lineTo(p.x, p.y);
+    ctx.moveTo(drawPts[0]!.x, drawPts[0]!.y);
+    for (const p of drawPts.slice(1)) ctx.lineTo(p.x, p.y);
     if (kind === 'volume') ctx.closePath();
     ctx.stroke();
   };
   const cap = ctx.lineCap;
+  const join = ctx.lineJoin;
   ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.65)';
-  ctx.lineWidth = 3.5;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+  ctx.lineWidth = denseVti ? 3.2 : 3.5;
   crosses();
   if (joined) line();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = denseVti ? 1.8 : 1.5;
   crosses();
   if (joined) {
-    ctx.setLineDash([5, 4]);
+    if (!denseVti) ctx.setLineDash([5, 4]);
     line();
     ctx.setLineDash([]);
   }
   ctx.lineCap = cap;
+  ctx.lineJoin = join;
 }
 
 /** A measurement's value beside its last point: a small dark chip with the figure in the mono face (decision 200). */

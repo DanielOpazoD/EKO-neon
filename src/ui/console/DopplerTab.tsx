@@ -82,9 +82,26 @@ export function DopplerTab() {
             step={0.01}
             unit=" m/s"
             format={(v) => `${v.toFixed(2)} m/s`}
-            onChange={(v) => s.setColor({ scaleMps: v })}
+            onChange={(v) => {
+              const maxShift = Math.round(v * 80) / 100;
+              const clampedBase = Math.max(-maxShift, Math.min(maxShift, s.color.baselineShiftMps));
+              s.setColor({ scaleMps: v, baselineShiftMps: clampedBase });
+            }}
             title={tip(
               'La profundidad y la frecuencia limitan la PRF y Nyquist. Una escala baja aumenta el aliasing.',
+            )}
+          />
+          <Slider
+            label="Línea base"
+            value={s.color.baselineShiftMps}
+            min={-Math.round(s.color.scaleMps * 80) / 100}
+            max={Math.round(s.color.scaleMps * 80) / 100}
+            step={0.02}
+            unit=" m/s"
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} m/s`}
+            onChange={(v) => s.setColor({ baselineShiftMps: v })}
+            title={tip(
+              'Desplaza la línea base en dirección del chorro para ajustar la velocidad de aliasing (maniobra PISA).',
             )}
           />
           <p className="small" aria-live="polite">
@@ -99,6 +116,18 @@ export function DopplerTab() {
             step={0.05}
             onChange={(v) => s.setColor({ persistence: v })}
           />
+          <Slider
+            label="Suavizado"
+            value={s.color.smoothing}
+            min={0}
+            max={1}
+            step={0.05}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={(v) => s.setColor({ smoothing: v })}
+            title={tip(
+              'Filtro espacio-temporal adaptativo: reduce el parpadeo y suaviza el flujo laminar preservando el mosaico turbulento.',
+            )}
+          />
           <Toggle
             label="Mapa de varianza"
             value={s.color.showVariance}
@@ -111,16 +140,6 @@ export function DopplerTab() {
           />
           <details className="adv">
             <summary>Ajustes finos</summary>
-            <Slider
-              label="Línea base"
-              value={s.color.baselineShiftMps}
-              min={-0.6}
-              max={0.6}
-              step={0.02}
-              unit=" m/s"
-              format={(v) => `${v.toFixed(2)}`}
-              onChange={(v) => s.setColor({ baselineShiftMps: v })}
-            />
             <Slider
               label="Filtro de pared"
               value={s.color.wallFilterMps}
@@ -159,8 +178,8 @@ export function DopplerTab() {
                     limits.spectral.maxScaleMps,
                   )
             }
-            step={0.05}
-            format={(v) => `±${v.toFixed(2)} m/s`}
+            step={mod === 'tdi' ? 0.02 : 0.05}
+            format={(v) => (mod === 'cw' ? `±${v.toFixed(2)} m/s` : `±${Math.round(v * 100)} cm/s`)}
             onChange={(v) => s.setSpectral({ scaleMps: v })}
             title={tip(
               mod !== 'cw'
@@ -172,7 +191,7 @@ export function DopplerTab() {
             <p className="small" aria-live="polite">
               PRF {(limits.spectral.prfHz / 1000).toFixed(2)} /{' '}
               {(limits.spectral.maxPrfHz / 1000).toFixed(2)} kHz · vN máx ±
-              {limits.spectral.maxScaleMps.toFixed(2)} m/s
+              {Math.round(limits.spectral.maxScaleMps * 100)} cm/s
               {s.spectral.scaleMps >= limits.spectral.maxScaleMps - 0.015
                 ? ' (límite por profundidad)'
                 : ''}
@@ -244,7 +263,7 @@ export function DopplerTab() {
               min={-2}
               max={2}
               step={0.05}
-              format={(v) => `${v.toFixed(2)} m/s`}
+              format={(v) => (mod === 'cw' ? `${v.toFixed(2)} m/s` : `${Math.round(v * 100)} cm/s`)}
               onChange={(v) => s.setSpectral({ baselineShiftMps: v })}
             />
             <Slider

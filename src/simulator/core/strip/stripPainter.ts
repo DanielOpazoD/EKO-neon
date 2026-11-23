@@ -45,7 +45,14 @@ export function paintMmodeStripColumn(
     for (let y = 0; y < rows; y++) {
       const v = cmm[Math.min(F - 1, Math.floor((y / rows) * F)) * cols + col]!;
       if (Number.isNaN(v)) continue;
-      colorMap(color.invert ? -v : v, color.scaleMps, 0, false, rgb);
+      colorMap(
+        color.invert ? -v : v,
+        color.scaleMps,
+        0,
+        false,
+        rgb,
+        color.invert ? -color.baselineShiftMps : color.baselineShiftMps,
+      );
       const o = (y * cols + col) * 4;
       img[o] = rgb[0];
       img[o + 1] = rgb[1];

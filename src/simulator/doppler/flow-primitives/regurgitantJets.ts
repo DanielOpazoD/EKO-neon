@@ -138,12 +138,13 @@ export function sampleRegurgitantJets(
       const rho = Math.hypot(px, dy, pz);
       if (along >= 0 && along < 5.5) {
         // Vena contracta neck (first 0.35 cm beyond coaptation): collimated core matching rVc before
-        // shear-layer expansion into the turbulent LA free jet.
+        // organic free-jet shear expansion into the LA.
         const expandAlong = Math.max(0, along - 0.35);
-        const rHalf = 0.84 * (rVc + expandAlong * 0.32);
+        const spreadSlope = 0.28 * (1 - 0.055 * Math.min(4, expandAlong));
+        const rHalf = 0.84 * (rVc + expandAlong * spreadSlope);
         if (rho < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, expandAlong, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 4, 5.5);
+          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 3.8, 5.4);
           const v = vj * prof * decay;
           out.vx += dirX * v;
           out.vz += dirZ * v;
@@ -198,10 +199,11 @@ export function sampleRegurgitantJets(
       const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
       const along = -t;
       if (along >= 0 && along < 6) {
-        const rHalf = 0.84 * (r0 + along * 0.35);
+        const spreadSlope = 0.31 * (1 - 0.05 * Math.min(4, along));
+        const rHalf = 0.84 * (r0 + along * spreadSlope);
         if (rho < jetReach(rHalf, along, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, along, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, (2 * r0) / 1.1) * fadeOut(along, 4.5, 6);
+          const decay = freeJetCentreline(along, (2 * r0) / 1.1) * fadeOut(along, 4.3, 5.9);
           const v = vj * prof * decay;
           out.vx -= ax.x * v;
           out.vy -= ax.y * v;
@@ -243,9 +245,13 @@ const RV_TISSUE = new Set<number>([
   Structure.ModeratorBand,
 ]);
 
+/** Basal annular myocardial cuff thickness (cm) that moves rigidly at full annular velocity before tapering to the fixed apex. */
+const BASAL_ANNULAR_CUFF_CM = 0.85;
+
 /**
  * Tissue (myocardial) velocity for TDI (m/s, heart frame) at heart-frame point (x, y, z): the longitudinal annular motion of
- * the shared displacement table, scaled by level (base moves, apex fixed) and by wall (decision 98).
+ * the shared displacement table, preserving true basal annular velocity across the fibrous-basal cuff before tapering linearly
+ * toward the fixed apex, scaled by septal/lateral wall and enriched with subtle physiologic IVC/IVR biphasic reshaping spikes.
  */
 export function sampleTissueVelocity(
   heart: HeartModel,
@@ -256,8 +262,8 @@ export function sampleTissueVelocity(
   z: number,
   structure = -1,
 ): { vx: number; vy: number; vz: number } {
+  const A = heartAnchors(heart);
   if (structure === Structure.RaWall) {
-    const A = heartAnchors(heart);
     const free = Math.min(1, Math.max(0, (A.tvCenter.x + 0.5 * A.tvR - x) / A.tvR));
     if (free > 0) {
       const annulusZ =
@@ -276,11 +282,17 @@ export function sampleTissueVelocity(
     }
   }
   if (RV_TISSUE.has(structure)) {
-    const A = heartAnchors(heart);
     const apexZ = A.rvApexFrac * heart.lv.lengthCm;
     const annulusZ =
       A.tvCenter.z + heart.physiology.tapseCm * sampleTable(tables.rvLongitudinal, phase);
-    const rvLevel = Math.min(1, Math.max(0, (z - annulusZ) / Math.max(1, apexZ - annulusZ)));
+    const rvLevel = Math.min(
+      1,
+      Math.max(
+        0,
+        (z - annulusZ - BASAL_ANNULAR_CUFF_CM) /
+          Math.max(1, apexZ - annulusZ - BASAL_ANNULAR_CUFF_CM),
+      ),
+    );
     const dPhase = 0.004;
     const shortening = (ph: number) =>
       tvShortening(cycleStateAt(tables, ph).contraction, A.rvRadialScale);
@@ -303,12 +315,39 @@ export function sampleTissueVelocity(
   const annulusZ = mapse * sampleTable(tables.longitudinal, phase);
   const level = Math.min(
     1,
-    Math.max(0, (z - annulusZ) / Math.max(1, heart.lv.lengthCm - annulusZ)),
+    Math.max(
+      0,
+      (z - annulusZ - BASAL_ANNULAR_CUFF_CM) /
+        Math.max(1, heart.lv.lengthCm - annulusZ - BASAL_ANNULAR_CUFF_CM),
+    ),
   );
-  const rho = Math.hypot(x, y);
-  const lateralness = rho > 1e-6 ? 0.5 * (1 + x / rho) : 0.5; // 1 at the lateral wall (+x), 0 at the septum (−x)
+  // Septal (-x) to lateral (+x) velocity gradient referenced to the mitral annulus centre.
+  const dxMv = x - A.mvCenter.x;
+  const dyMv = y - A.mvCenter.y;
+  const rho = Math.hypot(dxMv, dyMv);
+  const lateralness = rho > 1e-6 ? 0.5 * (1 + dxMv / rho) : 0.5;
   const wall =
     1 + (heart.physiology.ePrimeLateralCmps / heart.physiology.ePrimeSeptalCmps - 1) * lateralness;
-  const vz = (mapse * longVel * (1 - level) * wall) / 100; // cm/s → m/s, +z = toward the apex (systole)
+
+  // Subtle physiologic biphasic isovolumic contraction (IVC) and relaxation (IVR) annular
+  // reshaping transients: tightly windowed inside the isovolumic intervals so s'/e'/a' peaks are untouched.
+  const t = phase * tables.rrS;
+  const tm = tables.timings;
+  let isoCmps = 0;
+  const ivcDur = Math.max(0.025, tm.ejectionStartS);
+  if (t > 0.004 && t < tm.ejectionStartS - 0.002) {
+    const u = (t - 0.004) / Math.max(0.015, ivcDur - 0.006);
+    const amp = Math.min(2.6, 0.24 * heart.physiology.ePrimeSeptalCmps);
+    isoCmps = amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+  } else if (t > tm.ejectionEndS + 0.004 && t < tm.mitralOpenS - 0.004) {
+    const ivrDur = tm.mitralOpenS - tm.ejectionEndS - 0.008;
+    if (ivrDur > 0.018) {
+      const u = (t - (tm.ejectionEndS + 0.004)) / ivrDur;
+      const amp = Math.min(2.0, 0.18 * heart.physiology.ePrimeSeptalCmps);
+      isoCmps = -amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+    }
+  }
+
+  const vz = ((mapse * longVel + isoCmps) * (1 - level) * wall) / 100; // cm/s → m/s, +z = toward the apex (systole)
   return { vx: 0, vy: 0, vz };
 }

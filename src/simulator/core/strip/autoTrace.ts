@@ -1,6 +1,7 @@
 import { aseSweepDurationS } from '@/clinical/formulas';
 import {
   CLICK_SIGMA_S,
+  cwEnvelopeThreshold,
   envelopeThreshold,
   isClickColumn,
   PW_MODAL_EDGE_FRAC,
@@ -47,7 +48,7 @@ export function autoTraceSpectralEnvelope(
   const spc = cols ? secondsShown / cols : 0;
   const x0 = Math.max(0, Math.min(cols - 1, Math.floor(Math.min(reqX0, reqX1) / pixelsPerColumn)));
   const x1 = Math.max(0, Math.min(cols - 1, Math.floor(Math.max(reqX0, reqX1) / pixelsPerColumn)));
-  const baselineBin = (vMax / span) * SPECTRAL_BINS;
+  const baselineBin = Math.max(0, Math.min(SPECTRAL_BINS, (vMax / span) * SPECTRAL_BINS));
   const maxGap = modal ? 1 : 2;
   const wallMargin = modal ? 0.5 * binWidthMps : binWidthMps;
 
@@ -56,12 +57,66 @@ export function autoTraceSpectralEnvelope(
     const base = x * SPECTRAL_BINS;
     let max = 0;
     for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, strip[base + b] ?? 0);
-    const detectThr = envelopeThreshold(max, spectral);
-    // Walk outward from the brightest bin of that side through the contiguous signal, so isolated
-    // noise far from it does not pull the envelope to the top of the scale (decision 96).
+    const detectThr = modal ? envelopeThreshold(max, spectral) : cwEnvelopeThreshold(max, spectral);
     // Bin b is centred at (b + 0.5); linearly interpolate the exact sub-bin threshold crossing.
     let edgeBin = baselineBin;
-    if (above) {
+    if (!modal) {
+      // CW ASE outer-envelope detector: scan inward from the highest-velocity edge for the
+      // outermost contiguous spectral jet body (>= 2 consecutive bins above detectThr). This
+      // accurately traces bimodal double-envelopes (e.g. proximal LVOT + high-velocity AS/HOCM
+      // jet) where walking outward from the brightest low-velocity LVOT bin would stop at the valley.
+      const minRun = 2;
+      if (above) {
+        const limit = Math.floor(baselineBin) - 1;
+        let run = 0;
+        let outerBin = -1;
+        for (let b = 0; b <= limit; b++) {
+          if ((strip[base + b] ?? 0) > detectThr) {
+            if (++run >= minRun) {
+              outerBin = b - minRun + 1;
+              break;
+            }
+          } else {
+            run = 0;
+          }
+        }
+        if (outerBin >= 0) {
+          if (outerBin > 0) {
+            const vIn = strip[base + outerBin] ?? detectThr;
+            const vOut = strip[base + outerBin - 1] ?? 0;
+            const frac = Math.max(0, Math.min(1, (vIn - detectThr) / Math.max(1e-6, vIn - vOut)));
+            edgeBin = outerBin + 0.5 - frac;
+          } else {
+            edgeBin = 0.5;
+          }
+        }
+      } else {
+        const limit = Math.ceil(baselineBin);
+        let run = 0;
+        let outerBin = -1;
+        for (let b = SPECTRAL_BINS - 1; b >= limit; b--) {
+          if ((strip[base + b] ?? 0) > detectThr) {
+            if (++run >= minRun) {
+              outerBin = b + minRun - 1;
+              break;
+            }
+          } else {
+            run = 0;
+          }
+        }
+        if (outerBin >= 0) {
+          if (outerBin < SPECTRAL_BINS - 1) {
+            const vIn = strip[base + outerBin] ?? detectThr;
+            const vOut = strip[base + outerBin + 1] ?? 0;
+            const frac = Math.max(0, Math.min(1, (vIn - detectThr) / Math.max(1e-6, vIn - vOut)));
+            edgeBin = outerBin + 0.5 + frac;
+          } else {
+            edgeBin = SPECTRAL_BINS - 0.5;
+          }
+        }
+      }
+    } else if (above) {
+      // PW/TDI modal ridge: walk outward from the brightest bin on that side through contiguous signal.
       let peak = -1;
       let peakVal = detectThr;
       for (let b = Math.floor(baselineBin) - 1; b >= 0; b--) {
@@ -71,7 +126,7 @@ export function autoTraceSpectralEnvelope(
           peak = b;
         }
       }
-      const traceThr = modal ? Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal) : detectThr;
+      const traceThr = Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal);
       let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b >= 0; b--) {
@@ -100,7 +155,7 @@ export function autoTraceSpectralEnvelope(
           peak = b;
         }
       }
-      const traceThr = modal ? Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal) : detectThr;
+      const traceThr = Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal);
       let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b < SPECTRAL_BINS; b++) {
@@ -146,7 +201,8 @@ export function autoTraceSpectralEnvelope(
     down.push(edgeOn(x, false));
   }
 
-  // Suppress isolated single-column spikes (> SPIKE_MPS above both neighbours) and single-column dropouts
+  // Suppress isolated single-column spikes (> SPIKE_MPS above both neighbours), single-column noise
+  // islands (flanked by 0 on both sides), and single-column mid-flow dropouts.
   for (const side of [up, down]) {
     for (let i = 0; i < side.length; i++) {
       const prev = i > 0 ? side[i - 1]! : side[i + 1];
@@ -154,8 +210,9 @@ export function autoTraceSpectralEnvelope(
       if (prev === undefined || next === undefined) continue;
       if (Math.abs(side[i]!) - Math.max(Math.abs(prev), Math.abs(next)) > SPIKE_MPS) {
         side[i] = (prev + next) / 2;
+      } else if (side[i] !== 0 && i > 0 && i < side.length - 1 && prev === 0 && next === 0) {
+        side[i] = 0;
       } else if (
-        modal &&
         side[i] === 0 &&
         i > 0 &&
         i < side.length - 1 &&

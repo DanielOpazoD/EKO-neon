@@ -223,6 +223,7 @@ export interface ColorPresentSettings {
   boxRMinCm: number;
   boxRMaxCm: number;
   scaleMps: number;
+  baselineShiftMps?: number;
   showVariance: boolean;
   invert: boolean;
 }

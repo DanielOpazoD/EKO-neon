@@ -215,6 +215,15 @@ export function synthesizeIq(
 }
 
 const PACKET = SPECTRAL_BINS;
+/**
+ * Maximum slow-time STFT window duration (s) for pulsed Doppler.
+ * At high PW PRFs (>= 4 kHz), all 128 pulses span <= 32 ms; at low TDI PRFs (~1.0–1.5 kHz),
+ * clinical scanners shorten the slow-time window to ~32–48 pulses and zero-pad into the 128-bin
+ * FFT so rapid e'/a' myocardial deflections stay temporally crisp (~1.3 cm/s bandwidth) instead
+ * of smearing over ~100 ms.
+ */
+const MAX_SLOW_TIME_WINDOW_S = 0.032;
+const MIN_ACTIVE_PULSES = 32;
 const REALIZATIONS = 4;
 // 7-point midpoint quadrature of |N(0,1)|: Phi^-1((1 + (k+0.5)/7)/2).
 // Eliminates discrete micro-striations while preserving exact modal peak location.
@@ -225,11 +234,21 @@ const HALF_NORMAL_QUANTILES = [
 const MICROSCATTERERS = HALF_NORMAL_QUANTILES.length;
 const re = new Float64Array(PACKET),
   im = new Float64Array(PACKET);
-const window = Float64Array.from(
-  { length: PACKET },
-  (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / PACKET),
-);
-const windowPower = window.reduce((a, b) => a + b * b, 0);
+const hannCache = new Map<number, { win: Float64Array; power: number }>();
+function hannWindowFor(len: number): { win: Float64Array; power: number } {
+  let entry = hannCache.get(len);
+  if (!entry) {
+    const win = Float64Array.from(
+      { length: len },
+      (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / len),
+    );
+    let power = 0;
+    for (let i = 0; i < len; i++) power += win[i]! * win[i]!;
+    entry = { win, power };
+    hannCache.set(len, entry);
+  }
+  return entry;
+}
 
 /**
  * IQ → Hann window → FFT power → smooth high-pass sampled-frequency wall filter → displayed bins.
@@ -246,21 +265,29 @@ export function accumulatePulsedSpectrum(
   gateDepthCm?: number,
   focusCm = 9,
 ): void {
-  const { prfHz, effectiveScaleMps, durationS } = pulsedPacketTiming(
+  const { prfHz, effectiveScaleMps } = pulsedPacketTiming(
     s.scaleMps,
     frequencyMHz,
     PACKET,
     gateDepthCm,
     s.gateLengthCm,
   );
+  const activePulses = Math.max(
+    MIN_ACTIVE_PULSES,
+    Math.min(PACKET, Math.round(prfHz * MAX_SLOW_TIME_WINDOW_S)),
+  );
+  const activeDurationS = activePulses / prfHz;
+  const { win, power: activeWinPower } = hannWindowFor(activePulses);
+  const activeRe = activePulses === PACKET ? re : re.subarray(0, activePulses);
+  const activeIm = activePulses === PACKET ? im : im.subarray(0, activePulses);
   // Display mapping uses the physical Nyquist span when depth-limited so wrapped bins align with the scale.
   const effectiveSettings =
     effectiveScaleMps < s.scaleMps ? { ...s, scaleMps: effectiveScaleMps } : s;
   const { vMin, vMax } = spectralRange(effectiveSettings),
     span = vMax - vMin;
   out.fill(0);
-  // Decorrelate erythrocyte phase constellations across consecutive overlapping packets deterministically.
-  const tCell = Math.floor(timeS / Math.max(1e-4, durationS * 0.5));
+  // Decorrelate scatterer phase constellations across consecutive overlapping packets deterministically.
+  const tCell = Math.floor(timeS / Math.max(1e-4, activeDurationS * 0.5));
   const packetSeed = (seed ^ Math.imul(tCell, 0x9e3779b1)) | 0;
   for (let ensemble = 0; ensemble < REALIZATIONS; ensemble++) {
     const tones: IqTone[] = [];
@@ -292,14 +319,19 @@ export function accumulatePulsedSpectrum(
         });
       }
     }
-    // Strip timestamps denote the packet centre, not its first pulse.
-    synthesizeIq(tones, frequencyMHz, prfHz, timeS - durationS / 2, re, im);
-    for (let i = 0; i < PACKET; i++) {
-      re[i] = re[i]! * window[i]!;
-      im[i] = im[i]! * window[i]!;
+    // Strip timestamps denote the active packet centre, not its first pulse.
+    synthesizeIq(tones, frequencyMHz, prfHz, timeS - activeDurationS / 2, activeRe, activeIm);
+    for (let i = 0; i < activePulses; i++) {
+      re[i] = re[i]! * win[i]!;
+      im[i] = im[i]! * win[i]!;
+    }
+    if (activePulses < PACKET) {
+      re.fill(0, activePulses);
+      im.fill(0, activePulses);
     }
     complexFft(re, im);
     const f0Hz = frequencyMHz * 1e6;
+    const normDenom = activePulses * activeWinPower * REALIZATIONS;
     for (let k = 0; k < PACKET; k++) {
       const signed = k < PACKET / 2 ? k : k - PACKET;
       // Exact ASE frequency-to-velocity calibration: fd = (signed / N) * PRF -> v = fd * c / (2 * f0).
@@ -311,7 +343,7 @@ export function accumulatePulsedSpectrum(
       const b = ((vMax - v) / span) * PACKET - 0.5;
       const floor = Math.floor(b),
         frac = b - floor;
-      const power = ((re[k]! ** 2 + im[k]! ** 2) * wfGain) / (PACKET * windowPower * REALIZATIONS);
+      const power = ((re[k]! ** 2 + im[k]! ** 2) * wfGain) / normDenom;
       // Baseline is a circular display shift only; it cannot change the wall filter's physical stop band.
       const b0 = ((floor % PACKET) + PACKET) % PACKET,
         b1 = (b0 + 1) % PACKET;
