@@ -1,5 +1,5 @@
 import type { CaseDefinition } from '@/cases/schema';
-import { aliasVelocity } from '@/clinical/formulas';
+import { aliasVelocity, aseSweepDurationS } from '@/clinical/formulas';
 import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import { makeSample, Tissue } from '@/simulator/anatomy/tissue';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
@@ -236,7 +236,7 @@ export class StripEngine {
     }
     const kind: 'spectral' | 'm-mode' = MODALITIES[inp.modality].strip ?? 'spectral';
     const stripWidth = Math.max(64, inp.display.width);
-    const secondsShown = STRIP_MM_WIDTH / inp.spectral.sweepSpeedMmPerS;
+    const secondsShown = aseSweepDurationS(inp.spectral.sweepSpeedMmPerS, STRIP_MM_WIDTH);
     const cps = stripWidth / secondsShown;
     const lineSamples = mmodeLineSamples(spec.depthCm);
     const cmm = inp.modality === 'cmm';
@@ -563,6 +563,7 @@ export class StripEngine {
         this.effectiveSpectral(this.acquired),
         req.x0,
         req.x1,
+        this.acquired.aliasing,
       );
     }
     return null;
@@ -581,7 +582,10 @@ export class StripEngine {
     const y0 = sectorH + 2;
     const h = H - y0 - 4;
     const cols = this.stripCols;
-    const secondsShown = STRIP_MM_WIDTH / (this.acquired?.spectral.sweepSpeedMmPerS ?? 50);
+    const secondsShown = aseSweepDurationS(
+      this.acquired?.spectral.sweepSpeedMmPerS ?? 50,
+      STRIP_MM_WIDTH,
+    );
     const spc = cols ? secondsShown / W : 0;
     const kind = this.stripKind;
     const head = Math.floor(((this.stripHead % Math.max(1, cols)) / Math.max(1, cols)) * W);

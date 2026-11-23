@@ -5,7 +5,7 @@ import type { SimOutput, StripInfo } from '@/simulator/core/protocol';
 import { reprojectGeometry } from '@/simulator/measurements/geometry';
 import { discProfileFromContour, volumeFromProfileMl } from '@/simulator/measurements/simpson';
 import type { Measurement } from '@/simulator/measurements/types';
-import { summarizeEnvelope } from '@/simulator/measurements/vti';
+import { summarizeEnvelope, type VtiSummary } from '@/simulator/measurements/vti';
 import { MODALITIES } from '@/simulator/renderer/modality';
 import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 
@@ -85,6 +85,62 @@ export function resampleManualVti(
     velocitiesMps.push(Math.abs(stripVelocityAtY(y, strip)));
   }
   return { sorted, velocitiesMps };
+}
+
+/**
+ * Exact continuous piecewise-linear ASE VTI & gradient summary directly over manually clicked
+ * spectral vertices `(x, y)`. Avoids 1-pixel endpoint truncation when `x1 - x0` is non-integer
+ * and guarantees `VTI (cm) = ∫ |v(cm/s)| · dt(ms) / 1000` is invariant to sweep speed.
+ */
+export function summarizeManualVti(
+  points: readonly { x: number; y: number }[],
+  strip: Pick<StripInfo, 'y' | 'height' | 'topValue' | 'bottomValue' | 'secondsPerColumn'>,
+): { sorted: { x: number; y: number }[]; summary: VtiSummary } {
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  if (sorted.length < 2) {
+    return {
+      sorted,
+      summary: { vtiCm: 0, vmaxMps: 0, meanGradientMmHg: 0, peakGradientMmHg: 0 },
+    };
+  }
+  const vSigned = sorted.map((pt) => stripVelocityAtY(pt.y, strip));
+  let vmaxMps = 0;
+  for (const v of vSigned) vmaxMps = Math.max(vmaxMps, Math.abs(v));
+  let areaM = 0;
+  let gradTimeSum = 0;
+  let flowTimeS = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    const dtS = (sorted[i]!.x - sorted[i - 1]!.x) * strip.secondsPerColumn;
+    if (!(dtS > 0)) continue;
+    const va = vSigned[i - 1]!;
+    const vb = vSigned[i]!;
+    // Split if the segment crosses the zero baseline so |v(t)| integrates exactly over both triangles
+    if ((va > 0 && vb < 0) || (va < 0 && vb > 0)) {
+      const f = Math.abs(va) / (Math.abs(va) + Math.abs(vb));
+      const dt1 = dtS * f;
+      const dt2 = dtS * (1 - f);
+      areaM += 0.5 * Math.abs(va) * dt1 + 0.5 * Math.abs(vb) * dt2;
+      gradTimeSum += (4 / 3) * (va * va * dt1 + vb * vb * dt2);
+      flowTimeS += dtS;
+    } else {
+      const a = Math.abs(va);
+      const b = Math.abs(vb);
+      areaM += 0.5 * (a + b) * dtS;
+      if (a > 0 || b > 0) {
+        gradTimeSum += (4 / 3) * (a * a + a * b + b * b) * dtS;
+        flowTimeS += dtS;
+      }
+    }
+  }
+  return {
+    sorted,
+    summary: {
+      vtiCm: areaM * 100,
+      vmaxMps,
+      meanGradientMmHg: flowTimeS > 0 ? gradTimeSum / flowTimeS : 0,
+      peakGradientMmHg: 4 * vmaxMps * vmaxMps,
+    },
+  };
 }
 
 /** Handles clicks on the ultrasound canvas when any measurement tool is armed. */
@@ -344,8 +400,7 @@ export function handleMeasurementToolClick(
   if (st.activeTool === 'vti') {
     if (strip.kind !== 'spectral' || p.y < strip.y) return;
     if (detail >= 2 && pend.points.length >= 2) {
-      const { sorted, velocitiesMps } = resampleManualVti(pend.points, strip);
-      const s = summarizeEnvelope(velocitiesMps, strip.secondsPerColumn);
+      const { sorted, summary: s } = summarizeManualVti(pend.points, strip);
       commit({
         kind: 'vti',
         label: 'VTI',

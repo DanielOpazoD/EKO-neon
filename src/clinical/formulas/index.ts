@@ -85,6 +85,31 @@ export function vtiFromEnvelope(velocitiesMps: readonly number[], dtS: number): 
   return area * 100;
 }
 
+/**
+ * ASE clinical-unit VTI (cm) from velocities in cm/s and uniform step `dtMs` in ms:
+ * VTI (cm) = ∫ v(cm/s) · dt(ms) / 1000. Exact algebraic equivalent of `vtiFromEnvelope`.
+ */
+export function vtiFromCmpsAndMs(velocitiesCmps: readonly number[], dtMs: number): number {
+  if (velocitiesCmps.length < 2) return 0;
+  let areaCmMs = 0;
+  for (let i = 1; i < velocitiesCmps.length; i++) {
+    const a = velocitiesCmps[i - 1] ?? 0;
+    const b = velocitiesCmps[i] ?? 0;
+    areaCmMs += ((a + b) / 2) * dtMs;
+  }
+  return areaCmMs / 1000;
+}
+
+/**
+ * ASE spectral sweep duration (s) for a strip of physical width `stripWidthMm` (default 100 mm)
+ * at sweep speed `sweepSpeedMmPerS` (e.g. 25 mm/s → 4.0 s, 50 mm/s → 2.0 s, 100 mm/s → 1.0 s).
+ */
+export function aseSweepDurationS(sweepSpeedMmPerS: number, stripWidthMm = 100): number {
+  assertPositive(sweepSpeedMmPerS, 'sweepSpeedMmPerS');
+  assertPositive(stripWidthMm, 'stripWidthMm');
+  return stripWidthMm / sweepSpeedMmPerS;
+}
+
 /** Index a value by BSA (e.g. mL → mL/m²). */
 export function indexToBsa(value: number, bsaM2: number): number {
   assertPositive(bsaM2, 'bsaM2');
@@ -149,6 +174,21 @@ export function fractionalAreaChange(edAreaCm2: number, esAreaCm2: number): numb
 /** Doppler shift: fd = 2·f0·v·cosθ / c. f0 in Hz, v in m/s, c in m/s → Hz. */
 export function dopplerShiftHz(f0Hz: number, vMps: number, cosTheta: number, cMps = 1540): number {
   return (2 * f0Hz * vMps * cosTheta) / cMps;
+}
+
+/**
+ * Inverse Doppler equation (ASE standard): axial blood velocity (m/s) from shift frequency `fdHz`:
+ * v = (fd · c) / (2 · f0 · cosθ).
+ */
+export function dopplerVelocityFromShiftHz(
+  fdHz: number,
+  f0Hz: number,
+  cosTheta = 1,
+  cMps = 1540,
+): number {
+  assertPositive(f0Hz, 'f0Hz');
+  assertPositive(Math.abs(cosTheta), 'cosTheta');
+  return (fdHz * cMps) / (2 * f0Hz * cosTheta);
 }
 
 /** Nyquist velocity (m/s) for a given PRF and carrier: vN = PRF·c / (4·f0). */

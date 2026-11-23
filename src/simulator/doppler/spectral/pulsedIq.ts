@@ -1,3 +1,4 @@
+import { dopplerVelocityFromShiftHz } from '@/clinical/formulas';
 import { SPEED_OF_SOUND_MPS } from '@/core/units';
 import { hash3 } from '@/core/random';
 import { APERTURE_MM } from '@/simulator/probe/transducer';
@@ -298,9 +299,12 @@ export function accumulatePulsedSpectrum(
       im[i] = im[i]! * window[i]!;
     }
     complexFft(re, im);
+    const f0Hz = frequencyMHz * 1e6;
     for (let k = 0; k < PACKET; k++) {
       const signed = k < PACKET / 2 ? k : k - PACKET;
-      const sampledVelocity = (signed * span) / PACKET;
+      // Exact ASE frequency-to-velocity calibration: fd = (signed / N) * PRF -> v = fd * c / (2 * f0).
+      const fdHz = (signed / PACKET) * prfHz;
+      const sampledVelocity = dopplerVelocityFromShiftHz(fdHz, f0Hz, 1, SPEED_OF_SOUND_MPS);
       const wfGain = clutterFilterPowerResponse(sampledVelocity, effectiveSettings.wallFilterMps);
       if (wfGain <= 0) continue;
       const v = effectiveSettings.invert ? -sampledVelocity : sampledVelocity;

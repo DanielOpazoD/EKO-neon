@@ -243,6 +243,13 @@ const DISPLAY_CLICK_SPREAD = 0.22;
 const SPECTRAL_NOISE = 0.05;
 
 /**
+ * ASE modal-velocity edge fraction on the compressed `power^0.7` envelope buffer for PW/TDI Doppler.
+ * Sits on the upper dense modal ridge (~-3.4 dB power), excluding low-intensity intrinsic spectral
+ * broadening fringes (Hann window, transit-time, chirp) while preserving full E/A and LVOT peaks.
+ */
+export const PW_MODAL_EDGE_FRAC = 0.58;
+
+/**
  * Display level above which a bin belongs to the envelope (decision 96): 35% of the column's brightest bin, and 1.5× the
  * brightest the noise can draw at this gain, so a column without flow has no envelope. A floor of 0.12 sat under the
  * noise ceiling (0.123 at 0 dB), and an auto-trace starting from the brightest bin read noise as velocities up to 1.1 m/s.
@@ -489,10 +496,14 @@ export function presentSpectralColumn(
     );
   const gainLin = Math.pow(10, s.gainDb / 20);
   const { vMin, vMax } = spectralRange(s);
-  // normalise softly, apply gain + noise floor + compression
+  // Normalise softly against an attenuation-aware knee (0.03) without clipping the modal peak at 0 dB,
+  // and cap positive-gain envelope amplification at the column peak so high gain never flattens the
+  // modal ridge into a 1.0 plateau (preserving ASE gain-invariant PW VTI tracing).
   let max = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, out[b] ?? 0);
-  const norm = max > 0 ? 1 / (max * 0.8 + 0.2) : 0;
+  const norm = max > 0 ? 0.9 / (max + 0.03) : 0;
+  const peakPreGain = max * norm + SPECTRAL_NOISE;
+  const envGain = gainLin > 1 && peakPreGain > 0 ? Math.min(gainLin, 1 / peakPreGain) : gainLin;
   for (let b = 0; b < SPECTRAL_BINS; b++) {
     const noise = SPECTRAL_NOISE * hash3(b, columnIndex, 3, seed);
     const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin);
@@ -501,7 +512,7 @@ export function presentSpectralColumn(
       click > 0 && Math.abs(v) >= s.wallFilterMps
         ? click * CLICK_LEVEL * Math.exp(-0.5 * (v / (CLICK_SPREAD * s.scaleMps)) ** 2)
         : 0;
-    const y = ((out[b] ?? 0) * norm + clickLevel + noise) * gainLin;
+    const y = ((out[b] ?? 0) * norm + clickLevel + noise) * envGain;
     out[b] = Math.min(1, Math.pow(Math.max(0, y), 0.7));
   }
 }

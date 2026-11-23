@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import {
+  aseSweepDurationS,
+  dopplerShiftHz,
+  dopplerVelocityFromShiftHz,
+  vtiFromCmpsAndMs,
+  vtiFromEnvelope,
+} from '@/clinical/formulas';
 import { summarizeEnvelope } from '@/simulator/measurements/vti';
 import {
   computeDecelerationTime,
@@ -7,6 +14,7 @@ import {
   computeMModeExcursionCm,
   resampleManualVti,
   stripVelocityAtY,
+  summarizeManualVti,
 } from './measurementTools';
 
 describe('Display measurement tools math', () => {
@@ -76,5 +84,52 @@ describe('Display measurement tools math', () => {
     const summary = summarizeEnvelope(velocitiesMps, 0.005);
     assert.ok(Math.abs(summary.vtiCm - 10.0) < 0.3, `Expected ~10 cm VTI, got ${summary.vtiCm}`);
     assert.ok(Math.abs(summary.vmaxMps - 1.0) < 1e-6);
+  });
+
+  it('integrates sub-pixel manual VTI polygons analytically and satisfies ASE cm/s vs ms scaling', () => {
+    // ASE frequency-to-velocity round trip: 100 cm/s at 2.5 MHz, c = 1540 m/s
+    const f0Hz = 2.5e6;
+    const fdHz = dopplerShiftHz(f0Hz, 1.0, 1, 1540);
+    assert.ok(Math.abs(dopplerVelocityFromShiftHz(fdHz, f0Hz, 1, 1540) - 1.0) < 1e-12);
+    assert.equal(aseSweepDurationS(25), 4.0);
+    assert.equal(aseSweepDurationS(50), 2.0);
+    assert.equal(aseSweepDurationS(100), 1.0);
+
+    // Clinical unit identity: ∫ v(cm/s)·dt(ms)/1000 === ∫ v(m/s)·dt(s)·100
+    const vMps = [0, 0.5, 1.0, 0.5, 0];
+    const vCmps = vMps.map((v) => v * 100);
+    assert.ok(Math.abs(vtiFromCmpsAndMs(vCmps, 50) - vtiFromEnvelope(vMps, 0.05)) < 1e-12);
+
+    // Non-integer x coordinates across 25 / 50 / 100 mm/s sweep speeds yield identical exact 15.0 cm VTI
+    // Triangle of duration 300 ms and peak 100 cm/s => VTI = 0.5 * 100 * 300 / 1000 = 15.0 cm
+    // Mean gradient of linear triangle from 0 to 1.0 m/s = (1/3) * 4 * 1^2 = 1.3333 mmHg
+    for (const sweep of [25, 50, 100]) {
+      const stripWidthPx = 400;
+      const spc = aseSweepDurationS(sweep) / stripWidthPx;
+      const dxPx = 0.3 / spc; // exact 300 ms span in fractional pixels
+      const x0 = 50.37;
+      const strip = {
+        y: 200,
+        height: 200,
+        topValue: 1.0,
+        bottomValue: -1.0,
+        secondsPerColumn: spc,
+      };
+      // y=300 => 0 cm/s, y=200 => +100 cm/s
+      const { summary } = summarizeManualVti(
+        [
+          { x: x0, y: 300 },
+          { x: x0 + dxPx * 0.4, y: 200 },
+          { x: x0 + dxPx, y: 300 },
+        ],
+        strip,
+      );
+      assert.ok(
+        Math.abs(summary.vtiCm - 15.0) < 1e-9,
+        `Expected exact 15.0 cm VTI at ${sweep} mm/s, got ${summary.vtiCm}`,
+      );
+      assert.ok(Math.abs(summary.vmaxMps - 1.0) < 1e-9);
+      assert.ok(Math.abs(summary.meanGradientMmHg - 4 / 3) < 1e-9);
+    }
   });
 });

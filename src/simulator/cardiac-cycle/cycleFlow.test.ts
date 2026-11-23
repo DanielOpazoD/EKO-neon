@@ -330,7 +330,10 @@ describe('Cardiac cycle model & Doppler hemodynamic physiology', () => {
     const dtMs = (ePeak / Math.max(1e-6, slope)) * 1000;
 
     assert.ok(Math.abs(ePeak - 0.8) / 0.8 < 0.05, `Auto-traced E (${ePeak.toFixed(3)}) outside ±5% of 0.80 m/s`);
-    assert.ok(Math.abs(aPeak - 0.55) / 0.55 < 0.06, `Auto-traced A (${aPeak.toFixed(3)}) outside ±6% of 0.55 m/s`);
+    assert.ok(
+      aPeak >= 0.5 && aPeak <= 0.58,
+      `Auto-traced axial A (${aPeak.toFixed(3)}) outside clinical [0.50, 0.58] m/s`,
+    );
     assert.ok(dtMs >= 165 && dtMs <= 200, `Auto-traced DT (${dtMs.toFixed(1)} ms) outside [165, 200] ms`);
     assert.ok(mvVtiCm >= 13.0 && mvVtiCm <= 15.0, `Auto-traced MV VTI (${mvVtiCm.toFixed(2)} cm) outside [13, 15] cm`);
 
@@ -347,8 +350,55 @@ describe('Cardiac cycle model & Doppler hemodynamic physiology', () => {
     let lvotPeak = 0;
     for (const vel of a5c.res.velocitiesMps) lvotPeak = Math.max(lvotPeak, Math.abs(Math.min(0, vel)));
     assert.ok(
-      lvotPeak >= 0.95 && lvotPeak <= 1.2,
+      lvotPeak >= 0.95 && lvotPeak <= 1.15,
       `Baseline-shifted A5C LVOT PW peak should read unaliased ~1.04 m/s, got ${lvotPeak.toFixed(3)} m/s`,
+    );
+
+    // 3. ASE PW VTI invariance across Doppler gain (-8 dB vs +8 dB) and sweep speed (25 vs 50 mm/s)
+    const runBeatVti = (sweepMmPerS: number, gainDb: number) => {
+      const inp = baseInput();
+      inp.rendererBackend = 'procedural';
+      inp.quality = 'low';
+      inp.modality = 'pw';
+      inp.gateDepthCm = 9.42;
+      inp.cursorThetaRad = (3.7 * Math.PI) / 180;
+      inp.spectral = {
+        ...inp.spectral,
+        scaleMps: 1.0,
+        baselineShiftMps: 0,
+        sweepSpeedMmPerS: sweepMmPerS,
+        gateLengthCm: 0.4,
+        wallFilterMps: 0.08,
+        gainDb,
+      };
+      inp.display = { width: 320, height: 320 };
+      const core = new SimulatorCore(c, inp);
+      inp.probe = controlThroughCrux(getViewTarget('a4c'), core.models.heart, core.models.thorax, null);
+      core.setInput(inp);
+      const steps = sweepMmPerS === 25 ? 85 : 52;
+      let frame = core.step(1 / 30);
+      for (let i = 0; i < steps; i++) frame = core.step(1 / 30);
+      assert.ok(frame !== null);
+      const st = core.spectralStrip;
+      const res = core.request({ kind: 'autoTrace', x0: 0, x1: frame.strip.width - 1 });
+      core.dispose();
+      assert.ok(res && res.kind === 'autoTrace');
+      let vti = 0;
+      for (let i = 0; i < res.velocitiesMps.length; i++) {
+        if (st.beatIndex[i] === 0) vti += Math.max(0, res.velocitiesMps[i]!) * res.secondsPerColumn * 100;
+      }
+      return vti;
+    };
+    const vtiLowGain = runBeatVti(50, -8);
+    const vtiHighGain = runBeatVti(50, 8);
+    const vtiSlowSweep = runBeatVti(25, 0);
+    assert.ok(
+      Math.abs(vtiHighGain - vtiLowGain) < 0.15,
+      `PW VTI must remain gain-invariant (-8 dB: ${vtiLowGain.toFixed(2)} cm vs +8 dB: ${vtiHighGain.toFixed(2)} cm)`,
+    );
+    assert.ok(
+      Math.abs(vtiSlowSweep - vtiLowGain) / Math.max(1e-6, vtiLowGain) < 0.03,
+      `PW VTI must remain invariant across 25 vs 50 mm/s sweep (${vtiSlowSweep.toFixed(2)} vs ${vtiLowGain.toFixed(2)} cm)`,
     );
   });
 });

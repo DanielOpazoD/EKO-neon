@@ -47,6 +47,43 @@ describe('Extracted G1/G2 pure modules: autoTraceSpectralEnvelope & buildChained
       traced.velocitiesMps[10]! < 1.45,
       `Single-column spike was not suppressed: ${traced.velocitiesMps[10]}`,
     );
+    assert.equal(traced.x0, 8.5, 'Auto-trace x0 should align with painted column centre');
+  });
+
+  it('traces ASE modal ridge in PW mode (excluding broadening fringe) and bridges single-column dropouts', () => {
+    const spectral = { ...DEFAULT_SPECTRAL, scaleMps: 1.5, baselineShiftMps: 0, wallFilterMps: 0.08 };
+    const { vMin, vMax } = spectralRange(spectral);
+    const span = vMax - vMin;
+    const cols = 40;
+    const strip = new Float32Array(cols * SPECTRAL_BINS);
+
+    // Paint a broadened laminar PW band centred at 0.80 m/s with wide low-intensity fringe (sigma 0.14 m/s)
+    for (let x = 10; x <= 30; x++) {
+      if (x === 20) continue; // Inject a 1-column mid-flow attenuation dropout
+      for (let b = 0; b < SPECTRAL_BINS; b++) {
+        const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        const d = (v - 0.8) / 0.14;
+        strip[x * SPECTRAL_BINS + b] = Math.exp(-0.5 * d * d);
+      }
+    }
+
+    const cwOuter = autoTraceSpectralEnvelope(strip, cols, cols, spectral, 10, 30, false);
+    const pwModal = autoTraceSpectralEnvelope(strip, cols, cols, spectral, 10, 30, true);
+
+    // PW modal ridge tracks tightly near 0.80 m/s (+~0.14 m/s half-width), well below the CW outer skirt (+~0.20 m/s)
+    assert.ok(
+      pwModal.velocitiesMps[5]! < cwOuter.velocitiesMps[5]! - 0.04,
+      `PW modal trace (${pwModal.velocitiesMps[5]!.toFixed(3)}) should sit inside CW outer fringe (${cwOuter.velocitiesMps[5]!.toFixed(3)})`,
+    );
+    assert.ok(
+      Math.abs(pwModal.velocitiesMps[5]! - 0.94) < 0.04,
+      `Expected PW modal edge near ~0.94 m/s, got ${pwModal.velocitiesMps[5]!.toFixed(3)}`,
+    );
+    // Single-column dropout at x=20 (index 10) must be bridged seamlessly in PW modal mode
+    assert.ok(
+      Math.abs(pwModal.velocitiesMps[10]! - pwModal.velocitiesMps[9]!) < 0.02,
+      `Expected bridged dropout near ${pwModal.velocitiesMps[9]!.toFixed(3)}, got ${pwModal.velocitiesMps[10]!.toFixed(3)}`,
+    );
   });
 
   it('chains free-breathing tamponade beats with respiratory mitral/tricuspid modulation and finite phase marks', () => {

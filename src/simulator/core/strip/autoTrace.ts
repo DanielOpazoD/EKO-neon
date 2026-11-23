@@ -1,7 +1,9 @@
+import { aseSweepDurationS } from '@/clinical/formulas';
 import {
   CLICK_SIGMA_S,
   envelopeThreshold,
   isClickColumn,
+  PW_MODAL_EDGE_FRAC,
   SPECTRAL_BINS,
   spectralRange,
   type SpectralSettings,
@@ -20,8 +22,13 @@ export const STRIP_MM_WIDTH = 100; // physical width represented by the strip (m
 const SPIKE_MPS = 0.5;
 
 /**
- * Auto-trace the outer spectral velocity envelope between two display x coordinates, bridging valve
+ * Auto-trace the spectral velocity envelope between two display x coordinates, bridging valve
  * clicks and suppressing single-column click-tail spikes.
+ *
+ * Per ASE 2019 / Quiñones et al. (JASE 2002):
+ * - PW/TDI (`modal = true`): traces the outer edge of the dense modal velocity ridge (-3 dB half-power
+ *   threshold `PW_MODAL_EDGE_FRAC * peak`), excluding low-intensity spectral broadening fringes.
+ * - CW (`modal = false`): traces the outer edge of the filled spectral jet (`0.35 * columnMax`).
  */
 export function autoTraceSpectralEnvelope(
   strip: Float32Array,
@@ -30,44 +37,54 @@ export function autoTraceSpectralEnvelope(
   spectral: SpectralSettings,
   reqX0: number,
   reqX1: number,
+  modal = false,
 ): Extract<SimResponse, { kind: 'autoTrace' }> {
   const { vMin, vMax } = spectralRange(spectral);
+  const span = vMax - vMin;
+  const binWidthMps = span / SPECTRAL_BINS;
   const pixelsPerColumn = (displayCols || cols) / cols;
-  const secondsShown = STRIP_MM_WIDTH / spectral.sweepSpeedMmPerS;
+  const secondsShown = aseSweepDurationS(spectral.sweepSpeedMmPerS, STRIP_MM_WIDTH);
   const spc = cols ? secondsShown / cols : 0;
   const x0 = Math.max(0, Math.min(cols - 1, Math.floor(Math.min(reqX0, reqX1) / pixelsPerColumn)));
   const x1 = Math.max(0, Math.min(cols - 1, Math.floor(Math.max(reqX0, reqX1) / pixelsPerColumn)));
-  const baselineBin = (vMax / (vMax - vMin)) * SPECTRAL_BINS;
+  const baselineBin = (vMax / span) * SPECTRAL_BINS;
+  const maxGap = modal ? 1 : 2;
+  const wallMargin = modal ? 0.5 * binWidthMps : binWidthMps;
 
-  /** Outer edge (m/s) of the envelope of column x on one side of the baseline; 0 without signal there. */
+  /** Envelope velocity (m/s) of column x on one side of the baseline; 0 without signal there. */
   const edgeOn = (x: number, above: boolean): number => {
     const base = x * SPECTRAL_BINS;
     let max = 0;
-    for (let b = 0; b < SPECTRAL_BINS; b++)
-      max = Math.max(max, strip[base + b] ?? 0);
-    const thr = envelopeThreshold(max, spectral);
-    // Walk outward from the brightest bin of that side through the contiguous signal (gaps <= 2 bins),
-    // so isolated noise far from it does not pull the envelope to the top of the scale (decision 96).
+    for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, strip[base + b] ?? 0);
+    const detectThr = envelopeThreshold(max, spectral);
+    // Walk outward from the brightest bin of that side through the contiguous signal, so isolated
+    // noise far from it does not pull the envelope to the top of the scale (decision 96).
     // Bin b is centred at (b + 0.5); linearly interpolate the exact sub-bin threshold crossing.
     let edgeBin = baselineBin;
     if (above) {
       let peak = -1;
-      for (let b = Math.floor(baselineBin) - 1, best = thr; b >= 0; b--)
-        if ((strip[base + b] ?? 0) > best)
-          best = strip[base + (peak = b)]!;
+      let peakVal = detectThr;
+      for (let b = Math.floor(baselineBin) - 1; b >= 0; b--) {
+        const val = strip[base + b] ?? 0;
+        if (val > peakVal) {
+          peakVal = val;
+          peak = b;
+        }
+      }
+      const traceThr = modal ? Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal) : detectThr;
       let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b >= 0; b--) {
-        if ((strip[base + b] ?? 0) > thr) {
+        if ((strip[base + b] ?? 0) > traceThr) {
           lastBin = b;
           gap = 0;
-        } else if (++gap > 2) break;
+        } else if (++gap > maxGap) break;
       }
       if (lastBin >= 0) {
         if (lastBin > 0) {
-          const vIn = strip[base + lastBin] ?? thr;
+          const vIn = strip[base + lastBin] ?? traceThr;
           const vOut = strip[base + lastBin - 1] ?? 0;
-          const frac = Math.max(0, Math.min(1, (vIn - thr) / Math.max(1e-6, vIn - vOut)));
+          const frac = Math.max(0, Math.min(1, (vIn - traceThr) / Math.max(1e-6, vIn - vOut)));
           edgeBin = lastBin + 0.5 - frac;
         } else {
           edgeBin = 0.5;
@@ -75,31 +92,37 @@ export function autoTraceSpectralEnvelope(
       }
     } else {
       let peak = -1;
-      for (let b = Math.ceil(baselineBin), best = thr; b < SPECTRAL_BINS; b++)
-        if ((strip[base + b] ?? 0) > best)
-          best = strip[base + (peak = b)]!;
+      let peakVal = detectThr;
+      for (let b = Math.ceil(baselineBin); b < SPECTRAL_BINS; b++) {
+        const val = strip[base + b] ?? 0;
+        if (val > peakVal) {
+          peakVal = val;
+          peak = b;
+        }
+      }
+      const traceThr = modal ? Math.max(detectThr, PW_MODAL_EDGE_FRAC * peakVal) : detectThr;
       let lastBin = -1;
       let gap = 0;
       for (let b = peak; peak >= 0 && b < SPECTRAL_BINS; b++) {
-        if ((strip[base + b] ?? 0) > thr) {
+        if ((strip[base + b] ?? 0) > traceThr) {
           lastBin = b;
           gap = 0;
-        } else if (++gap > 2) break;
+        } else if (++gap > maxGap) break;
       }
       if (lastBin >= 0) {
         if (lastBin < SPECTRAL_BINS - 1) {
-          const vIn = strip[base + lastBin] ?? thr;
+          const vIn = strip[base + lastBin] ?? traceThr;
           const vOut = strip[base + lastBin + 1] ?? 0;
-          const frac = Math.max(0, Math.min(1, (vIn - thr) / Math.max(1e-6, vIn - vOut)));
+          const frac = Math.max(0, Math.min(1, (vIn - traceThr) / Math.max(1e-6, vIn - vOut)));
           edgeBin = lastBin + 0.5 + frac;
         } else {
           edgeBin = SPECTRAL_BINS - 0.5;
         }
       }
     }
-    const v = vMax - (edgeBin / SPECTRAL_BINS) * (vMax - vMin);
-    // An edge inside the band the wall filter removes, one bin beyond it, is not a flow (decision 232)
-    return Math.abs(v) <= spectral.wallFilterMps + (vMax - vMin) / SPECTRAL_BINS ? 0 : v;
+    const v = vMax - (edgeBin / SPECTRAL_BINS) * span;
+    // An edge inside the band the wall filter removes is not a flow (decision 232)
+    return Math.abs(v) <= spectral.wallFilterMps + wallMargin ? 0 : v;
   };
 
   // Valve clicks have no envelope: across a click the trace joins the columns on either side (decision 103).
@@ -123,14 +146,24 @@ export function autoTraceSpectralEnvelope(
     down.push(edgeOn(x, false));
   }
 
-  // Suppress isolated single-column spikes (> SPIKE_MPS above both neighbours)
+  // Suppress isolated single-column spikes (> SPIKE_MPS above both neighbours) and single-column dropouts
   for (const side of [up, down]) {
     for (let i = 0; i < side.length; i++) {
       const prev = i > 0 ? side[i - 1]! : side[i + 1];
       const next = i < side.length - 1 ? side[i + 1]! : prev;
       if (prev === undefined || next === undefined) continue;
-      if (Math.abs(side[i]!) - Math.max(Math.abs(prev), Math.abs(next)) > SPIKE_MPS)
+      if (Math.abs(side[i]!) - Math.max(Math.abs(prev), Math.abs(next)) > SPIKE_MPS) {
         side[i] = (prev + next) / 2;
+      } else if (
+        modal &&
+        side[i] === 0 &&
+        i > 0 &&
+        i < side.length - 1 &&
+        prev * next > 0 &&
+        Math.min(Math.abs(prev), Math.abs(next)) > spectral.wallFilterMps
+      ) {
+        side[i] = (prev + next) / 2;
+      }
     }
   }
 
@@ -143,7 +176,10 @@ export function autoTraceSpectralEnvelope(
   }
   const velocitiesMps = flowUp >= flowDown ? up : down;
 
-  // Linearly interpolate across bridged valve click columns
+  // Interpolate across bridged valve click columns:
+  // - Opening click (0 -> flow): flow begins at the click centre (no phantom pre-opening ramp).
+  // - Closing click (flow -> 0): flow terminates at the click centre (no phantom post-closing ramp).
+  // - Mid-flow click (flow -> flow): linear bridge across the masked span.
   for (let i = 0; i < velocitiesMps.length; i++) {
     if (!click[i]) continue;
     let a = i - 1;
@@ -152,7 +188,28 @@ export function autoTraceSpectralEnvelope(
     while (b < velocitiesMps.length && click[b]) b++;
     const va = a >= 0 ? velocitiesMps[a]! : b < velocitiesMps.length ? velocitiesMps[b]! : 0;
     const vb = b < velocitiesMps.length ? velocitiesMps[b]! : va;
-    for (let k = a + 1; k < b; k++) velocitiesMps[k] = va + ((vb - va) * (k - a)) / (b - a);
+    let coreSum = 0;
+    let coreCount = 0;
+    for (let k = a + 1; k < b; k++) {
+      if (core[k]) {
+        coreSum += k;
+        coreCount++;
+      }
+    }
+    const mid = coreCount > 0 ? coreSum / coreCount : (a + b) / 2;
+    if (va === 0 && vb !== 0 && b < velocitiesMps.length) {
+      const denom = Math.max(1e-6, b - mid);
+      for (let k = a + 1; k < b; k++) {
+        velocitiesMps[k] = k <= mid ? 0 : (vb * (k - mid)) / denom;
+      }
+    } else if (va !== 0 && vb === 0 && a >= 0) {
+      const denom = Math.max(1e-6, mid - a);
+      for (let k = a + 1; k < b; k++) {
+        velocitiesMps[k] = k >= mid ? 0 : (va * (mid - k)) / denom;
+      }
+    } else {
+      for (let k = a + 1; k < b; k++) velocitiesMps[k] = va + ((vb - va) * (k - a)) / (b - a);
+    }
     i = b - 1;
   }
 
@@ -160,7 +217,8 @@ export function autoTraceSpectralEnvelope(
     kind: 'autoTrace',
     velocitiesMps,
     secondsPerColumn: spc,
-    x0: x0 * pixelsPerColumn,
+    // Align trace sample i with the painted centre of column (x0 + i)
+    x0: (x0 + 0.5) * pixelsPerColumn,
     pixelsPerColumn,
   };
 }

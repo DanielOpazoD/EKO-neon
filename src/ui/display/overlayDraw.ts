@@ -165,36 +165,49 @@ export function drawOverlay(
     }
     const strip = hud.strip;
     if (strip.kind === 'spectral') {
+      const useCmpsAxis = Boolean(strip.aliasing);
       ctx.fillStyle = '#9aa4b5';
+      ctx.font = canvasFont(10, 'mono');
       ctx.textAlign = 'right';
       const n = 4;
       for (let i = 0; i <= n; i++) {
         const v = strip.topValue + ((strip.bottomValue - strip.topValue) * i) / n;
         const y = strip.y + (strip.height * i) / n;
-        ctx.fillText(`${v.toFixed(2)}`, W - 4, Math.min(H - 8, Math.max(strip.y + 6, y)));
+        const valText = useCmpsAxis ? `${Math.round(v * 100)}` : `${v.toFixed(2)}`;
+        const label = i === 0 ? `${valText} ${useCmpsAxis ? 'cm/s' : 'm/s'}` : valText;
+        ctx.fillText(label, W - 4, Math.min(H - 8, Math.max(strip.y + 7, y)));
       }
       ctx.textAlign = 'left';
+      ctx.font = canvasFont(10.5, 'mono');
       const scaleHalf = (strip.topValue - strip.bottomValue) / 2;
       const wfText = strip.wallFilterMps === undefined ? '—' : Math.round(strip.wallFilterMps * 100);
+      const prfKhz = strip.prfHz ? `  PRF ${(strip.prfHz / 1000).toFixed(1)} kHz` : '';
       const pulsedMeta =
         strip.aliasing && strip.gateDepthCm !== undefined
-          ? `  vN ±${(strip.nyquistMps ?? scaleHalf).toFixed(2)} m/s  gate ${strip.gateDepthCm.toFixed(1)} cm`
-          : `  escala ±${scaleHalf.toFixed(2)} m/s`;
+          ? `  ±${Math.round((strip.nyquistMps ?? scaleHalf) * 100)} cm/s${prfKhz}  gate ${strip.gateDepthCm.toFixed(1)} cm`
+          : `  ±${scaleHalf.toFixed(2)} m/s`;
       ctx.fillText(
         `${modality.toUpperCase()}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s${pulsedMeta}  WF ${wfText} cm/s`,
         6,
         strip.y + 8,
       );
-      const cols1s = strip.secondsPerColumn > 0 ? 1 / strip.secondsPerColumn : 0;
-      if (cols1s > 0) {
-        ctx.strokeStyle = 'rgba(154,164,181,0.35)';
-        for (let x = 0; x < strip.width; x += cols1s) {
+      // ASE time-scale calibration marks: minor ticks every 200 ms, major ticks every 1000 ms
+      const cols200ms = strip.secondsPerColumn > 0 ? 0.2 / strip.secondsPerColumn : 0;
+      if (cols200ms > 4) {
+        for (let k = 0; k * cols200ms < strip.width; k++) {
+          const x = strip.x + k * cols200ms;
+          const major = k % 5 === 0;
+          ctx.strokeStyle = major ? 'rgba(185,195,208,0.55)' : 'rgba(154,164,181,0.28)';
           ctx.beginPath();
-          ctx.moveTo(strip.x + x, strip.y + strip.height - 8);
-          ctx.lineTo(strip.x + x, strip.y + strip.height);
+          ctx.moveTo(x, strip.y + strip.height - (major ? 9 : 4));
+          ctx.lineTo(x, strip.y + strip.height);
           ctx.stroke();
         }
+        ctx.fillStyle = 'rgba(154,164,181,0.68)';
+        ctx.font = canvasFont(9.5, 'mono');
+        ctx.fillText('200 ms/div', 6, strip.y + strip.height - 10);
       }
+      ctx.font = canvasFont(11);
     } else if (strip.kind === 'm-mode') {
       ctx.fillStyle = '#9aa4b5';
       ctx.textAlign = 'right';
