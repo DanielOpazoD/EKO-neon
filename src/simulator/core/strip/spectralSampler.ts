@@ -104,7 +104,7 @@ export function sampleSpectralColumn(
     sampleFlow(
       ctx.flow,
       ctx.tables,
-      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pPrev)),
+      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pPrev, ctx.flow.flowPeaks)),
       pPrev,
       hx0,
       hy0,
@@ -117,7 +117,7 @@ export function sampleSpectralColumn(
     sampleFlow(
       ctx.flow,
       ctx.tables,
-      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pNext)),
+      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pNext, ctx.flow.flowPeaks)),
       pNext,
       hx0,
       hy0,
@@ -196,10 +196,14 @@ export function sampleSpectralColumn(
           axial * axial,
       ),
     );
-    // High-velocity turbulent stenotic/regurgitant jets (vena contracta shear) produce elevated
-    // acoustic backscatter density relative to slow laminar cavity flow along a CW ray.
+    // High-velocity stenotic/regurgitant jets (both laminar vena contracta cores and turbulent
+    // free jets) occupy only ~0.5–1.5 cm of a 16 cm CW ray; weight high-velocity jet backscatter
+    // so narrow eccentric MR/AS vena contractas remain cleanly resolved above slow cavity blood.
     const cwJetBoost = isCw
-      ? 1 + 2.6 * smoothstep(0.18, 0.52, flowSample.dispersion) * smoothstep(1.2, 2.8, Math.abs(axial))
+      ? 1 +
+        2.8 *
+          smoothstep(1.2, 2.8, Math.abs(axial)) *
+          (0.65 + 0.35 * smoothstep(0.12, 0.45, flowSample.dispersion))
       : 1;
     samples.push({
       v: -axial,
@@ -299,13 +303,15 @@ export function sampleSpectralColumn(
       f0MHz,
       inp.spectral.scaleMps,
     );
+    const maxShift = 0.85 * Math.max(0.01, effectiveScaleMps);
+    const clampedShift = Math.max(-maxShift, Math.min(maxShift, inp.spectral.baselineShiftMps));
     const effectiveSpectral =
-      effectiveScaleMps < inp.spectral.scaleMps
-        ? { ...inp.spectral, scaleMps: effectiveScaleMps }
+      effectiveScaleMps < inp.spectral.scaleMps || clampedShift !== inp.spectral.baselineShiftMps
+        ? { ...inp.spectral, scaleMps: effectiveScaleMps, baselineShiftMps: clampedShift }
         : inp.spectral;
     accumulatePulsedSpectrum(
       samples,
-      inp.spectral,
+      effectiveSpectral,
       f0MHz,
       ctx.caseDef.seed,
       timeS,
@@ -401,7 +407,7 @@ export function computeGateInfo(
         sampleFlow(
           ctx.flow,
           ctx.tables,
-          computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph)),
+          computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph, ctx.flow.flowPeaks)),
           ph,
           hx,
           hy,

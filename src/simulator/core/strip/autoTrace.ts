@@ -2,6 +2,7 @@ import { aseSweepDurationS } from '@/clinical/formulas';
 import {
   CLICK_SIGMA_S,
   cwEnvelopeThreshold,
+  cwJetEnvelopeThreshold,
   envelopeThreshold,
   isClickColumn,
   PW_MODAL_EDGE_FRAC,
@@ -62,16 +63,27 @@ export function autoTraceSpectralEnvelope(
     let edgeBin = baselineBin;
     if (!modal) {
       // CW ASE outer-envelope detector: scan inward from the highest-velocity edge for the
-      // outermost contiguous spectral jet body (>= 2 consecutive bins above detectThr). This
-      // accurately traces bimodal double-envelopes (e.g. proximal LVOT + high-velocity AS/HOCM
-      // jet) where walking outward from the brightest low-velocity LVOT bin would stop at the valley.
+      // outermost contiguous spectral jet body (>= 2 consecutive bins above threshold). High-velocity
+      // jet bands (|v| >= 1.1 m/s) use cwJetEnvelopeThreshold so eccentric MR/TR jets are not buried
+      // beneath a much brighter slow intracavitary flow near baseline.
       const minRun = 2;
+      const highVelCutoff = Math.max(1.1, spectral.wallFilterMps + 0.5);
+      const binThr = (b: number, jetThr: number): number => {
+        const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        return Math.abs(vBin) >= highVelCutoff ? jetThr : detectThr;
+      };
       if (above) {
         const limit = Math.floor(baselineBin) - 1;
+        let highVelMax = 0;
+        for (let b = 0; b <= limit; b++) {
+          const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+          if (vBin >= highVelCutoff) highVelMax = Math.max(highVelMax, strip[base + b] ?? 0);
+        }
+        const jetThr = cwJetEnvelopeThreshold(max, highVelMax, spectral);
         let run = 0;
         let outerBin = -1;
         for (let b = 0; b <= limit; b++) {
-          if ((strip[base + b] ?? 0) > detectThr) {
+          if ((strip[base + b] ?? 0) > binThr(b, jetThr)) {
             if (++run >= minRun) {
               outerBin = b - minRun + 1;
               break;
@@ -81,10 +93,11 @@ export function autoTraceSpectralEnvelope(
           }
         }
         if (outerBin >= 0) {
+          const thrEdge = binThr(outerBin, jetThr);
           if (outerBin > 0) {
-            const vIn = strip[base + outerBin] ?? detectThr;
+            const vIn = strip[base + outerBin] ?? thrEdge;
             const vOut = strip[base + outerBin - 1] ?? 0;
-            const frac = Math.max(0, Math.min(1, (vIn - detectThr) / Math.max(1e-6, vIn - vOut)));
+            const frac = Math.max(0, Math.min(1, (vIn - thrEdge) / Math.max(1e-6, vIn - vOut)));
             edgeBin = outerBin + 0.5 - frac;
           } else {
             edgeBin = 0.5;
@@ -92,10 +105,16 @@ export function autoTraceSpectralEnvelope(
         }
       } else {
         const limit = Math.ceil(baselineBin);
+        let highVelMax = 0;
+        for (let b = SPECTRAL_BINS - 1; b >= limit; b--) {
+          const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+          if (-vBin >= highVelCutoff) highVelMax = Math.max(highVelMax, strip[base + b] ?? 0);
+        }
+        const jetThr = cwJetEnvelopeThreshold(max, highVelMax, spectral);
         let run = 0;
         let outerBin = -1;
         for (let b = SPECTRAL_BINS - 1; b >= limit; b--) {
-          if ((strip[base + b] ?? 0) > detectThr) {
+          if ((strip[base + b] ?? 0) > binThr(b, jetThr)) {
             if (++run >= minRun) {
               outerBin = b + minRun - 1;
               break;
@@ -105,10 +124,11 @@ export function autoTraceSpectralEnvelope(
           }
         }
         if (outerBin >= 0) {
+          const thrEdge = binThr(outerBin, jetThr);
           if (outerBin < SPECTRAL_BINS - 1) {
-            const vIn = strip[base + outerBin] ?? detectThr;
+            const vIn = strip[base + outerBin] ?? thrEdge;
             const vOut = strip[base + outerBin + 1] ?? 0;
-            const frac = Math.max(0, Math.min(1, (vIn - detectThr) / Math.max(1e-6, vIn - vOut)));
+            const frac = Math.max(0, Math.min(1, (vIn - thrEdge) / Math.max(1e-6, vIn - vOut)));
             edgeBin = outerBin + 0.5 + frac;
           } else {
             edgeBin = SPECTRAL_BINS - 0.5;
@@ -185,6 +205,7 @@ export function autoTraceSpectralEnvelope(
     isClickColumn(
       strip.subarray((x0 + i) * SPECTRAL_BINS, (x0 + i + 1) * SPECTRAL_BINS),
       spectral,
+      !modal,
     ),
   );
   // Bridge 2.5 click widths on each side for faint click tails

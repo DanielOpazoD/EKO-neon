@@ -180,7 +180,14 @@ export function DopplerTab() {
             }
             step={mod === 'tdi' ? 0.02 : 0.05}
             format={(v) => (mod === 'cw' ? `±${v.toFixed(2)} m/s` : `±${Math.round(v * 100)} cm/s`)}
-            onChange={(v) => s.setSpectral({ scaleMps: v })}
+            onChange={(v) => {
+              const maxShift = Math.round(v * 80) / 100;
+              const clampedBase = Math.max(
+                -maxShift,
+                Math.min(maxShift, s.spectral.baselineShiftMps),
+              );
+              s.setSpectral({ scaleMps: v, baselineShiftMps: clampedBase });
+            }}
             title={tip(
               mod !== 'cw'
                 ? 'La profundidad del gate y la frecuencia limitan Nyquist. Si la velocidad lo supera, el espectro se pliega; desplazar la línea base no aumenta la PRF.'
@@ -260,9 +267,9 @@ export function DopplerTab() {
             <Slider
               label="Línea base"
               value={s.spectral.baselineShiftMps}
-              min={-2}
-              max={2}
-              step={0.05}
+              min={-Math.max(0.02, Math.round(s.spectral.scaleMps * 80) / 100)}
+              max={Math.max(0.02, Math.round(s.spectral.scaleMps * 80) / 100)}
+              step={mod === 'tdi' ? 0.01 : mod === 'pw' ? 0.05 : 0.1}
               format={(v) => (mod === 'cw' ? `${v.toFixed(2)} m/s` : `${Math.round(v * 100)} cm/s`)}
               onChange={(v) => s.setSpectral({ baselineShiftMps: v })}
             />
@@ -317,13 +324,92 @@ export function DopplerTab() {
         </Section>
       )}
       {mod === 'cmm' && (
-        <div className="empty">
-          <IconDoppler size={22} />
-          <p>Modo M con color: ajusta el sector en «Imagen» y el mapa en «Color».</p>
-          <div className="quick">
-            <button onClick={() => s.setUi({ consoleTab: 'imagen' })}>Imagen</button>
+        <Section
+          title="Modo M Color"
+          tip={tip(
+            'Desplaza la línea base para medir la velocidad de propagación (Vp) del llenado mitral.',
+          )}
+        >
+          <div className="row">
+            <label>Velocidad de barrido</label>
+            <Segmented
+              ariaLabel="Velocidad de barrido"
+              value={String(s.spectral.sweepSpeedMmPerS)}
+              onChange={(v) => s.setSpectral({ sweepSpeedMmPerS: Number(v) })}
+              options={[
+                { id: '25', label: '25' },
+                { id: '50', label: '50' },
+                { id: '100', label: '100' },
+              ]}
+            />
           </div>
-        </div>
+          <Slider
+            label="Ángulo del cursor"
+            value={(s.cursorThetaRad * 180) / Math.PI}
+            min={-s.settings.sectorDeg / 2}
+            max={s.settings.sectorDeg / 2}
+            unit="°"
+            onChange={(v) => s.setCursor((v * Math.PI) / 180)}
+          />
+          <Slider
+            label="Ganancia color"
+            value={s.color.gainDb}
+            min={-20}
+            max={20}
+            unit=" dB"
+            onChange={(v) => s.setColor({ gainDb: v })}
+          />
+          <Slider
+            label="Escala (Nyquist)"
+            value={s.color.scaleMps}
+            min={0.15}
+            max={Math.min(1.2, limits.color.maxScaleMps)}
+            step={0.01}
+            unit=" m/s"
+            format={(v) => `${v.toFixed(2)} m/s`}
+            onChange={(v) => {
+              const maxShift = Math.round(v * 80) / 100;
+              const clampedBase = Math.max(-maxShift, Math.min(maxShift, s.color.baselineShiftMps));
+              s.setColor({ scaleMps: v, baselineShiftMps: clampedBase });
+            }}
+          />
+          <Slider
+            label="Línea base"
+            value={s.color.baselineShiftMps}
+            min={-Math.round(s.color.scaleMps * 80) / 100}
+            max={Math.round(s.color.scaleMps * 80) / 100}
+            step={0.02}
+            unit=" m/s"
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} m/s`}
+            onChange={(v) => s.setColor({ baselineShiftMps: v })}
+          />
+          <p className="small" aria-live="polite">
+            PRF {(limits.color.prfHz / 1000).toFixed(2)} kHz · límite{' '}
+            {(limits.color.maxPrfHz / 1000).toFixed(2)} kHz
+          </p>
+          <Toggle
+            label="Mapa de varianza"
+            value={s.color.showVariance}
+            onChange={(v) => s.setColor({ showVariance: v })}
+          />
+          <Toggle
+            label="Invertir mapa"
+            value={s.color.invert}
+            onChange={(v) => s.setColor({ invert: v })}
+          />
+          <details className="adv">
+            <summary>Ajustes finos</summary>
+            <Slider
+              label="Filtro de pared"
+              value={s.color.wallFilterMps}
+              min={0}
+              max={0.3}
+              step={0.01}
+              format={(v) => `${Math.round(v * 100)} cm/s`}
+              onChange={(v) => s.setColor({ wallFilterMps: v })}
+            />
+          </details>
+        </Section>
       )}
     </>
   );

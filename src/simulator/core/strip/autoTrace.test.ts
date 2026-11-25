@@ -135,6 +135,48 @@ describe('Extracted G1/G2 pure modules: autoTraceSpectralEnvelope & buildChained
     );
   });
 
+  it('traces faint eccentric CW MR jets beneath bright slow cavity flow and suppresses CW click-tail spikes', () => {
+    const spectral = { ...DEFAULT_SPECTRAL, scaleMps: 6.0, baselineShiftMps: 0, wallFilterMps: 0.2 };
+    const { vMin, vMax } = spectralRange(spectral);
+    const span = vMax - vMin;
+    const cols = 40;
+    const strip = new Float32Array(cols * SPECTRAL_BINS);
+
+    for (let x = 6; x <= 32; x++) {
+      for (let b = 0; b < SPECTRAL_BINS; b++) {
+        const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        // Bright slow LV/LA blood at -0.45 m/s (0.93) + fainter eccentric MR jet reaching -3.6 m/s (0.24)
+        const slowBlood = 0.93 * Math.exp(-0.5 * ((v + 0.45) / 0.18) ** 2);
+        const mrJet = v <= -0.8 && v >= -3.6 ? 0.24 * Math.exp(-0.5 * ((v + 2.6) / 0.85) ** 2) : 0;
+        strip[x * SPECTRAL_BINS + b] = Math.max(slowBlood, mrJet);
+      }
+    }
+    // Inject a 2-column bilateral CW valve-click tail at x = 33..34 reaching ±4.8 m/s
+    for (const cx of [33, 34]) {
+      for (let b = 0; b < SPECTRAL_BINS; b++) {
+        const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        if (Math.abs(v) >= spectral.wallFilterMps) {
+          strip[cx * SPECTRAL_BINS + b] = Math.max(
+            strip[cx * SPECTRAL_BINS + b]!,
+            0.22 * Math.exp(-0.5 * (v / 4.2) ** 2),
+          );
+        }
+      }
+    }
+
+    const cw = autoTraceSpectralEnvelope(strip, cols, cols, spectral, 6, 36, false);
+    const jetMid = Math.abs(cw.velocitiesMps[12]!);
+    const clickPeak = Math.max(Math.abs(cw.velocitiesMps[27]!), Math.abs(cw.velocitiesMps[28]!));
+    assert.ok(
+      jetMid >= 3.0 && jetMid <= 3.9,
+      `Expected faint eccentric CW MR jet to trace ~3.4 m/s instead of stopping at -0.9 m/s, got ${jetMid.toFixed(2)} m/s`,
+    );
+    assert.ok(
+      clickPeak < 2.5,
+      `Expected bilateral CW valve-click tail to be bridged without spiking to 4.5+ m/s, got ${clickPeak.toFixed(2)} m/s`,
+    );
+  });
+
   it('chains free-breathing tamponade beats with respiratory mitral/tricuspid modulation and finite phase marks', () => {
     const caseDef = loadCaseById('pericardial-effusion-tamponade');
     const models = buildCaseModels(caseDef, {

@@ -22,6 +22,7 @@ export interface CineFrame {
   beatIndex: number;
   colorVel: Float32Array | null;
   colorVar: Float32Array | null;
+  colorPower?: Float32Array | null;
   /** Compact G-buffer snapshot for lazy CPU Color Doppler reconstruction when scrubbing frozen GPU-deferred cine. */
   colorTissue?: Uint8Array | null;
   colorTransCode?: Uint8Array | null;
@@ -98,6 +99,9 @@ export class CineBuffer {
       : null;
     const colorVel = frame.colorVel ? reuseF32(prev?.colorVel ?? undefined, frame.colorVel) : null;
     const colorVar = frame.colorVar ? reuseF32(prev?.colorVar ?? undefined, frame.colorVar) : null;
+    const colorPower = frame.colorPower
+      ? reuseF32(prev?.colorPower ?? undefined, frame.colorPower)
+      : null;
     const colorTissue = frame.colorTissue
       ? reuseU8(prev?.colorTissue ?? undefined, frame.colorTissue)
       : null;
@@ -132,6 +136,7 @@ export class CineBuffer {
       },
       colorVel,
       colorVar,
+      colorPower,
       colorTissue,
       colorTransCode,
     };

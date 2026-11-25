@@ -40,6 +40,10 @@ export interface MmodeLine {
   amp: Float32Array;
   /** Axial flow velocity on the frame samples (m/s, + toward the probe, NaN without flow or behind a shadow); colour M-mode only. */
   velocity: Float32Array | null;
+  /** Flow spectral dispersion [0..1] on frame samples for CMM variance mapping; colour M-mode only. */
+  dispersion?: Float32Array | null;
+  /** Two-way transmission relative to soft tissue [0..1] for CMM gain/power gating; colour M-mode only. */
+  relTrans?: Float32Array | null;
 }
 
 /** Lines traced for one probe pose, cursor and imaging settings, one per phase bin. */

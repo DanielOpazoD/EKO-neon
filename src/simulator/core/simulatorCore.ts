@@ -556,6 +556,7 @@ export class SimulatorCore {
     this.displayOnGpu = onGpu;
     let colorVel: Float32Array | null = null;
     let colorVar: Float32Array | null = null;
+    let colorPower: Float32Array | null = null;
     let colorTissue: Uint8Array | null = null;
     let colorTransCode: Uint8Array | null = null;
     if (inp.modality === 'color') {
@@ -593,12 +594,14 @@ export class SimulatorCore {
           const cOut = this.colorDriver.step(colorCtx);
           colorVel = cOut.vel;
           colorVar = cOut.variance;
+          colorPower = cOut.power;
         }
       } else {
         this.dopplerOnGpu = false;
         const cOut = this.colorDriver.step(colorCtx);
         colorVel = cOut.vel;
         colorVar = cOut.variance;
+        colorPower = cOut.power;
       }
     } else {
       this.dopplerOnGpu = false;
@@ -655,6 +658,7 @@ export class SimulatorCore {
       beatIndex: this.clock.current.beatIndex,
       colorVel,
       colorVar,
+      colorPower,
       colorTissue,
       colorTransCode,
       beam,

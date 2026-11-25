@@ -164,23 +164,23 @@ export function inflowJet(
   const rho = Math.hypot(dx, dy);
   const re = Math.sqrt(areaCm2 / Math.PI);
   if (zr < 0) {
-    // Smooth atrial convergence funnel with shifted virtual origin just past the annulus so velocity and
-    // width meet the transmitral core continuously at zr = 0 without a flat horizontal seam.
+    // Smooth atrial convergence funnel meeting the wide mitral/tricuspid annulus continuously at 0.76x tip speed
+    // so there is zero horizontal seam or premature aliasing line at zr = 0.
     const up = -zr;
     const d = Math.hypot(rho, up);
     if (d >= FUNNEL_FADE_TO_CM) return;
     const q = inflowFlow(tables, phase, 0, waveCmps, table);
     if (q <= 1) return;
-    const rFunnel = re * 0.92 * (1 + 0.36 * up);
+    const rFunnel = re * 0.96 * (1 + 0.36 * up);
     const rNorm = Math.min(1.5, rho / Math.max(0.25, rFunnel));
-    const radialCore = 1 / (1 + 0.52 * rNorm * rNorm);
-    const dEff = Math.hypot(rho * 0.72, up + 0.72 * re);
+    const radialCore = 1 / (1 + 0.48 * rNorm * rNorm);
+    const dEff = Math.hypot(rho * 0.72, up + 0.79 * re);
     const mag =
       (q / areaCm2 / 100) *
-      Math.min(1, (0.52 * re * re) / (dEff * dEff)) *
+      Math.min(0.76, (0.48 * re * re) / (dEff * dEff)) *
       radialCore *
       fadeOut(d, FUNNEL_FADE_FROM_CM, FUNNEL_FADE_TO_CM) *
-      convergenceWeight(rho, up + 0.22, r * 0.96, 0.2, 0.55);
+      convergenceWeight(rho, up + 0.24, r * 0.98, 0.18, 0.52);
     if (mag <= 0.01) return;
     const sx = -dx * 0.65,
       sy = -dy * 0.65,
@@ -193,15 +193,20 @@ export function inflowJet(
     out.present = 1;
     return;
   }
-  // Sculpted transmitral/tricuspid filling flame: exact centerline velocity at rho = 0 (preserves PW E/A/DT/VTI
-  // and CMM Vp) with natural radial rolloff toward the leaflet margins and LV walls instead of a wall-to-wall boxcar.
-  const rHalf = re * 0.92 + Math.min(2.5, Math.max(0, zr - INFLOW_CORE_CM)) * 0.16;
+  // Sculpted transmitral/tricuspid filling flame: accelerates physiologically from the wider annulus (0.76x at
+  // zr = 0) to full orifice speed at the leaflet tips (zr >= 0.65 cm), preserving exact E/A/DT/VTI/Vp at the
+  // leaflet-tip PW sampling plane while rounding off outer margins smoothly.
+  const rHalf = re + Math.min(2.5, Math.max(0, zr - INFLOW_CORE_CM)) * 0.16;
   if (rho >= jetReach(rHalf, zr)) return;
   const q = inflowFlow(tables, phase, Math.hypot(zr, rho), waveCmps, table);
   if (q <= 1) return;
   const rNorm = Math.min(1.5, rho / Math.max(0.25, rHalf));
-  const radialCore = 1 / (1 + 0.52 * rNorm * rNorm);
-  out.vz += (q / areaCm2 / 100) * radialCore * jetProfile(rho, rHalf, zr) * axial(zr);
+  const rNorm2 = rNorm * rNorm;
+  const distalTaper = 0.18 + 0.6 * smoothstep(INFLOW_CORE_CM, INFLOW_CORE_CM + 2.2, zr);
+  const radialCore = 1 / (1 + distalTaper * rNorm2 * rNorm2);
+  const annulusAccel = 0.76 + 0.24 * smoothstep(0, 0.65, zr);
+  out.vz +=
+    (q / areaCm2 / 100) * annulusAccel * radialCore * jetProfile(rho, rHalf, zr) * axial(zr);
   // Subtle transmitral/tricuspid vortex-ring roll-up during E deceleration stays well inside the laminar
   // regime so healthy leaflets never trigger false green variance turbulence.
   let decelShear = 0;

@@ -159,16 +159,18 @@ export function drawOverlay(
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  if (modality === 'color') {
-    drawArcBox(
-      ctx,
-      m,
-      color.boxThetaMinRad,
-      color.boxThetaMaxRad,
-      color.boxRMinCm,
-      color.boxRMaxCm,
-      'rgba(102, 224, 160, 0.88)',
-    );
+  if (modality === 'color' || modality === 'cmm') {
+    if (modality === 'color') {
+      drawArcBox(
+        ctx,
+        m,
+        color.boxThetaMinRad,
+        color.boxThetaMaxRad,
+        color.boxRMinCm,
+        color.boxRMaxCm,
+        'rgba(102, 224, 160, 0.88)',
+      );
+    }
     // Physical Color Doppler bar rendered directly from colorMap (reflects baseline shift, invert & variance)
     const scale = Math.max(0.01, color.scaleMps);
     const baseline = color.baselineShiftMps;
@@ -177,8 +179,12 @@ export function drawOverlay(
     const bw = color.showVariance ? 12 : 9;
     const velW = color.showVariance ? 8 : 9;
     const bx = (inward ? rightX - 30 : W - 18) - bw;
-    const by = Math.max(m.apexY + 42, 128);
-    const bh = 104;
+    const bh =
+      modality === 'cmm' ? Math.min(92, Math.max(58, sectorH - 180)) : 104;
+    const by =
+      modality === 'cmm'
+        ? Math.max(m.apexY + 26, Math.min(sectorH - bh - 18, Math.max(154, sectorH - bh - 26)))
+        : Math.max(m.apexY + 42, 128);
     const rgb: [number, number, number] = [0, 0, 0];
     for (let py = 0; py < bh; py++) {
       const frac = (py + 0.5) / bh;
@@ -321,14 +327,28 @@ export function drawOverlay(
       }
       ctx.font = canvasFont(11);
     } else if (strip.kind === 'm-mode') {
-      ctx.fillStyle = '#9aa4b5';
+      ctx.font = canvasFont(10, 'mono');
       ctx.textAlign = 'right';
       for (let d = 0; d <= strip.bottomValue; d += 5) {
         const y = strip.y + (d / strip.bottomValue) * strip.height;
-        ctx.fillText(`${d}`, W - 4, Math.min(H - 8, Math.max(strip.y + 6, y)));
+        const labelY = Math.min(H - 8, Math.max(strip.y + 8, y));
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+        ctx.strokeText(`${d}`, W - 5, labelY);
+        ctx.lineWidth = 1;
+        ctx.fillStyle = '#aeb8c7';
+        ctx.fillText(`${d}`, W - 5, labelY);
       }
       ctx.textAlign = 'left';
-      ctx.fillText(`M-MODE  ${strip.sweepSpeedMmPerS ?? '—'} mm/s`, 6, strip.y + 8);
+      ctx.font = canvasFont(10.5, 'mono');
+      const mHeader = `${modality === 'cmm' ? 'COLOR M-MODE' : 'M-MODE'}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+      ctx.strokeText(mHeader, 6, strip.y + 8);
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#aeb8c7';
+      ctx.fillText(mHeader, 6, strip.y + 8);
+      ctx.font = canvasFont(11);
     } else if (hud.frozen && hud.acquisition?.stripAcquisitionId != null) {
       ctx.fillStyle = '#9aa4b5';
       ctx.fillText('La tira de esta adquisición ya no está disponible.', 12, strip.y + 24);

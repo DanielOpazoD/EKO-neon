@@ -72,7 +72,7 @@ test('PW wraps velocities above Nyquist while CW does not alias and suppresses o
   assert.equal(sumOutOfRange, 0);
 });
 
-test('isClickColumn distinguishes valve clicks from laminar flow', () => {
+test('isClickColumn distinguishes valve clicks (including CW & shifted baseline) from laminar and aliased PW flow', () => {
   const s = spectralDefaultsFor('pw');
   const flowCol = new Float32Array(SPECTRAL_BINS);
   buildSpectralColumn(
@@ -91,6 +91,34 @@ test('isClickColumn distinguishes valve clicks from laminar flow', () => {
   const clickCol = new Float32Array(SPECTRAL_BINS);
   buildSpectralColumn([], s, 10, 42, true, clickCol, 2.5, 1.0, 1.0);
   assert.equal(isClickColumn(clickCol, s), true);
+
+  // Moderate CW click tail (click=0.18) must be detected under cw=true even when <60% of full ±6 m/s span
+  const sCw = spectralDefaultsFor('cw');
+  const cwClickTail = new Float32Array(SPECTRAL_BINS);
+  buildSpectralColumn([], sCw, 144, 42, false, cwClickTail, 2.5, 1.0, 0.18);
+  assert.equal(isClickColumn(cwClickTail, sCw, true), true);
+
+  // Shifted-baseline PW click must still be rejected by bilateral contiguous check
+  const sShift = { ...s, baselineShiftMps: -0.35 };
+  const shiftedClick = new Float32Array(SPECTRAL_BINS);
+  buildSpectralColumn([], sShift, 12, 42, true, shiftedClick, 2.5, 1.0, 0.35);
+  assert.equal(isClickColumn(shiftedClick, sShift, false), true);
+
+  // Aliased PW flow (wrapped cap at Nyquist edge with dark window near baseline) must NOT be flagged as click
+  const sAlias = { ...s, scaleMps: 0.6, baselineShiftMps: 0 };
+  const aliasCol = new Float32Array(SPECTRAL_BINS);
+  buildSpectralColumn(
+    [{ v: -0.9, weight: 1, dispersion: 0.06 }],
+    sAlias,
+    15,
+    42,
+    true,
+    aliasCol,
+    2.5,
+    1.0,
+    0,
+  );
+  assert.equal(isClickColumn(aliasCol, sAlias, false), false);
 });
 
 test('displaySpectrum is deterministic and monotonically brighter with higher gainDb', () => {

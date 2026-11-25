@@ -45,7 +45,7 @@ export const DEFAULT_COLOR: ColorSettings = {
   boxThetaMaxRad: 0.32,
   boxRMinCm: 5,
   boxRMaxCm: 13,
-  scaleMps: 0.66,
+  scaleMps: 0.68,
   baselineShiftMps: 0,
   wallFilterMps: 0.06,
   gainDb: 0,

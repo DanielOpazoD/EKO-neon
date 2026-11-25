@@ -21,8 +21,10 @@ import { Tissue } from '@/simulator/anatomy/tissue';
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
 import { loadCaseById } from '@/cases';
 import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
+import { aorticVelocityProfile } from '@/simulator/doppler/flow-primitives/aorticNetwork';
+import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
-import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
+import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 
 const ACQ: ColorAcquisition = { frequencyMHz: 2.5, harmonics: false };
 
@@ -396,5 +398,207 @@ test('overlayColorField preserves unaliased baseline-shifted velocity, interpola
   assert.ok(
     fillFrac >= 0.92,
     `expected >= 92% laminar fill continuity at 0 dB gain, got ${(fillFrac * 100).toFixed(1)}%`,
+  );
+});
+
+test('Color Doppler physiological realism: Womersley profile, normal LVOT/MV laminar continuity, Severe AS ascending plume, and tissue write priority', () => {
+  // 1. Womersley blunt aortic profile: unit-disk average = 1.0, no-slip at wall, peak/mean ≈ 1.333
+  const steps = 1000;
+  let diskAvg = 0;
+  for (let i = 0; i < steps; i++) {
+    const r = (i + 0.5) / steps;
+    diskAvg += (2 * r * aorticVelocityProfile(r)) / steps;
+  }
+  assert.ok(
+    Math.abs(diskAvg - 1.0) < 1e-3,
+    `expected Womersley disk average = 1.0, got ${diskAvg.toFixed(5)}`,
+  );
+  assert.equal(aorticVelocityProfile(1.0), 0, 'no-slip boundary condition at aortic wall');
+  assert.ok(
+    Math.abs(aorticVelocityProfile(0) - 4 / 3) < 1e-6,
+    `expected blunt peak-to-mean = 4/3, got ${aorticVelocityProfile(0)}`,
+  );
+
+  // 2. Normal LVOT → AV → ascending aorta continuity across STJ (no abrupt velocity cliff or upstream sign flip)
+  const normal = loadCaseById('normal-excellent-window');
+  const normModels = buildCaseModels(normal, REST_PATIENT);
+  const normFlow = buildFlowParams(normal, normModels.heart, normModels.tables, normModels.thorax);
+  let sysPeakPhase = 0.24;
+  let maxQao = -1;
+  for (let p = 0.05; p < 0.45; p += 0.005) {
+    const q = sampleTable(normModels.tables.aorticFlowMlps, p);
+    if (q > maxQao) {
+      maxQao = q;
+      sysPeakPhase = p;
+    }
+  }
+  const hpSys = computeHeartPose(
+    normModels.heart,
+    cycleStateAt(normModels.tables, sysPeakPhase, normFlow.flowPeaks),
+  );
+  const sTmp: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const sampleAvAxis = (
+    flow: ReturnType<typeof buildFlowParams>,
+    tables: typeof normModels.tables,
+    hp: typeof hpSys,
+    phase: number,
+    t: number,
+    offY = 0,
+  ) => {
+    sampleFlow(
+      flow,
+      tables,
+      hp,
+      phase,
+      flow.avCenter.x + flow.avAxis.x * t,
+      flow.avCenter.y + flow.avAxis.y * t + offY,
+      flow.avCenter.z + hp.zAnn * 0.5 + flow.avAxis.z * t,
+      sTmp,
+    );
+    return {
+      speed: Math.hypot(sTmp.vx, sTmp.vy, sTmp.vz),
+      along: sTmp.vx * flow.avAxis.x + sTmp.vy * flow.avAxis.y + sTmp.vz * flow.avAxis.z,
+      dispersion: sTmp.dispersion,
+    };
+  };
+  const stjBefore = sampleAvAxis(normFlow, normModels.tables, hpSys, sysPeakPhase, 1.7);
+  const stjMid = sampleAvAxis(normFlow, normModels.tables, hpSys, sysPeakPhase, 2.1);
+  const stjAfter = sampleAvAxis(normFlow, normModels.tables, hpSys, sysPeakPhase, 2.5);
+  assert.ok(
+    Math.abs(stjMid.speed - stjBefore.speed) < 0.35 && Math.abs(stjAfter.speed - stjMid.speed) < 0.35,
+    `expected smooth STJ velocity transition without cliff, got ${stjBefore.speed.toFixed(2)} -> ${stjMid.speed.toFixed(2)} -> ${stjAfter.speed.toFixed(2)} m/s`,
+  );
+  const upstreamOffAxis = sampleAvAxis(normFlow, normModels.tables, hpSys, sysPeakPhase, -1.5, 0.55);
+  assert.ok(
+    upstreamOffAxis.along > 0 && upstreamOffAxis.dispersion < 0.12,
+    `expected laminar forward LVOT upstream flow without sign reversal, got along=${upstreamOffAxis.along.toFixed(2)} disp=${upstreamOffAxis.dispersion.toFixed(2)}`,
+  );
+
+  // 3. Normal mitral inflow: smooth annulus-to-tips acceleration and strictly laminar (< VARIANCE_MIN)
+  let ePeakPhase = 0.55;
+  let maxQmv = -1;
+  for (let p = 0.4; p < 0.8; p += 0.005) {
+    const q = sampleTable(normModels.tables.mitralFlowMlps, p);
+    if (q > maxQmv) {
+      maxQmv = q;
+      ePeakPhase = p;
+    }
+  }
+  const hpE = computeHeartPose(
+    normModels.heart,
+    cycleStateAt(normModels.tables, ePeakPhase, normFlow.flowPeaks),
+  );
+  sampleFlow(normFlow, normModels.tables, hpE, ePeakPhase, normFlow.mvCenter.x, normFlow.mvCenter.y, hpE.zAnn + 0.02, sTmp);
+  const vAnnulus = Math.hypot(sTmp.vx, sTmp.vy, sTmp.vz);
+  sampleFlow(normFlow, normModels.tables, hpE, ePeakPhase, normFlow.mvCenter.x, normFlow.mvCenter.y, hpE.zAnn + 1.1, sTmp);
+  const vTips = Math.hypot(sTmp.vx, sTmp.vy, sTmp.vz);
+  const dispTips = sTmp.dispersion;
+  assert.ok(
+    vAnnulus < vTips && vAnnulus > vTips * 0.65,
+    `expected smooth mitral annulus-to-tips acceleration, got annulus=${vAnnulus.toFixed(2)} tips=${vTips.toFixed(2)}`,
+  );
+  assert.ok(
+    dispTips < Math.min(0.15, COLOR_MAP.VARIANCE_MIN),
+    `expected normal mitral inflow free of false turbulence variance, got disp=${dispTips.toFixed(3)}`,
+  );
+
+  // 4. Severe AS post-stenotic turbulent jet persists past t = 2.0 cm into the ascending aorta
+  const severeAs = loadCaseById('aortic-stenosis-severe');
+  const asModels = buildCaseModels(severeAs, REST_PATIENT);
+  const asFlow = buildFlowParams(severeAs, asModels.heart, asModels.tables, asModels.thorax);
+  let asSysPhase = 0.28;
+  let maxAsQ = -1;
+  for (let p = 0.05; p < 0.45; p += 0.005) {
+    const q = sampleTable(asModels.tables.aorticFlowMlps, p);
+    if (q > maxAsQ) {
+      maxAsQ = q;
+      asSysPhase = p;
+    }
+  }
+  const hpAs = computeHeartPose(
+    asModels.heart,
+    cycleStateAt(asModels.tables, asSysPhase, asFlow.flowPeaks),
+  );
+  const asDistal = sampleAvAxis(asFlow, asModels.tables, hpAs, asSysPhase, 2.4);
+  assert.ok(
+    asDistal.speed > 1.8 && asDistal.dispersion > 0.35,
+    `expected Severe AS post-stenotic turbulent jet past t=2.0 cm, got v=${asDistal.speed.toFixed(2)} disp=${asDistal.dispersion.toFixed(2)}`,
+  );
+
+  // 5. Tissue write priority suppresses color on bright endocardium/valves (lum >= 172) while preserving dark blood lumen
+  const lut: ScanLut = {
+    key: 'twp-test',
+    lines: 2,
+    samples: 2,
+    idx: new Int32Array([0, 0]),
+    inPix: new Int32Array([0, 1]),
+    inIdx: new Int32Array([0, 0]),
+    inWl: new Uint16Array([512, 512]),
+    inWs: new Uint16Array([0, 0]),
+    inDl: new Uint8Array([1, 1]),
+    inDs: new Uint8Array([0, 0]),
+    wl: new Float32Array([0.5, 0.5]),
+    ws: new Float32Array([0.0, 0.0]),
+    li: new Int16Array([0, 0]),
+    si: new Int16Array([0, 0]),
+    rCm: new Float32Array([6, 6]),
+    theta: new Float32Array([0, 0]),
+  };
+  // Pixel 0: dark blood (lum=24), Pixel 1: bright aortic wall / calcified leaflet (lum=210)
+  const rgbaTwp = new Uint8ClampedArray([24, 24, 24, 255, 210, 210, 210, 255]);
+  const velArr = new Float32Array([0.5, 0.5, 0.5, 0.5]);
+  const varArr = new Float32Array(4);
+  const powArr = new Float32Array([1, 1, 1, 1]);
+  overlayColorField(rgbaTwp, lut, velArr, varArr, FULL_BOX, powArr);
+  assert.ok(
+    rgbaTwp[0]! > rgbaTwp[2]! + 120,
+    `expected strong BART red inside dark blood lumen, got rgb=(${rgbaTwp[0]},${rgbaTwp[1]},${rgbaTwp[2]})`,
+  );
+  assert.equal(rgbaTwp[4], 210, 'bright wall/valve tissue must suppress Color Doppler bleed cleanly');
+  assert.equal(rgbaTwp[5], 210, 'bright wall/valve tissue must remain grayscale');
+  assert.equal(rgbaTwp[6], 210, 'bright wall/valve tissue must remain grayscale');
+});
+
+test('eccentric MR splits LA regurgitant jet and LV PISA cleanly along the anatomical mitral annular plane', () => {
+  const mrCase = loadCaseById('mvp-primary-mr');
+  const models = buildCaseModels(mrCase, REST_PATIENT);
+  const flow = buildFlowParams(mrCase, models.heart, models.tables, models.thorax);
+  let sysPhase = 0.2;
+  let maxMrQ = -1;
+  for (let p = 0.05; p < 0.45; p += 0.005) {
+    const q = sampleTable(models.tables.mrFlowMlps, p);
+    if (q > maxMrQ) {
+      maxMrQ = q;
+      sysPhase = p;
+    }
+  }
+  const hp = computeHeartPose(
+    models.heart,
+    cycleStateAt(models.tables, sysPhase, flow.flowPeaks),
+  );
+  const ox = flow.mvCenter.x;
+  const oy = flow.mvCenter.y;
+  const oz = hp.zAnn - 0.1;
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+  // Symmetric LV-side points at equal distance from mitral orifice (dx = ±0.55, dz = +0.35):
+  // Previously, the -35° tilted `along >= 0` cut clipped the dx = -0.55 LV side into the LA jet branch.
+  sampleFlow(flow, models.tables, hp, sysPhase, ox - 0.55, oy, oz + 0.35, fs);
+  const leftLvSpeed = Math.hypot(fs.vx, fs.vy, fs.vz);
+  const leftLvDisp = fs.dispersion;
+  const leftLvTowardsOrifice = fs.vz < 0 && fs.vx > 0;
+
+  sampleFlow(flow, models.tables, hp, sysPhase, ox + 0.55, oy, oz + 0.35, fs);
+  const rightLvSpeed = Math.hypot(fs.vx, fs.vy, fs.vz);
+  const rightLvTowardsOrifice = fs.vz < 0 && fs.vx < 0;
+
+  assert.ok(leftLvTowardsOrifice && rightLvTowardsOrifice, 'Both sides of LV PISA must converge radially toward the mitral orifice');
+  assert.ok(
+    leftLvSpeed > 0.25 && Math.abs(leftLvSpeed - rightLvSpeed) < 0.12,
+    `Eccentric MR LV PISA should remain symmetric across the annular plane: left=${leftLvSpeed.toFixed(2)} right=${rightLvSpeed.toFixed(2)}`,
+  );
+  assert.ok(
+    leftLvDisp <= 0.15,
+    `LV PISA side must stay laminar (not evaluated as turbulent LA jet), got dispersion=${leftLvDisp.toFixed(2)}`,
   );
 });

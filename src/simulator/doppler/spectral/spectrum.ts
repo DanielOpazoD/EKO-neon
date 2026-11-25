@@ -287,6 +287,24 @@ export function cwEnvelopeThreshold(columnMax: number, s: SpectralSettings): num
 }
 
 /**
+ * High-velocity CW outer-envelope threshold: anchors the outer-edge fraction to the high-velocity
+ * jet peak (`|v| >= 1.1 m/s`) when a narrower eccentric jet sits beneath a much brighter low-velocity
+ * intracavitary band, while staying strictly above the noise ceiling at all gains.
+ */
+export function cwJetEnvelopeThreshold(
+  columnMax: number,
+  highVelMax: number,
+  s: SpectralSettings,
+): number {
+  const fullThr = cwEnvelopeThreshold(columnMax, s);
+  const noiseCeil = Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7);
+  if (highVelMax > 1.35 * noiseCeil) {
+    return Math.min(fullThr, Math.max(1.25 * noiseCeil, CW_OUTER_EDGE_FRAC * highVelMax));
+  }
+  return fullThr;
+}
+
+/**
  * The spectrum on the screen is an estimate (decision 115). A spectrum estimated from a finite run of echoes has, at each
  * frequency, exponential statistics around the expected power, correlated over the frequency resolution of the estimate and
  * over its duration, and scanners show it on a logarithmic scale. The column on the screen used to be the expected spectrum
@@ -549,19 +567,53 @@ export function presentSpectralColumn(
  * A valve click, not a flow (decision 103): a column bright above its envelope threshold over more than 60% of the displayed
  * range outside the wall filter. Such a column has no envelope to read; a laminar or stenotic flow fills at most one side.
  */
-export function isClickColumn(col: ArrayLike<number>, s: SpectralSettings): boolean {
+export function isClickColumn(
+  col: ArrayLike<number>,
+  s: SpectralSettings,
+  cw = false,
+): boolean {
   const { vMin, vMax } = spectralRange(s);
+  const span = vMax - vMin;
+  if (!(span > 0)) return false;
   let max = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, col[b] ?? 0);
-  const thr = envelopeThreshold(max, s);
+  const thr = cw ? cwEnvelopeThreshold(max, s) : envelopeThreshold(max, s);
   let n = 0,
     bright = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) {
-    if (Math.abs(vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin)) < s.wallFilterMps) continue;
+    if (Math.abs(vMax - ((b + 0.5) / SPECTRAL_BINS) * span) < s.wallFilterMps) continue;
     n++;
     if ((col[b] ?? 0) > thr) bright++;
   }
-  return bright > 0.6 * n;
+  if (bright > 0.6 * n) return true;
+
+  // Bilateral broadband click check (catches moderate click tails and shifted-baseline clicks):
+  // a valve click radiates contiguously outward from the wall filter on BOTH +v and -v sides
+  // simultaneously, unlike real flows (one-sided) or aliased PW caps (detached at Nyquist edge).
+  const binW = span / SPECTRAL_BINS;
+  const wfBinOffset = Math.max(1, Math.ceil(s.wallFilterMps / binW));
+  const zeroBin = (vMax / span) * SPECTRAL_BINS;
+  const posStart = Math.floor(zeroBin) - wfBinOffset;
+  const negStart = Math.ceil(zeroBin) + wfBinOffset - 1;
+  let posRun = 0;
+  let posGap = 0;
+  for (let b = posStart; b >= 0; b--) {
+    if ((col[b] ?? 0) > thr) {
+      posRun = posStart - b + 1;
+      posGap = 0;
+    } else if (++posGap > 1) break;
+  }
+  let negRun = 0;
+  let negGap = 0;
+  for (let b = negStart; b < SPECTRAL_BINS; b++) {
+    if ((col[b] ?? 0) > thr) {
+      negRun = b - negStart + 1;
+      negGap = 0;
+    } else if (++negGap > 1) break;
+  }
+  const symReachMps = Math.min(posRun, negRun) * binW;
+  const minReachMps = Math.max(4 * binW, 0.25 * s.scaleMps);
+  return symReachMps >= minReachMps;
 }
 
 /** Column time step (s) and columns per second for the strip width given the sweep speed. */

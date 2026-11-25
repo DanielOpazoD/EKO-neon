@@ -136,7 +136,7 @@ export function sampleRegurgitantJets(
       const px = dx - dirX * along,
         pz = dz - dirZ * along;
       const rho = Math.hypot(px, dy, pz);
-      if (along >= 0 && along < 5.5) {
+      if (dz <= 0 && along >= 0 && along < 5.5) {
         // Vena contracta neck (first 0.35 cm beyond coaptation): collimated core matching rVc before
         // organic free-jet shear expansion into the LA.
         const expandAlong = Math.max(0, along - 0.35);
@@ -157,17 +157,17 @@ export function sampleRegurgitantJets(
           );
           out.present = 1;
         }
-      } else if (along < 0) {
+      } else if (dz > 0) {
         // Proximal Isovelocity Surface Area (PISA): hemispheric continuity v(d) = Q / (2·π·d²·100)
-        // on the LV side of the regurgitant orifice. Outer reach scales with flow rate so large
-        // severe-MR PISA hemispheres (r_40 ~ 1.0–1.2 cm) remain unclipped through the aliasing shell.
+        // on the LV side (dz > 0) of the anatomical mitral coaptation plane, even for eccentric jets.
         const d = Math.hypot(dx, dy, dz);
         const rShell30 = Math.sqrt(q / (2 * Math.PI * 30)); // radius where v = 0.30 m/s
         const rMax = Math.min(2.6, Math.max(1.8, rShell30 * 1.9));
         if (d < rMax && d > 0.05) {
           const vHemisphere = q / (2 * Math.PI * d * d * 100);
+          const rhoAnn = Math.hypot(dx, dy);
           // Gentler equatorial roll-off than inflow funnels so the 0.35–0.45 m/s shell forms a clean hemisphere
-          const hemiWeight = convergenceWeight(rho, -along, r0, 0.12, 0.38);
+          const hemiWeight = convergenceWeight(rhoAnn, dz, r0, 0.12, 0.38);
           const v = Math.min(vj * 0.85, vHemisphere) * fadeOut(d, rMax * 0.78, rMax) * hemiWeight;
           if (v > 0.03) {
             out.vx += (-dx / d) * v;

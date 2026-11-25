@@ -14,7 +14,10 @@ import { SimulatorCore } from './simulatorCore';
 import { loadCaseById } from '@/cases';
 import { DEFAULT_ACQUISITION } from '@/simulator/renderer/types';
 import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
-import { DEFAULT_SPECTRAL } from '@/simulator/doppler/spectral/spectrum';
+import { DEFAULT_SPECTRAL, SPECTRAL_BINS } from '@/simulator/doppler/spectral/spectrum';
+import { aliasVelocity } from '@/clinical/formulas';
+import { constrainAcquisition } from './acquisitionInput';
+import { paintMmodeStripColumn, renderSpectralStripRgba } from './strip/stripPainter';
 import type { SimInput } from './protocol';
 
 function baseInput(overrides: Partial<SimInput> = {}): SimInput {
@@ -166,6 +169,83 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
       assert.ok(pwOut.gate !== null);
     } finally {
       core.dispose();
+    }
+  });
+
+  it('matches CMM invert + baseline shift polarity to 2D Color Doppler and preserves bright leaflet tissue', () => {
+    const cols = 4;
+    const rows = 20;
+    const samples = 20;
+    const map = buildRowMap(rows, samples);
+    const strip = new Uint8ClampedArray(samples * cols).fill(20);
+    // Bright specular mitral anterior leaflet at row 10 (lum = 220)
+    for (let c = 0; c < cols; c++) strip[10 * cols + c] = 220;
+
+    const color = {
+      ...DEFAULT_COLOR,
+      scaleMps: 0.6,
+      baselineShiftMps: -0.25,
+      invert: true,
+      showVariance: true,
+    };
+    // True flow +0.45 m/s (toward probe): inverted -> -0.45 m/s, inside [-0.85, +0.35], must paint BLUE (B > R)
+    const vInvertedAliased = aliasVelocity(-0.45, color.scaleMps, color.baselineShiftMps);
+    const cmm = new Float32Array(samples * cols).fill(vInvertedAliased);
+    const cmmVar = new Float32Array(samples * cols).fill(0);
+    const cmmPow = new Float32Array(samples * cols).fill(1);
+    const img = new Uint8ClampedArray(cols * rows * 4);
+    paintMmodeStripColumn(1, img, map, strip, cols, samples, undefined, cmm, color, cmmVar, cmmPow);
+
+    const bloodO = (5 * cols + 1) * 4;
+    assert.ok(
+      img[bloodO + 2]! > img[bloodO]! + 60,
+      `Expected inverted positive inflow (+0.45 m/s) to paint BLUE in CMM, got rgb=(${img[bloodO]},${img[bloodO + 1]},${img[bloodO + 2]})`,
+    );
+    // Bright specular leaflet pixel must keep high grayscale integrity via tissue write priority
+    const leafO = (10 * cols + 1) * 4;
+    assert.equal(img[leafO], 220, 'Bright mitral leaflet line in CMM should not be overwritten by color');
+    assert.equal(img[leafO + 1], 220);
+    assert.equal(img[leafO + 2], 220);
+  });
+
+  it('clamps baselineShiftMps under depth-limited PRF and guards renderSpectralStripRgba against B-mode bleed', () => {
+    const constrained = constrainAcquisition({
+      modality: 'pw',
+      gateDepthCm: 16,
+      settings: { ...DEFAULT_ACQUISITION, depthCm: 18, frequencyMHz: 4.0 },
+      color: { ...DEFAULT_COLOR, scaleMps: 0.9, baselineShiftMps: 0.75 },
+      spectral: { ...DEFAULT_SPECTRAL, scaleMps: 1.5, baselineShiftMps: -1.4 },
+    });
+    assert.ok(
+      Math.abs(constrained.color.baselineShiftMps) <= 0.85 * constrained.color.scaleMps + 1e-6,
+      `Color baselineShiftMps (${constrained.color.baselineShiftMps}) exceeded 0.85 * scale (${constrained.color.scaleMps})`,
+    );
+    assert.ok(
+      Math.abs(constrained.spectral.baselineShiftMps) <= 0.85 * constrained.spectral.scaleMps + 1e-6,
+      `Spectral baselineShiftMps (${constrained.spectral.baselineShiftMps}) exceeded 0.85 * scale (${constrained.spectral.scaleMps})`,
+    );
+
+    // Extreme off-range baseline (vMax < 0) must never paint the green baseline into the 2D B-mode region above y0
+    const W = 32;
+    const H = 64;
+    const y0 = 30;
+    const h = 30;
+    const rgba = new Uint8ClampedArray(W * H * 4);
+    renderSpectralStripRgba(
+      rgba,
+      W,
+      H,
+      y0,
+      h,
+      new Float32Array(W * SPECTRAL_BINS),
+      W,
+      { ...DEFAULT_SPECTRAL, scaleMps: 0.5, baselineShiftMps: -0.9 },
+    );
+    for (let y = 0; y < y0; y++) {
+      for (let x = 0; x < W; x++) {
+        const o = (y * W + x) * 4;
+        assert.equal(rgba[o + 1], 0, `Green baseline bled into B-mode sector at row ${y}`);
+      }
     }
   });
 });

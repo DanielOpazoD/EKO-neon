@@ -3,7 +3,13 @@ import { aliasVelocity, aseSweepDurationS } from '@/clinical/formulas';
 import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import { makeSample, Tissue } from '@/simulator/anatomy/tissue';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
-import type { ColorSettings } from '@/simulator/doppler/color/colorDoppler';
+import {
+  COLOR_THRESHOLD,
+  DOPPLER_SHADOW_TRANSMISSION,
+  relativeTransmission,
+  wallFilterResponse,
+  type ColorSettings,
+} from '@/simulator/doppler/color/colorDoppler';
 import {
   sampleFlow,
   type FlowFieldParams,
@@ -15,6 +21,7 @@ import {
   type SpectralSettings,
 } from '@/simulator/doppler/spectral/spectrum';
 import { depthLimitedPulsedAcquisition } from '@/simulator/doppler/spectral/scatteringModel';
+import { pulsedAcquisition } from '@/simulator/renderer/pulseTiming';
 import type { BeamFrame } from '@/simulator/probe/pose';
 import { MODALITIES } from '@/simulator/renderer/modality';
 import {
@@ -79,6 +86,8 @@ export class StripEngine {
   private stripDisplay: Float32Array | null = null;
   /** colour M-mode: aliased axial velocity per (sample, column), NaN where no flow */
   private stripCmm: Float32Array | null = null;
+  private stripCmmVar: Float32Array | null = null;
+  private stripCmmPow: Float32Array | null = null;
   private stripMmode: Uint8ClampedArray | null = null;
   private stripCols = 0;
   private stripHead = 0;
@@ -140,16 +149,34 @@ export class StripEngine {
   }
 
   private effectiveSpectral(acquired: NonNullable<StripEngine['acquired']>): SpectralSettings {
-    if (!acquired.aliasing) return acquired.spectral;
-    const { effectiveScaleMps } = depthLimitedPulsedAcquisition(
-      acquired.gateDepthCm,
-      acquired.spectral.gateLengthCm,
-      acquired.frequencyMHz,
-      acquired.spectral.scaleMps,
-    );
-    return effectiveScaleMps < acquired.spectral.scaleMps
-      ? { ...acquired.spectral, scaleMps: effectiveScaleMps }
+    const scaleMps = acquired.aliasing
+      ? depthLimitedPulsedAcquisition(
+          acquired.gateDepthCm,
+          acquired.spectral.gateLengthCm,
+          acquired.frequencyMHz,
+          acquired.spectral.scaleMps,
+        ).effectiveScaleMps
+      : acquired.spectral.scaleMps;
+    const maxShift = 0.85 * Math.max(0.01, scaleMps);
+    const baselineShiftMps = Math.max(-maxShift, Math.min(maxShift, acquired.spectral.baselineShiftMps));
+    return scaleMps !== acquired.spectral.scaleMps ||
+      baselineShiftMps !== acquired.spectral.baselineShiftMps
+      ? { ...acquired.spectral, scaleMps, baselineShiftMps }
       : acquired.spectral;
+  }
+
+  private effectiveColor(acquired: NonNullable<StripEngine['acquired']>): ColorSettings {
+    const scaleMps = pulsedAcquisition(
+      acquired.depthCm,
+      acquired.frequencyMHz,
+      acquired.color.scaleMps,
+    ).scaleMps;
+    const maxShift = 0.85 * Math.max(0.01, scaleMps);
+    const baselineShiftMps = Math.max(-maxShift, Math.min(maxShift, acquired.color.baselineShiftMps));
+    return scaleMps !== acquired.color.scaleMps ||
+      baselineShiftMps !== acquired.color.baselineShiftMps
+      ? { ...acquired.color, scaleMps, baselineShiftMps }
+      : acquired.color;
   }
 
   get velocityRange(): { vMin: number; vMax: number } | null {
@@ -221,7 +248,7 @@ export class StripEngine {
     ctx: StripCtx,
   ): void {
     const inp = ctx.input;
-    const key = `${inp.modality}|${inp.spectral.sweepSpeedMmPerS}|${inp.settings.depthCm}|${inp.settings.frequencyMHz}|${inp.cursorThetaRad}|${inp.gateDepthCm}|${inp.spectral.scaleMps}|${inp.spectral.baselineShiftMps}|${inp.spectral.invert ? 1 : 0}|${inp.spectral.wallFilterMps}|${inp.spectral.gainDb}|${inp.spectral.gateLengthCm}|${inp.color.scaleMps}|${inp.color.baselineShiftMps}|${inp.color.invert ? 1 : 0}|${inp.color.wallFilterMps}`;
+    const key = `${inp.modality}|${inp.spectral.sweepSpeedMmPerS}|${inp.settings.depthCm}|${inp.settings.frequencyMHz}|${inp.cursorThetaRad}|${inp.gateDepthCm}|${inp.spectral.scaleMps}|${inp.spectral.baselineShiftMps}|${inp.spectral.invert ? 1 : 0}|${inp.spectral.wallFilterMps}|${inp.spectral.gainDb}|${inp.spectral.gateLengthCm}|${inp.color.scaleMps}|${inp.color.baselineShiftMps}|${inp.color.invert ? 1 : 0}|${inp.color.wallFilterMps}|${inp.color.gainDb}|${inp.color.showVariance ? 1 : 0}`;
     if (key !== this.acquisitionKey || !this.acquired) {
       this.reset();
       this.acquisitionKey = key;
@@ -257,6 +284,8 @@ export class StripEngine {
       this.stripDisplay = kind === 'spectral' ? new Float32Array(SPECTRAL_BINS * stripWidth) : null;
       this.stripMmode = kind === 'm-mode' ? new Uint8ClampedArray(lineSamples * stripWidth) : null;
       this.stripCmm = cmm ? new Float32Array(spec.samples * stripWidth).fill(NaN) : null;
+      this.stripCmmVar = cmm ? new Float32Array(spec.samples * stripWidth) : null;
+      this.stripCmmPow = cmm ? new Float32Array(spec.samples * stripWidth) : null;
       this.timeline.reset();
       this.stripSampleTime = new Float64Array(stripWidth);
       this.stripBeatIndex = new Uint32Array(stripWidth);
@@ -406,13 +435,16 @@ export class StripEngine {
       this.lineTr,
       this.lineTi,
     );
+    const cmmData = cmm ? this.cmmVelocity(beam, spec, phase, theta, scene, ctx) : null;
     return {
       amp: this.lineAmp.slice(),
-      velocity: cmm ? this.cmmVelocity(beam, spec, phase, theta, scene, ctx) : null,
+      velocity: cmmData ? cmmData.velocity : null,
+      dispersion: cmmData ? cmmData.dispersion : null,
+      relTrans: cmmData ? cmmData.relTrans : null,
     };
   }
 
-  /** Colour M-mode: axial flow velocity (m/s, + toward the transducer) on the frame samples of the traced line. */
+  /** Colour M-mode: axial flow velocity (+ toward transducer), variance, and relative acoustic transmission. */
   private cmmVelocity(
     beam: BeamFrame,
     spec: PolarFrameSpec,
@@ -420,7 +452,7 @@ export class StripEngine {
     theta: number,
     scene: Scene,
     ctx: StripCtx,
-  ): Float32Array {
+  ): { velocity: Float32Array; dispersion: Float32Array; relTrans: Float32Array } {
     const hf = ctx.heart.frame;
     const ct = Math.cos(theta),
       sn = Math.sin(theta);
@@ -433,15 +465,22 @@ export class StripEngine {
     const fs = this.flowSample;
     const F = spec.samples;
     const S = this.mmodeSamples;
-    const out = new Float32Array(F);
+    const velocity = new Float32Array(F);
+    const dispersion = new Float32Array(F);
+    const relTrans = new Float32Array(F);
     const dr = spec.depthCm / F;
+    const acq = {
+      frequencyMHz: ctx.input.settings.frequencyMHz,
+      harmonics: ctx.input.settings.harmonics,
+    };
     for (let si = 0; si < F; si++) {
       const li = Math.min(S - 1, Math.floor(((si + 0.5) / F) * S));
-      if (this.lineTi[li] !== Tissue.Blood || (this.lineTr[li] ?? 0) < 0.05) {
-        out[si] = NaN;
+      const r = (si + 0.5) * dr;
+      const rel = relativeTransmission(this.lineTr[li] ?? 0, r, acq);
+      if (this.lineTi[li] !== Tissue.Blood || rel < DOPPLER_SHADOW_TRANSMISSION) {
+        velocity[si] = NaN;
         continue;
       }
-      const r = (si + 0.5) * dr;
       const px = beam.origin.x + dx * r,
         py = beam.origin.y + dy * r,
         pz = beam.origin.z + dz * r;
@@ -452,9 +491,15 @@ export class StripEngine {
       const hz =
         (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z;
       sampleFlow(ctx.flow, ctx.tables, scene.heartPose, phase, hx, hy, hz, fs);
-      out[si] = fs.present ? -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz) : NaN;
+      if (!fs.present) {
+        velocity[si] = NaN;
+        continue;
+      }
+      velocity[si] = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+      dispersion[si] = Math.min(1, fs.dispersion * 1.6);
+      relTrans[si] = Math.min(1, rel);
     }
-    return out;
+    return { velocity, dispersion, relTrans };
   }
 
   /** Form an M-mode column from its traced lines, pass it through the console and store it. */
@@ -503,15 +548,38 @@ export class StripEngine {
     const strip = this.stripMmode!;
     const grey = this.mmodeGrey;
     for (let s = 0; s < S; s++) strip[s * cols + col] = grey[s]!;
+    const effColor = this.acquired ? this.effectiveColor(this.acquired) : inp.color;
     if (this.stripCmm) {
-      const v = (t < 0.5 ? src.lo : src.hi).velocity;
+      const lineSrc = t < 0.5 ? src.lo : src.hi;
+      const v = lineSrc.velocity;
+      const d = lineSrc.dispersion;
+      const tr = lineSrc.relTrans;
       const cmm = this.stripCmm;
+      const cmmVar = this.stripCmmVar;
+      const cmmPow = this.stripCmmPow;
+      const gainLin = Math.pow(10, effColor.gainDb / 20);
       for (let si = 0; si < spec.samples; si++) {
+        const idx = si * cols + col;
         const x = v ? v[si]! : NaN;
-        cmm[si * cols + col] =
-          Number.isNaN(x) || Math.abs(x) < inp.color.wallFilterMps
-            ? NaN
-            : aliasVelocity(x, inp.color.scaleMps, inp.color.baselineShiftMps);
+        const vx = effColor.invert ? -x : x;
+        const absV = Math.abs(vx);
+        if (Number.isNaN(vx) || absV < effColor.wallFilterMps) {
+          cmm[idx] = NaN;
+          if (cmmVar) cmmVar[idx] = 0;
+          if (cmmPow) cmmPow[idx] = 0;
+          continue;
+        }
+        const rel = tr ? tr[si]! : 1;
+        const pow = Math.min(1, gainLin * rel * wallFilterResponse(absV, effColor.wallFilterMps));
+        if (pow < COLOR_THRESHOLD) {
+          cmm[idx] = NaN;
+          if (cmmVar) cmmVar[idx] = 0;
+          if (cmmPow) cmmPow[idx] = 0;
+          continue;
+        }
+        cmm[idx] = aliasVelocity(vx, effColor.scaleMps, effColor.baselineShiftMps);
+        if (cmmVar) cmmVar[idx] = d ? d[si]! : 0;
+        if (cmmPow) cmmPow[idx] = pow;
       }
     }
     this.stripPhase[col] = phase;
@@ -526,7 +594,9 @@ export class StripEngine {
         S,
         this.lastTintMap,
         this.stripCmm,
-        this.acquired?.color,
+        effColor,
+        this.stripCmmVar,
+        this.stripCmmPow,
       );
     }
   }
@@ -595,6 +665,7 @@ export class StripEngine {
         this.stripRgba = new Uint8ClampedArray(cols * h * 4);
         this.rowMap = buildRowMap(h, this.mmodeSamples);
         this.stripRgbaKey = layout;
+        const effColor = this.effectiveColor(acquired);
         for (let c = 0; c < cols; c++) {
           paintMmodeStripColumn(
             c,
@@ -605,7 +676,9 @@ export class StripEngine {
             this.mmodeSamples,
             tintMap,
             this.stripCmm,
-            acquired.color,
+            effColor,
+            this.stripCmmVar,
+            this.stripCmmPow,
           );
         }
       }

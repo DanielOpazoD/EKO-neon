@@ -357,10 +357,15 @@ export class ColorFieldDriver {
     );
     cf.colorVel = out.vel;
     cf.colorVar = out.variance;
+    cf.colorPower = out.power;
   }
 
   /** Step Color Doppler for one B-mode frame (CPU fallback path); recomputes every other frame or when settings/geometry changed. */
-  step(ctx: ColorUpdateContext): { vel: Float32Array | null; variance: Float32Array | null } {
+  step(ctx: ColorUpdateContext): {
+    vel: Float32Array | null;
+    variance: Float32Array | null;
+    power: Float32Array | null;
+  } {
     const colorKey = JSON.stringify([
       ctx.probe,
       ctx.color,
@@ -380,8 +385,8 @@ export class ColorFieldDriver {
     // colour packets cost frames: update the colour field every other B-mode frame
     if (this.frameCounter % 2 === 0 || !this.prev) this.compute(ctx);
     return this.prev
-      ? { vel: this.prev.vel, variance: this.prev.variance }
-      : { vel: null, variance: null };
+      ? { vel: this.prev.vel, variance: this.prev.variance, power: this.prev.power }
+      : { vel: null, variance: null, power: null };
   }
 
   private compute(ctx: ColorUpdateContext): void {

@@ -133,8 +133,11 @@ export class FrameCompositor {
       : inp.modality === 'color' && ctx.colorCurrent
         ? ctx.colorCurrent.variance
         : null;
-    const colorPower =
-      !cf && inp.modality === 'color' && ctx.colorCurrent ? ctx.colorCurrent.power : undefined;
+    const colorPower = cf
+      ? (cf.colorPower ?? undefined)
+      : inp.modality === 'color' && ctx.colorCurrent
+        ? ctx.colorCurrent.power
+        : undefined;
     const tintMap = inp.settings.tintMap;
 
     let bitmap: ImageBitmap | null = null;

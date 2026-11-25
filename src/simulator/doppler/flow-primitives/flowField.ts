@@ -260,25 +260,25 @@ export function sampleFlow(
       rootPresent = 0;
 
     if (tAv < LVOT_ENTRANCE_T) {
-      // Smooth anatomically tapered LV → LVOT laminar acceleration corridor (no spherical point-sink bullseye
-      // or PLAX double-lobed butterfly, and zero backward bleed onto the mitral annulus in A4C).
+      // Smooth anatomically tapered LV → LVOT laminar acceleration corridor: fades naturally into the
+      // basal LV without a flat horizontal cutoff in A5C/A3C or a bright blue dome over the MV in A4C.
       const up = LVOT_ENTRANCE_T - tAv;
-      if (up < 2.8) {
-        const taper = 1 + 0.34 * up;
+      if (up < 1.9) {
+        const taper = 1 + 0.3 * up;
         const rUp = rLvot * taper;
-        const rHalfUp = 0.88 * rUp;
-        if (rho < jetReach(rHalfUp, up * 0.5, SLOW_SHEAR)) {
+        const rHalfUp = 0.78 * rUp;
+        if (rho < jetReach(rHalfUp, up * 0.4, SLOW_SHEAR)) {
           const vEntrance = qao / (p.lvotAreaCm2 * (1 - narrowAt(LVOT_ENTRANCE_T))) / 100;
           const rNorm = Math.min(1.4, rho / Math.max(0.25, rUp));
-          const radialCore = 1 / (1 + 0.45 * rNorm * rNorm);
+          const radialCore = 1 / (1 + 0.72 * rNorm * rNorm);
           const v =
             (vEntrance / (taper * taper)) *
             radialCore *
-            jetProfile(rho, rHalfUp, up * 0.5, SLOW_SHEAR) *
-            fadeOut(up, 1.8, 2.8);
+            jetProfile(rho, rHalfUp, up * 0.4, SLOW_SHEAR) *
+            fadeOut(up, 0.55, 1.9);
           if (v > 0.01) {
             // Streamline-following gentle inward tilt toward the LVOT axis (never reverses sign in PLAX)
-            const inward = rho > 1e-4 ? (0.34 * Math.min(1, rho / rUp)) / taper : 0;
+            const inward = rho > 1e-4 ? (0.32 * Math.min(1, rho / rUp)) / taper : 0;
             const invRho = rho > 1e-4 ? 1 / rho : 0;
             const dirX = ax.x - qx * invRho * inward;
             const dirY = ax.y - qy * invRho * inward;
@@ -295,7 +295,7 @@ export function sampleFlow(
       }
     } else if (tAv < 5.5) {
       const isStenotic = p.avAreaCm2 < 2.0;
-      const areaAsc = Math.PI * (p.avR * 1.25) * (p.avR * 1.25);
+      const areaAsc = Math.PI * (p.avR * 1.28) * (p.avR * 1.28);
       let area: number;
       let R: number;
       if (tAv < 0.2) {
@@ -310,25 +310,26 @@ export function sampleFlow(
           : smoothstep(-0.35, 0.2, tAv);
         area = lvotAreaNow + (p.avAreaCm2 - lvotAreaNow) * uValve;
         R = lvotRNow + (avOrifR - lvotRNow) * uValve;
-      } else if (tAv < 0.95) {
-        R = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
-        area = p.avAreaCm2;
       } else if (!isStenotic) {
-        // Normal aortic root: smooth recovery from valve orifice to ascending aorta lumen (matches aorticNetwork at STJ)
-        const uRec = smoothstep(0.95, 2.35, tAv);
+        // Normal aortic valve & sinuses of Valsalva: exact avAreaCm2 through the leaflet tips (t = 0.2..0.70 cm),
+        // then smooth deceleration into the wider aortic sinuses and ascending lumen.
         const avOrifR = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
-        const rAsc = p.avR * 1.25;
+        const rAsc = p.avR * 1.28;
+        const uRec = smoothstep(0.7, 2.05, tAv);
         area = p.avAreaCm2 + (areaAsc - p.avAreaCm2) * uRec;
         R = avOrifR + (rAsc - avOrifR) * uRec;
       } else {
-        // Stenotic post-valvular free jet: preserves crisp high-velocity turbulent core well into the ascending aorta
-        const alongAv = tAv - 0.95;
-        const spread = 1 + alongAv * 0.34;
-        R = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.12 * spread;
-        area = p.avAreaCm2 * (1 + alongAv * 0.24) * (1 + alongAv * 0.24);
+        // Stenotic post-valvular turbulent jet: keeps exact vena-contracta avAreaCm2 at t = 0.2..0.95 cm
+        // (preserving CW Vmax) while its entraining turbulent plume spreads additively across the sinuses so
+        // both PLAX and slightly oblique A5C slices show a rich post-stenotic mosaic jet.
+        const avOrifR = Math.sqrt(p.avAreaCm2 / Math.PI) * 1.15;
+        const alongSpread = Math.max(0, tAv - 0.35);
+        R = Math.min(p.avR * 1.22, avOrifR + alongSpread * 0.44);
+        const alongDecay = Math.max(0, tAv - 0.95);
+        area = p.avAreaCm2 * (1 + alongDecay * 0.22) * (1 + alongDecay * 0.22);
       }
-      const rHalf = (isStenotic && tAv > 0 ? 0.86 : 0.88) * R;
-      const sShear = Math.max(0, tAv - 0.95);
+      const rHalf = (isStenotic && tAv > 0 ? 0.88 : !p.lvotObstruction ? 0.8 : 0.86) * R;
+      const sShear = Math.max(0, tAv - (isStenotic ? 0.35 : 0.7));
       const shear = isStenotic ? FAST_JET_SHEAR : SLOW_SHEAR;
       let vJet = 0;
       if (narrowPeak > 0 && tAv > LVOT_OBSTRUCTION_T) {
@@ -346,9 +347,12 @@ export function sampleFlow(
       const reach = rho < jetReach(rHalf, sShear, shear);
       if (reach || vJet > 0) {
         const v = qao / area / 100;
-        // Physiologic radial core rounding for laminar LVOT/AV (= 1.00 on centerline rho = 0, so PW/CW Vmax is exact)
+        // Physiologic radial shear for laminar LVOT/AV (= 1.00 on centerline rho = 0, so PW/CW Vmax is exact)
         const rNorm = Math.min(1.4, rho / Math.max(0.25, R));
-        const radialCore = isStenotic && tAv > 0 ? 1 : 1 / (1 + 0.45 * rNorm * rNorm);
+        const radialCore =
+          isStenotic && tAv > 0
+            ? 1
+            : 1 / (1 + (p.lvotObstruction ? 0.45 : 0.78) * rNorm * rNorm);
         const vTract = reach
           ? v * radialCore * jetProfile(rho, rHalf, sShear, shear) * fadeOut(tAv, 3.8, 5.4)
           : 0;
@@ -377,11 +381,12 @@ export function sampleFlow(
     }
 
     if (inAorta) {
-      if (hasStenoticJet && rootPresent && rootSpeed > 1.35) {
+      if (hasStenoticJet && rootPresent && (rootSpeed > 1.1 || rootDisp > 0.32)) {
         // Post-stenotic / SAM turbulent jet rides over the laminar ascending-aorta network instead of getting clipped at STJ
-        const archSpeed = Math.hypot(AORTA_TMP.vx, AORTA_TMP.vy, AORTA_TMP.vz);
-        const jetWeight = smoothstep(1.2, 2.2, rootSpeed) * fadeOut(tAv, 3.6, 5.2);
-        if (rootSpeed >= archSpeed) {
+        const jetWeight =
+          Math.max(smoothstep(0.9, 1.8, rootSpeed), smoothstep(0.28, 0.5, rootDisp)) *
+          fadeOut(tAv, 3.6, 5.2);
+        if (jetWeight > 0.01) {
           out.vx = AORTA_TMP.vx * (1 - jetWeight) + rootVx * jetWeight;
           out.vy = AORTA_TMP.vy * (1 - jetWeight) + rootVy * jetWeight;
           out.vz = AORTA_TMP.vz * (1 - jetWeight) + rootVz * jetWeight;
@@ -390,9 +395,9 @@ export function sampleFlow(
           return;
         }
       }
-      // Smooth cross-fade across the sinotubular junction (t = 1.7..3.0 cm): eliminates both the A5C velocity cliff
+      // Smooth cross-fade across the sinotubular junction (t = 1.5..2.8 cm): eliminates both the A5C velocity cliff
       // and the PLAX straight diagonal knife-edge cutoff.
-      const wArch = rootPresent ? smoothstep(1.7, 3.0, tAv) : 1;
+      const wArch = rootPresent ? smoothstep(1.5, 2.8, tAv) : 1;
       out.vx = rootVx * (1 - wArch) + AORTA_TMP.vx * wArch;
       out.vy = rootVy * (1 - wArch) + AORTA_TMP.vy * wArch;
       out.vz = rootVz * (1 - wArch) + AORTA_TMP.vz * wArch;

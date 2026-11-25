@@ -26,19 +26,29 @@ export function acquisitionLimits(input: AcquisitionInput) {
   };
 }
 
+function clampBaselineShift(baselineShiftMps: number, scaleMps: number): number {
+  const maxShift = 0.85 * Math.max(0.01, scaleMps);
+  return Math.max(-maxShift, Math.min(maxShift, baselineShiftMps));
+}
+
 export function constrainAcquisition<T extends AcquisitionInput>(input: T): T {
   const limits = acquisitionLimits(input);
   const pulsed = input.modality === 'pw' || input.modality === 'tdi';
+  const colorScale = limits.color.scaleMps;
+  const colorShift = clampBaselineShift(input.color.baselineShiftMps, colorScale);
+  const spectralScale = pulsed ? limits.spectral.scaleMps : input.spectral.scaleMps;
+  const spectralShift = clampBaselineShift(input.spectral.baselineShiftMps, spectralScale);
   return {
     ...input,
     gateDepthCm: limits.gateDepthCm,
     color:
-      limits.color.scaleMps === input.color.scaleMps
+      colorScale === input.color.scaleMps && colorShift === input.color.baselineShiftMps
         ? input.color
-        : { ...input.color, scaleMps: limits.color.scaleMps },
+        : { ...input.color, scaleMps: colorScale, baselineShiftMps: colorShift },
     spectral:
-      !pulsed || limits.spectral.scaleMps === input.spectral.scaleMps
+      spectralScale === input.spectral.scaleMps &&
+      spectralShift === input.spectral.baselineShiftMps
         ? input.spectral
-        : { ...input.spectral, scaleMps: limits.spectral.scaleMps },
+        : { ...input.spectral, scaleMps: spectralScale, baselineShiftMps: spectralShift },
   };
 }

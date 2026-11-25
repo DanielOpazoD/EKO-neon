@@ -5,16 +5,16 @@
  */
 export const COLOR_MAP = {
   /** Base level and range of the dominant channel (deep crimson/midnight-navy near zero -> saturated red/royal-blue). */
-  DOMINANT_BASE: 24,
-  DOMINANT_RANGE: 231,
-  DOMINANT_GAIN: 1.18,
-  /** Green channel: pure red/blue up to 64% Nyquist, brightening cleanly to gold-yellow/cyan approaching Nyquist. */
+  DOMINANT_BASE: 28,
+  DOMINANT_RANGE: 227,
+  DOMINANT_GAIN: 1.25,
+  /** Green channel: pure red/blue up to 66% Nyquist, brightening smoothly to warm gold-yellow/ice-cyan at Nyquist. */
   GREEN_BASE_TOWARD: 6,
   GREEN_BASE_AWAY: 16,
-  GREEN_RANGE_TOWARD: 234,
-  GREEN_RANGE_AWAY: 224,
-  GREEN_KNEE: 0.64,
-  GREEN_GAIN: 2.75,
+  GREEN_RANGE_TOWARD: 230,
+  GREEN_RANGE_AWAY: 220,
+  GREEN_KNEE: 0.66,
+  GREEN_GAIN: 2.8,
   /** Level of the quiet channel. */
   QUIET: 10,
   /** Variance display: keeps normal laminar valves pure BART while giving turbulent jets authentic multi-color mosaics. */
