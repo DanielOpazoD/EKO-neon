@@ -24,6 +24,44 @@ class FakeWorker {
   }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('SimClient inline', () => {
+  it('runs the input sent while the engine loads, and steps nothing while paused', async () => {
+    let frames = 0;
+    let lastEpoch: number | undefined;
+    const client = new SimClient(
+      {
+        onFrame: (out) => {
+          frames++;
+          lastEpoch = out.acquisition?.sessionEpoch;
+        },
+        onReady: () => {},
+        onError: () => {},
+      },
+      true,
+    );
+    assert.equal(client.mode, 'inline');
+    const input = baseInput({ sessionEpoch: 1 });
+    const loading = client.loadCase(loadCaseById('normal-excellent-window'), input);
+    // an exam started while the engine module loads: the core must not keep the input it was built with
+    client.send({ ...input, sessionEpoch: 2 });
+    await loading;
+    await sleep(300);
+    assert.ok(frames > 0);
+    assert.equal(lastEpoch, 2, 'the core runs the input sent during the load');
+
+    client.send({ ...input, sessionEpoch: 2, paused: true });
+    const atPause = frames;
+    await sleep(300);
+    assert.equal(frames, atPause, 'no frame while nobody is looking');
+    client.send({ ...input, sessionEpoch: 2, paused: false });
+    await sleep(300);
+    assert.ok(frames > atPause, 'woken by the next input');
+    client.dispose();
+  });
+});
+
 const TRUTH = {} as unknown as StructuredEchoTruth;
 const MARKS = {} as unknown as PhaseMarks;
 const scope = globalThis as unknown as { Worker?: unknown };

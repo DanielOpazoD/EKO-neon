@@ -22,6 +22,7 @@ import {
   createCameraRig,
   narrowPanelFovDeg,
   navigatorState,
+  type NavigatorCameraState,
   type NavigatorZoom,
 } from './navigatorCamera';
 import { createHeartMeshes } from './navigatorHeart';
@@ -38,6 +39,8 @@ export interface NavigatorSceneOptions {
   dragAction: { readonly current: 'probe' | 'camera' };
   /** Filled with the camera controls once the scene is up, for the component's buttons. */
   zoom: { current: NavigatorZoom | null };
+  /** Where the camera stood when the last scene was torn down; the next one starts there. */
+  camera?: { current: NavigatorCameraState | null };
 }
 
 /**
@@ -49,7 +52,13 @@ export interface NavigatorSceneOptions {
  */
 export function mountNavigatorScene(
   el: HTMLDivElement,
-  { caseId, patient, dragAction: dragActionRef, zoom: zoomRef }: NavigatorSceneOptions,
+  {
+    caseId,
+    patient,
+    dragAction: dragActionRef,
+    zoom: zoomRef,
+    camera: cameraStateRef,
+  }: NavigatorSceneOptions,
 ): () => void {
   // the models arrive from the mesh worker as data (NavigatorModel, audit B7): until then the scene has the
   // probe, the fan and the lights, and the pose-dependent parts wait
@@ -194,6 +203,7 @@ export function mountNavigatorScene(
     () => {
       dirty = true;
     },
+    cameraStateRef?.current,
   );
   zoomRef.current = rig.zoom;
   const dom = renderer.domElement;
@@ -378,7 +388,12 @@ export function mountNavigatorScene(
     detachInput();
     meshWorker.terminate();
     ro.disconnect();
+    // the next scene starts where the learner left the camera
+    if (cameraStateRef) cameraStateRef.current = rig.state();
     renderer.dispose();
+    // dispose() keeps the WebGL context until the canvas is collected: each rebuild (breathing, position, case) left one
+    // alive, and the browser, at its limit of contexts, takes the oldest away — possibly the one the scanner draws with
+    renderer.forceContextLoss();
     el.removeChild(renderer.domElement);
   };
 }

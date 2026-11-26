@@ -126,6 +126,8 @@ export class SimClient {
    */
   loadCase(caseDef: CaseDefinition, input: SimInput): Promise<void> {
     this.lastInputKey = simInputKey(input);
+    this.latestInput = input;
+    this.inlinePaused = input.paused === true;
     // a new core answers nothing asked of the old one
     this.rejectPending(new Error('simulation request cancelled: case reloaded'));
     const generation = ++this.loadGeneration;
@@ -136,13 +138,20 @@ export class SimClient {
     }
     return import('./simulatorCore').then(({ SimulatorCore }) => {
       if (generation !== this.loadGeneration || this.disposed) return; // superseded or disposed meanwhile
-      this.startInline(new SimulatorCore(caseDef, input), caseDef.id);
+      const core = new SimulatorCore(caseDef, input);
+      // what was sent while the engine module loaded (a new session, the display size) reaches the new core too: it
+      // was taken as delivered, and the core kept the input it was built with until another control changed
+      if (this.latestInput && this.latestInput !== input) core.setInput(this.latestInput);
+      this.startInline(core, caseDef.id);
     });
   }
 
   /** The latest `loadCase`, worker or inline: the only one whose core is announced. */
   private loadGeneration = 0;
   private disposed = false;
+  /** The last input sent, and, inline, whether it pauses the simulation (`SimInput.paused`). */
+  private latestInput: SimInput | null = null;
+  private inlinePaused = false;
 
   private startInline(core: SimulatorCore, caseId: string): void {
     this.inline?.dispose();
@@ -151,7 +160,7 @@ export class SimClient {
     if (this.inlineTimer) clearInterval(this.inlineTimer);
     this.inlineLast = performance.now();
     this.inlineTimer = setInterval(() => {
-      if (!this.inline) return;
+      if (!this.inline || this.inlinePaused) return;
       const now = performance.now();
       const out = this.inline.step((now - this.inlineLast) / 1000);
       this.inlineLast = now;
@@ -164,10 +173,16 @@ export class SimClient {
     const key = simInputKey(input);
     if (key === this.lastInputKey) return;
     this.lastInputKey = key;
+    this.latestInput = input;
     if (this.worker) {
       const m: MainToWorker = { type: 'input', input };
       this.worker.postMessage(m);
-    } else this.inline?.setInput(input);
+      return;
+    }
+    // inline, the timer keeps running but steps nothing while paused; waking restarts the clock where it stood
+    if (this.inlinePaused && !input.paused) this.inlineLast = performance.now();
+    this.inlinePaused = input.paused === true;
+    this.inline?.setInput(input);
   }
 
   recycle(buffer: ArrayBuffer): void {

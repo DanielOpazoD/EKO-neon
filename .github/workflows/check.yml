@@ -1,0 +1,29 @@
+# The project's gate on every pull request and on main: types, the whole test suite and the production build
+# (`npm run check`). The GPU parity script and the Doppler benchmark stay manual: one needs a browser with WebGL2,
+# the other measures this machine's timings.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      # no lockfile is versioned yet (bun.lock predates package.json), so install resolves within package.json's ranges
+      - run: npm install --no-audit --no-fund
+      - run: npm run check

@@ -77,6 +77,12 @@ export interface SimInput {
    * cannot be scored in the new one. 0 when absent.
    */
   sessionEpoch?: number;
+  /**
+   * Nobody is looking: the learner is on another screen or the tab is hidden. The simulator stops stepping until an
+   * input wakes it, and simulated time stands still meanwhile. It traced, analysed and transferred frames at full
+   * cadence while the learner read the report or the curriculum, and kept the Doppler audio going.
+   */
+  paused?: boolean;
 }
 
 /** Acquisition controls and model versions that produced one image, independent of pending console changes. */

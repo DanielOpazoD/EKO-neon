@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { SimClient } from '@/simulator/core/client';
 import type { SimInput, SimOutput } from '@/simulator/core/protocol';
 import { useSimStore } from './store';
-import { modePolicy } from './modePolicy';
+import { modePolicy, screenInMode } from './modePolicy';
 import { loadCaseById } from '@/cases';
 import { frameBus } from './frameBus';
 
@@ -80,6 +80,8 @@ export function useSimulation(
     const safety = setInterval(() => {
       if (!document.hidden) push();
     }, 500);
+    // a hidden tab pauses the simulator and a visible one wakes it (`SimInput.paused`)
+    document.addEventListener('visibilitychange', push);
     let raf = 0;
     let frames = 0;
     let fpsT = performance.now();
@@ -97,6 +99,7 @@ export function useSimulation(
     return () => {
       cancelAnimationFrame(raf);
       clearInterval(safety);
+      document.removeEventListener('visibilitychange', push);
       unsub();
       client.dispose();
       clientRef.current = null;
@@ -139,5 +142,9 @@ export function buildInput(display: { width: number; height: number }): SimInput
       s.activeMeasurementId !== null ||
       (!s.ui.minimal && s.ui.showTorso && !s.ui.railMini && modePolicy(s.mode).navigatorAnatomy),
     sessionEpoch: s.sessionEpoch,
+    // nobody is looking at the scanner: the report, the curriculum, the references, or a hidden tab
+    paused:
+      screenInMode(s.ui.screen, s.mode) !== 'simulator' ||
+      (typeof document !== 'undefined' && document.hidden),
   };
 }

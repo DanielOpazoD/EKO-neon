@@ -130,5 +130,6 @@ export function simInputKey(inp: SimInput): string {
     inp.needSegments === undefined ? 'u' : inp.needSegments ? 1 : 0,
     inp.needStructure === undefined ? 'u' : inp.needStructure ? 1 : 0,
     inp.sessionEpoch ?? 0,
+    inp.paused ? 1 : 0,
   ].join('#');
 }

@@ -177,6 +177,11 @@ test('simInputKey detects every field change deterministically without JSON.stri
   );
   assert.notEqual(
     simInputKey(a),
+    simInputKey(makeInput({ paused: true })),
+    'pausing and waking reach the worker',
+  );
+  assert.notEqual(
+    simInputKey(a),
     simInputKey(makeInput({ color: { ...DEFAULT_COLOR, showVariance: false } })),
     'simInputKey must still transmit presentation toggles to worker',
   );

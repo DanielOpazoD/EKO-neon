@@ -63,6 +63,13 @@ function schedule(delayMs: number): void {
 function tick(): void {
   timer = null;
   if (!core || !input) return;
+  // nobody is looking (another screen, a hidden tab): no more ticks until an input wakes the scanner. The clock and
+  // the schedule restart then, so simulated time does not jump over the pause
+  if (input.paused) {
+    lastTick = 0;
+    nextDue = 0;
+    return;
+  }
   const tStart = performance.now();
   lateMs = nextDue > 0 ? Math.max(0, tStart - nextDue) : 0;
   const now = tStart / 1000;
@@ -156,9 +163,11 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
           msg.input.color.baselineShiftMps !== input.color.baselineShiftMps ||
           (msg.input.spectral.reject ?? 0) !== (input.spectral.reject ?? 0) ||
           msg.input.settings.tintMap !== input.settings.tintMap);
+      // the learner is back on the scanner: ticking resumes (a paused worker schedules nothing)
+      const wake = input?.paused === true && !msg.input.paused;
       input = msg.input;
       core.setInput(msg.input);
-      if (newFrame) {
+      if (newFrame || wake) {
         nextDue = 0;
         schedule(1);
       }

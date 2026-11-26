@@ -7,6 +7,7 @@ import { RotationDial } from './RotationDial';
 import { CheckItem, MenuCap, usePopover } from './menu';
 import { IconCrosshair, IconLayers, IconMinus, IconPlus } from './icons';
 import { mountNavigatorScene, type NavigatorZoom } from './navigator/navigatorScene';
+import type { NavigatorCameraState } from './navigator/navigatorCamera';
 
 export { narrowPanelFovDeg } from './navigator/navigatorScene';
 
@@ -31,6 +32,8 @@ export function TorsoView() {
   );
   const frozen = useHudStore((s) => s.hud?.frozen ?? false);
   const zoomRef = useRef<NavigatorZoom | null>(null);
+  // the camera outlives each scene: breathing, position or case rebuild the scene, not the learner's framing
+  const cameraRef = useRef<NavigatorCameraState | null>(null);
   // a browser without WebGL keeps the image and the cut map; only the 3D view gives way to a notice (decision 154).
   // Probed once on mounting; if the renderer still failed, the ErrorBoundary around the navigator would contain it
   const [webglError] = useState(probeWebgl);
@@ -38,7 +41,13 @@ export function TorsoView() {
   useEffect(() => {
     const el = ref.current;
     if (!el || webglError) return;
-    return mountNavigatorScene(el, { caseId, patient, dragAction: dragActionRef, zoom: zoomRef });
+    return mountNavigatorScene(el, {
+      caseId,
+      patient,
+      dragAction: dragActionRef,
+      zoom: zoomRef,
+      camera: cameraRef,
+    });
   }, [caseId, patient, webglError]);
 
   return (
