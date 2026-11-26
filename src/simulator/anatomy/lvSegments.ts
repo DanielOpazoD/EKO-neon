@@ -29,7 +29,8 @@ export const RV_GROOVE_INFERIOR_RAD = 3.7;
  * One code carries two models: 1–16 are the AHA segments; 17–20 are the apical cap in the quadrant of apical segment
  * 13, 14, 15 or 16. AHA 17 reads 17–20 as 17; the 16-segment wall-motion model reads them as 13–16, so its four apical
  * segments cover the whole apex (it is not the 17-segment volume with the cap removed). 0 = not LV compact myocardium.
- * This function is translated to GLSL (`npm run glsl:gen`): the CPU and GPU tracers share its boundaries.
+ * Its GLSL mirror (glslGenerated.ts) is evaluated against it in cpuGpuParity.test.ts: the CPU and GPU tracers share its
+ * boundaries.
  */
 export function lvSegmentCode(
   azimuthRad: number,
@@ -90,7 +91,7 @@ export function lv18Segment(
  * apical septum; the inferior label takes the inferior and inferolateral walls (the PLAX posterior wall, as it always
  * has); the lateral one the anterolateral wall and the apical lateral segment. The cap belongs to its quadrant. Until
  * decision 154 the label came from the cosine of the azimuth centred on 180°, 28° off the septum the RV insertions
- * bound, and wrote «septum» over the inferior wall of the A2C. Translated to GLSL (`npm run glsl:gen`).
+ * bound, and wrote «septum» over the inferior wall of the A2C. Mirrored in GLSL (glslGenerated.ts, cpuGpuParity.test.ts).
  */
 export function lvWallKind(code: number): number {
   const c = code >= 17 ? code - 4 : code;

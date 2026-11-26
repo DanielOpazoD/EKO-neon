@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   COLOR_BLEND,
   COLOR_MAP,
@@ -12,6 +13,13 @@ import {
   type ColorPaletteId,
 } from '../postprocess/colorMap';
 import { GLSL_GENERATED } from './glslGenerated';
+import {
+  glslMirrors,
+  MIRROR_TOLERANCE,
+  mirrorDeviation,
+  mirrorSamples,
+  type GlslScalar,
+} from './shaderMirrors';
 import { GLSL_PRESENT_FRAG } from './glslImage';
 import {
   dopplerDefinesGlsl,
@@ -51,81 +59,121 @@ import {
  * CPU ↔ GPU parity guard suite.
  *
  * Catches silent divergence between CPU TypeScript physics/postprocess modules and their WebGL2
- * GLSL counterparts — including every scalar function manually retained in `glslGenerated.ts`.
+ * GLSL counterparts — including, numerically, every scalar function the shaders mirror by hand
+ * (`glslGenerated.ts` and the other annotated mirrors, see `shaderMirrors.ts`).
  */
 
-test('GLSL_GENERATED audit: every transpiled function exists in its declared TypeScript source file', () => {
-  const entries = [...GLSL_GENERATED.matchAll(/^\/\/ (src\/[^\s:]+\.ts): ([A-Za-z0-9_]+)$/gm)];
-  assert.ok(
-    entries.length >= 40,
-    `expected >= 40 annotated scalar functions in GLSL_GENERATED, found ${entries.length}`,
-  );
+/**
+ * GLSL mirrors evaluated in Node. Each shader function preceded by a line `// src/<path>.ts: <export>` is translated to
+ * JavaScript with its program's constants (shaderMirrors.ts) and compared with that export on MIRROR_SAMPLES arguments,
+ * within MIRROR_TOLERANCE (float32 resolution). Measured when written: 54 mirrors, 50 equal to the last bit on every
+ * sample and four within 1.4e-10 of max(1, |y|), all through the shader's PI printed with 15 digits (rvAzProfile, where
+ * pow(x, 0.7) magnifies the last bits of sin(PI·u) near 0). Of 705 mutants of their GLSL (each literal and constant
+ * ×1.01, each binary ± flipped) 682 fail this test, against 17 before it, all septalShare's, in lvWall.test.ts; the
+ * other 23 change nothing (rounding guards, clamps above a plateau, early returns where the ramps are already 0) or act
+ * only within sub-millimetre bands.
+ *
+ * Mirrors outside the scalar subset stay with the whole-image comparison in the browser
+ * (window.__echotwin.compareBackends, npm run test:gpu):
+ * - vec3 arguments: sdEllipsoid, sdCapsule, sdRoundCone and sdTorusZ (glslCommon.ts), which sdf.ts takes as triples;
+ * - the per-frame parameter texture P(i) and its #defines, where the TypeScript reads a model object: rootRadiusAt
+ *   (aorticValve.ts), mvHingeHeight and mvInflowTaper (mitralValve.ts hingeHeight, inflowTaper), lvProfileG and
+ *   lvCavityRadius (lvShape.ts), ahaSegment (lvGeometry.ts), skinZ, leftLungBorderX, ribCenterY (thoraxModel.ts);
+ *   pairing them needs the scene packed by paramLayout.ts;
+ * - the noise texture: wallThicknessAt (lvWall.ts; lvWall.test.ts checks its septal share and modulation gain);
+ * - out/inout parameters and structs: the classifier blocks (skirtDistance, mitralDistance, classifyHeart…).
+ * The Doppler programs hold scalar mirrors not annotated yet: wallFilterResponse and colorPowerConf (colorPowerConfidence
+ * at COLOR_THRESHOLD) agree with their TypeScript; aliasVelocity agrees with clinical/formulas only for a positive
+ * Nyquist velocity (for a non-positive one the TypeScript returns v and the shader NaN), and takes its baseline as a
+ * third parameter where the TypeScript defaults it.
+ */
+const MIRROR_SAMPLES = 4096;
 
-  const fileCache = new Map<string, string>();
-  const missing: string[] = [];
-  const missingGlslDef: string[] = [];
+test('GLSL mirrors of TypeScript scalar functions evaluate as their originals on sampled inputs', async (t) => {
+  // every GLSL string the shader modules export: a mirror annotated in any of them enters by itself
+  const here = import.meta.dirname;
+  const sources: string[] = [];
+  for (const file of fs.readdirSync(here).filter((f) => /^glsl\w*\.ts$/.test(f)).sort()) {
+    const mod = (await import(pathToFileURL(path.join(here, file)).href)) as Record<string, unknown>;
+    for (const v of Object.values(mod)) if (typeof v === 'string' && !sources.includes(v)) sources.push(v);
+  }
+  const mirrors = glslMirrors(sources);
+  // every function of glslGenerated.ts is one of them: a definition without its `// src/….ts: name` line is unchecked
+  const generated = [...GLSL_GENERATED.matchAll(/^\w+\s+(\w+)\s*\(/gm)].map((m) => m[1]!);
+  const unannotated = generated.filter((name) => !mirrors.some((m) => m.glslName === name));
+  assert.ok(generated.length > 0, 'no function definition found in GLSL_GENERATED');
+  assert.deepEqual(unannotated, [], 'GLSL_GENERATED functions without the annotation naming their TypeScript');
 
-  const arityMismatches: string[] = [];
-  const countParams = (paramList: string): number => {
-    const trimmed = paramList.trim();
-    if (!trimmed || trimmed === 'void') return 0;
-    let depth = 0;
-    let count = 1;
-    for (let i = 0; i < trimmed.length; i++) {
-      const ch = trimmed[i]!;
-      if (ch === '(' || ch === '<' || ch === '{' || ch === '[') depth++;
-      else if (ch === ')' || ch === '>' || ch === '}' || ch === ']') depth--;
-      else if (ch === ',' && depth === 0) count++;
-    }
-    // Ignore trailing comma in multi-line TS parameter lists
-    if (trimmed.endsWith(',')) count--;
-    return count;
-  };
-
-  for (const m of entries) {
-    const relPath = m[1]!;
-    const fnName = m[2]!;
-    let src = fileCache.get(relPath);
-    if (src === undefined) {
-      const absPath = path.resolve(process.cwd(), relPath);
-      assert.ok(fs.existsSync(absPath), `GLSL_GENERATED references missing TS file: ${relPath}`);
-      src = fs.readFileSync(absPath, 'utf8');
-      fileCache.set(relPath, src);
-    }
-    const tsDeclRe = new RegExp(`\\bfunction\\s+${fnName}\\s*\\(([\\s\\S]*?)\\)`);
-    const tsConstRe = new RegExp(`\\bconst\\s+${fnName}\\s*=`);
-    const tsMatch = src.match(tsDeclRe);
-    if (!tsMatch && !tsConstRe.test(src)) {
-      missing.push(`${relPath}:${fnName}`);
-    }
-    const glslDeclRe = new RegExp(`\\b(?:float|int|vec[234]|bool)\\s+${fnName}\\s*\\(([^)]*)\\)`);
-    const glslMatch = GLSL_GENERATED.match(glslDeclRe);
-    if (!glslMatch) {
-      missingGlslDef.push(fnName);
-    } else if (tsMatch) {
-      const tsArity = countParams(tsMatch[1]!);
-      const glslArity = countParams(glslMatch[1]!);
-      if (tsArity !== glslArity) {
-        arityMismatches.push(`${relPath}:${fnName} (TS=${tsArity}, GLSL=${glslArity})`);
+  const problems: string[] = [];
+  let worst = { deviation: 0, label: '' };
+  for (const m of mirrors) {
+    const label = `${m.glslName} (GLSL) ↔ ${m.tsPath}: ${m.tsName}`;
+    const file = path.resolve(here, '../../../..', m.tsPath);
+    const mod = fs.existsSync(file) ? ((await import(pathToFileURL(file).href)) as Record<string, unknown>) : {};
+    const original = mod[m.tsName];
+    if (typeof original !== 'function') problems.push(`${label}: no such exported function`);
+    else if (original.length !== m.paramTypes.length)
+      problems.push(`${label}: ${original.length} parameters in TypeScript, ${m.paramTypes.length} in GLSL`);
+    else if (!m.glsl) problems.push(`${label}: not translated, ${m.reason}`);
+    else {
+      let largest = { deviation: 0, at: [] as GlslScalar[], ts: 0 as GlslScalar, glsl: 0 as GlslScalar };
+      for (const x of mirrorSamples(m, MIRROR_SAMPLES)) {
+        let ts: GlslScalar, glsl: GlslScalar;
+        try {
+          ts = (original as (...a: GlslScalar[]) => GlslScalar)(...x);
+          glsl = m.glsl(...x);
+        } catch (e) {
+          problems.push(`${label}: throws at (${x.join(', ')}): ${(e as Error).message}`);
+          break;
+        }
+        const deviation = mirrorDeviation(ts, glsl);
+        if (deviation > largest.deviation) largest = { deviation, at: x, ts, glsl };
       }
+      if (largest.deviation > MIRROR_TOLERANCE)
+        problems.push(`${label}: at (${largest.at.join(', ')}) TypeScript ${largest.ts}, GLSL ${largest.glsl}`);
+      else if (largest.deviation > worst.deviation) worst = { deviation: largest.deviation, label };
     }
   }
+  t.diagnostic(
+    `${mirrors.length} GLSL mirrors × ${MIRROR_SAMPLES} samples; largest deviation within tolerance ` +
+      `${worst.deviation.toExponential(1)} of max(1, |y|) (${worst.label})`,
+  );
+  assert.deepEqual(problems, [], `GLSL mirrors that diverge from their TypeScript:\n${problems.join('\n')}`);
+});
 
-  assert.deepEqual(
-    missing,
-    [],
-    `TypeScript functions referenced by GLSL_GENERATED no longer exist: ${missing.join(', ')}`,
-  );
-  assert.deepEqual(
-    missingGlslDef,
-    [],
-    `GLSL definitions missing for annotated entries: ${missingGlslDef.join(', ')}`,
-  );
-  assert.deepEqual(
-    arityMismatches,
-    [],
-    `Parameter arity drift between TypeScript and GLSL_GENERATED: ${arityMismatches.join(', ')}`,
-  );
+test('the mirror translator evaluates scalar GLSL as written and names what it cannot translate', () => {
+  const [scalar, vector, outParam, frameParam, fetched] = glslMirrors([
+    `
+const float K = 0.25;
+#define FRAME_GAIN P(3)
+// src/a.ts: scalar
+float scalar(float x, int n, bool b) {
+  float y = b ? x : -x;
+  for (int j = 0; j < 2; j++) y += K * float(n + j);
+  return smoothstep(0.0, 1.0, y);
+}
+// src/a.ts: vector
+float vector(float x) { vec2 v = vec2(x, 1.0); return v.x; }
+// src/a.ts: outParam
+float outParam(float x, out float y) { y = x; return x; }
+// src/a.ts: frameParam
+float frameParam(float x) { return x * FRAME_GAIN; }
+// src/a.ts: fetched
+float fetched(float x) { return texelFetch(x); }
+`,
+  ]);
+  assert.equal(scalar!.glsl!(-1, 2, true), 0.15625); // y = −1 + 0.25·2 + 0.25·3 = 0.25 → 0.25²·(3 − 0.5)
+  assert.equal(scalar!.glsl!(-1, 2, false), 1);
+  assert.deepEqual(scalar!.paramTypes, ['float', 'int', 'bool']);
+  const sample = mirrorSamples(scalar!, 64);
+  assert.ok(sample.every(([, n, b]) => Number.isInteger(n) && typeof b === 'boolean'));
+  assert.match(vector!.reason!, /vectors/);
+  assert.match(outParam!.reason!, /out float y/);
+  assert.match(frameParam!.reason!, /FRAME_GAIN, P\(3\)/);
+  assert.match(fetched!.reason!, /texelFetch is neither a scalar GLSL built-in/);
+  assert.equal(mirrorDeviation(1, 1 + 2 ** -21), 2 ** -21);
+  assert.equal(mirrorDeviation(NaN, NaN), 0);
+  assert.equal(mirrorDeviation(1, NaN), Infinity);
 });
 
 test('CPU colorMap matches GLSL_PRESENT_FRAG defines, uColorPalette, and formula across all 4 palettes', () => {
