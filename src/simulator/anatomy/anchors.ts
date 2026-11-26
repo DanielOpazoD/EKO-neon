@@ -23,7 +23,7 @@ import {
   torsoToHeart,
 } from './heartFrame';
 import { DESC_AORTA_MAX_OUTER_R, DESC_AORTA_X, DESC_AORTA_Z, SPINE_Z } from './thoraxModel';
-import { LA_WALL_CM, PERICARDIUM_CM } from './classify/pericardium';
+import { buildParietalSac, LA_WALL_CM, PERICARDIUM_CM, type ParietalSac } from './classify/pericardium';
 import { placeVascularNeighbours } from './vascularPlacement';
 import { computeChamberPose } from './heartPose';
 import { classifyChambers } from './classify';
@@ -560,6 +560,12 @@ export interface AnchorsCached extends Anchors {
   colU: Vec3;
   colAorta: Vec3;
   colSpine: Vec3;
+  /**
+   * The fibrous pericardium over an effusion, still while the heart beats and swings inside it (classify/pericardium.ts):
+   * built last, from the final anchors and the end-diastolic heart; null without an effusion and while the anchors are
+   * fitted.
+   */
+  parietal: ParietalSac | null;
 }
 
 export function anchorsCached(m: HeartModel): AnchorsCached {
@@ -581,7 +587,18 @@ export function anchorsCached(m: HeartModel): AnchorsCached {
     const colU = normalize(
       sub(torsoToHeart(m.frame, v3(DESC_AORTA_X, 1, DESC_AORTA_Z + cs)), colAorta),
     );
-    a = { ...base, avE1: e1, avE2: e2, avBend, pvE1, pvE2, colU, colAorta, colSpine };
+    a = {
+      ...base,
+      avE1: e1,
+      avE2: e2,
+      avBend,
+      pvE1,
+      pvE2,
+      colU,
+      colAorta,
+      colSpine,
+      parietal: null,
+    };
     (m as HeartModel & { _anchors?: AnchorsCached })._anchors = a;
     fitOccupiedAtrium(m, a, extremeState(m, true));
     placePulmonaryRoot(m, a);
@@ -595,6 +612,8 @@ export function anchorsCached(m: HeartModel): AnchorsCached {
         ),
       ),
     );
+    if (m.anatomy.pericardium.effusionCm > 0)
+      a.parietal = buildParietalSac(m, a, computeChamberPose(m, extremeState(m, false)));
   }
   return a;
 }

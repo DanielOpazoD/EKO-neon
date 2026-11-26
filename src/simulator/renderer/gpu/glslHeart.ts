@@ -540,6 +540,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // decision 243: the inflow column inside the free wall below the hinges (rv.ts rvInflowSdf)
   float dIn = max(tvInflowSdf(p), length(p.xy) - rvc.z - rvInflowSlack(p.z - (TVS_CZ + tvOffsetAt(p.xy))));
   float dRvU = smin(dRv, dIn, 0.3);
+  // the cavity the RV wall is drawn around, with the outflow tract: read again by the pericardium (rightVentricle.ts)
+  float dCavRv = dRvU;
   {
     float sc = CONTRACTION;
     float fw = rvFreeWallNow(RV_FW, sc);
@@ -559,7 +561,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
       setSample(s, T_VESSEL, -min(dTrunk, PA_WALL_CM - dTrunk), v, p, 0.0, S_PA);
       return true;
     }
-    float dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
+    dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
     float sc3 = 1.0 - 0.3 * sc;
     if (dCavRv < 0.0) {
       if (dRv < 0.0) {
@@ -607,7 +609,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
     float rootGap = rootT > -90.0 ? rootRr - rootR : 1e3;
     float dLvSac = smax(dLvEpi, min(zHinge - LV_SAC_ABOVE_HINGE_CM - z, rootGap - LV_SAC_ROOT_KEEP_CM), 0.2);
     float fw = RV_FW;
-    float dRvEpi = dRvU - fw;
+    // the outer face of the free wall as the RV block draws it now (pericardium.ts)
+    float dRvEpi = dCavRv - rvFreeWallNow(fw, CONTRACTION);
     float dLaEpi = laEpi;
     float dRaEpi = min(min(min(raSleeve + 0.22, raBody - 0.22), raaEpi), raColumn - 0.22); // the atrium's own wall (decision 378), and the vestibule's column (decision 379)
     // the sac around the outflow tract and the trunk stays where the pericardium is anchored (decision 111)
@@ -618,8 +621,9 @@ bool classifyHeart(vec3 p0, out Sample s) {
     float dPaEpi = pulmonaryTrunkEpiDist(p);
     // decision 387: the atrioventricular groove's blend narrows above the groove
     float dEpi = smax(smin(smin(smin(dLvSac, dRvEpi, 0.8), smin(dLaEpi, dRaEpi, 0.8), avGrooveBlend(zHinge - z)), smin(dRvotEpi, dPaEpi, 0.8), 0.8), PERICARDIUM_CM - colDist, 0.2);
-    // decision 383: over an effusion the parietal layer is a smooth envelope, thin behind the left atrium (decision 255)
-    float par = EFFUSION > 0.0 ? parietalSdf(EFFUSION, smin(smin(smin(dLvEpi, dRvEpi, 0.8), smin(sdEllipsoid(p, la, lr + 0.25), sdEllipsoid(p, ra, rar + 0.22), 0.8), 0.8), smin(dRvotEpi, dPaEpi, 0.8), 0.8), (la.y - y) / lr.y, ((x - la.x) / lr.x) * ((x - la.x) / lr.x) + ((z - la.z) / lr.z) * ((z - la.z) / lr.z), colDist) : 1e3;
+    // over an effusion the parietal layer is the fixed sac (pericardium.ts ParietalSac), read before the swing, thin
+    // behind the left atrium (decision 255)
+    float par = EFFUSION > 0.0 ? parietalSdf(EFFUSION, parietalSacDistance(p0.x, p0.y, p0.z), (la.y - y) / lr.y, ((p0.x - la.x) / lr.x) * ((p0.x - la.x) / lr.x) + ((z - la.z) / lr.z) * ((z - la.z) / lr.z), colDist) : 1e3;
     vec3 nEpi = n0;
     if (dEpi < 0.0) {
       setSample(s, T_FAT, dEpi, nEpi, p, 0.0, S_EPI_FAT);

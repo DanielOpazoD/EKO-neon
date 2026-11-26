@@ -218,6 +218,28 @@ float pulmonaryTrunkEpiDist(vec3 p) {
   vec3 paEnd = vec3(PA_EX, PA_EY, PA_EZ);
   return min(sdRoundCone(p, rvotB, paStj, PA_ROOT_R + 0.2, PA_R + 0.2), sdCapsule(p, paStj, paEnd, PA_R + 0.2));
 }
+// signed distance to the full-effusion sac, tabulated around the bounding sphere's centre (pericardium.ts
+// parietalSacDistance, which pericardium.test.ts evaluates this text against): read at the point before the swing
+float parietalSacDistance(float x, float y, float z) {
+  float dx = x - BOUND_CX, dy = y - BOUND_CY, dz = z - BOUND_CZ;
+  float rho = sqrt(dx * dx + dy * dy);
+  float rad = sqrt(rho * rho + dz * dz);
+  float th = rho > 1e-6 ? atan(dy, dx) : 0.0;
+  float phi = atan(rho, dz);
+  float fi = ((th < 0.0 ? th + TWO_PI : th) * float(SAC_AZ_BINS)) / TWO_PI;
+  float fj = (phi * float(SAC_POLAR_BINS - 1)) / PI;
+  int i0 = min(SAC_AZ_BINS - 1, int(floor(fi)));
+  int i1 = i0 == SAC_AZ_BINS - 1 ? 0 : i0 + 1;
+  int j0 = min(SAC_POLAR_BINS - 2, int(floor(fj)));
+  float u = fi - float(i0), v = fj - float(j0);
+  int row0 = SAC_R_BASE + j0 * SAC_AZ_BINS, row1 = row0 + SAC_AZ_BINS;
+  float r00 = P(row0 + i0), r10 = P(row0 + i1), r01 = P(row1 + i0), r11 = P(row1 + i1);
+  float r0 = r00 + (r10 - r00) * u, r1 = r01 + (r11 - r01) * u;
+  float R = r0 + (r1 - r0) * v;
+  float sa = ((r10 - r00 + (r11 - r01 - r10 + r00) * v) * float(SAC_AZ_BINS)) / TWO_PI / (R * max(rho / max(rad, 1e-6), 1e-3));
+  float sp = ((r1 - r0) * float(SAC_POLAR_BINS - 1)) / PI / R;
+  return (rad - R) / sqrt(1.0 + min(9.0, sa * sa + sp * sp));
+}
 /** Beyond the mediastinal fat in front of the pulmonary trunk (greatVessels.ts trunkFrontDistance, decision 336). */
 float trunkFrontDist(vec3 p, float dPaEpi) {
   vec3 tm = p - 0.5 * (vec3(RVOT_BX, RVOT_BY, RVOT_BZ) + vec3(PA_SX, PA_SY, PA_SZ));
