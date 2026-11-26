@@ -49,7 +49,7 @@ import {
   tvShortening,
 } from './valveSkirt';
 import { meanWallThicknessCm, septalCrestFactor, septalShiftAt, wallThicknessAt } from './lvWall';
-import { ahaSegment } from './lvGeometry';
+import { lvRegionalMotion, regionalCavityOffset } from './lvGeometry';
 import { rvFloorZ, rvInflowSdf, rvRadii } from './rv';
 import { anchorsCached } from './anchors';
 import type { HeartModel } from './heartModel';
@@ -230,9 +230,9 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
   const rMax0 = Math.sqrt(
     Math.max(volNow, 5) / (Math.PI * sh.ratio * Math.max(lengthNow, 1) * sh.I),
   );
-  // regional wall-motion abnormalities keep their segments at the end-diastolic radius; the remaining
-  // segments contract more (compensatory hyperkinesia) so that the surface-averaged radius — and the
-  // cavity volume — still follow the tables: R²·(1 − F) + F·R_ED² = R0²
+  // regional wall-motion abnormalities hold their walls toward the end-diastolic radius; the remaining
+  // segments contract more (compensatory hyperkinesia) so that the cavity volume still follows the tables:
+  // R²·(1 − F) + F·R_ED² = R0², F the area-weighted share of the excursion withheld (regionalMeanFraction)
   const F = Math.min(0.6, m.regionalMeanFrac);
   const unflattenedRadius =
     rMax0 < lv.rMax && F > 0
@@ -447,11 +447,11 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
       const px = tv.cx + (tv.R + t) * ca,
         py = tv.cy + (tv.R + t) * sa;
       const az = Math.atan2(py, px);
-      const amp = m.segAmp[ahaSegment(az, levelFrac)] ?? 1;
+      const motion = m.regionalMeanFrac > 0 ? lvRegionalMotion(m.segAmp, az, levelFrac) : 1;
       const rIn =
         lvCavityRadius(sh, prof, az, zb) +
-        wallThicknessAt(m, thickK, az, levelFrac, amp) *
-          septalCrestFactor(az, zb - zAnn) *
+        (regionalCavityOffset(lv, rMax, az, levelFrac, motion) +
+          wallThicknessAt(m, thickK, az, levelFrac, motion) * septalCrestFactor(az, zb - zAnn)) *
           lvRadialOffsetFactor(sh, prof, az, zb) -
         septalShiftAt(septalShiftCm, az, levelFrac) +
         0.05;

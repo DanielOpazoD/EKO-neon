@@ -650,6 +650,9 @@ export function packScene(
   };
   sk('TVS', V.tv);
   d.set(heart.segAmp.subarray(0, 18), PARAM_OFFSET['SEG_AMP']);
+  // slot 0, which no AHA id uses, carries the heart's regionalMeanFrac: 0 when the regional wall-motion field is 1
+  // everywhere, and the shaders then skip it (lvMotionAt in glslHeartChambers.ts)
+  d[PARAM_OFFSET['SEG_AMP']!] = heart.regionalMeanFrac;
   d.set(V.chordae.subarray(0, 60), PARAM_OFFSET['CHORDAE']);
   set('PV_HALF', V.pvHalf);
   set('PV_SEGLEN', V.pvSegLen);

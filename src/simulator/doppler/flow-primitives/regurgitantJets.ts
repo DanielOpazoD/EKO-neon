@@ -1,10 +1,10 @@
 import {
-  ahaSegment,
   heartAnchors,
   ROOT_EXCURSION,
   type HeartModel,
   type HeartPose,
 } from '@/simulator/anatomy/heartModel';
+import { lvRegionalMotion } from '@/simulator/anatomy/lvGeometry';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 import type { FlowPeaks } from '@/simulator/cardiac-cycle/flowPeaks';
@@ -327,7 +327,7 @@ function lvIsoTransientCmps(heart: HeartModel, tables: BeatTables, phase: number
  * Tissue (myocardial) velocity for TDI and Color wall clutter (m/s, heart frame) at heart-frame
  * point (x, y, z): combines longitudinal annular excursion (preserving basal annular cuff velocity
  * before tapering toward the apex, with IVC/IVR transients) and LV radial systolic contraction /
- * diastolic expansion derived from `tables.lvVolumeMl` and modulated by regional `heart.segAmp`.
+ * diastolic expansion derived from `tables.lvVolumeMl` and modulated by the regional wall motion (`lvRegionalMotion`).
  */
 export function sampleTissueVelocity(
   heart: HeartModel,
@@ -408,7 +408,9 @@ export function sampleTissueVelocity(
   const isoCmps = lvIsoTransientCmps(heart, tables, phase);
   const vz = ((mapse * longVel + isoCmps) * (1 - level) * wall) / 100; // cm/s → m/s, +z = toward the apex (systole)
 
-  // LV radial contraction / relaxation velocity projected onto (x, y) / rhoLv and modulated by regional segAmp.
+  // LV radial contraction / relaxation velocity projected onto (x, y) / rhoLv, scaled by the regional field the
+  // classifier draws the wall with (lvRegionalMotion: the endocardium makes that share of the normal excursion, so it
+  // moves at that share of the normal speed, outward where dyskinetic), continuous across the segment borders.
   // Tapers smoothly to 0 at the fibrous mitral annulus (levelFrac <= 0) so basal TDI annular velocities remain exact.
   let vx = 0;
   let vy = 0;
@@ -417,9 +419,9 @@ export function sampleTissueVelocity(
     const levelFrac = Math.min(1, Math.max(0, (z - annulusZ) / Math.max(1, heart.lv.lengthCm - annulusZ)));
     const radialEnv = smoothstep(0, 0.18, levelFrac) * (1 - 0.55 * levelFrac * levelFrac);
     if (radialEnv > 1e-4) {
-      const segAmp = heart.segAmp[ahaSegment(Math.atan2(y, x), levelFrac)] ?? 1;
-      if (segAmp > 1e-4) {
-        const vRadMps = (lvRadialRateCmps(heart, tables, phase) * radialEnv * segAmp) / 100;
+      const motion = lvRegionalMotion(heart.segAmp, Math.atan2(y, x), levelFrac);
+      if (Math.abs(motion) > 1e-4) {
+        const vRadMps = (lvRadialRateCmps(heart, tables, phase) * radialEnv * motion) / 100;
         vx = (x / rhoLv) * vRadMps;
         vy = (y / rhoLv) * vRadMps;
       }
@@ -754,9 +756,9 @@ export function sampleClutterAxialVelocity(
     );
     const radialEnv = smoothstep(0, 0.18, levelFrac) * (1 - 0.55 * levelFrac * levelFrac);
     if (radialEnv > 1e-4) {
-      const segAmp = heart.segAmp[ahaSegment(Math.atan2(y, x), levelFrac)] ?? 1;
-      if (segAmp > 1e-4) {
-        const vRadMps = (ctx.lvRadialRateCmps * radialEnv * segAmp) / 100;
+      const motion = lvRegionalMotion(heart.segAmp, Math.atan2(y, x), levelFrac);
+      if (Math.abs(motion) > 1e-4) {
+        const vRadMps = (ctx.lvRadialRateCmps * radialEnv * motion) / 100;
         vx = (x / rhoLv) * vRadMps;
         vy = (y / rhoLv) * vRadMps;
       }

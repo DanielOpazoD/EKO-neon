@@ -44,15 +44,24 @@ export const WALL_MODULATION_GAIN = 0.08;
 
 /**
  * Local LV wall thickness (cm) at azimuth/level: the end-diastolic thickness of the septum (`ivsd`) between the RV
- * insertions and of the free wall (`lvpwd`) elsewhere (`septalShare`), systolic thickening from wall incompressibility
- * scaled by the segment's motion (akinetic segments barely thicken), and a low-frequency modulation around the wall.
+ * insertions and of the free wall (`lvpwd`) elsewhere (`septalShare`), systolic thickening from wall incompressibility,
+ * and a low-frequency modulation around the wall.
+ *
+ * The thickening follows the local radial excursion: `motion` is the share of the normal excursion the wall makes here
+ * (`lvRegionalMotion`; `regionalCavityOffset` holds its endocardium back by the rest), and an incompressible wall
+ * thickens, to first order, in proportion to how far its endocardium moves in (δt ≈ δr·t/(r + t)), so it gains that share
+ * of the normal thickening thickK − 1. An akinetic wall keeps its end-diastolic thickness and its epicardium stays; a
+ * dyskinetic one (motion < 0), pushed out, thins. It kept 0.35 + 0.65·amplitude of the thickening: the akinetic
+ * mid inferior segment of the inferior infarction (amplitude 0.1) thickened 18 % (0.90 → 1.06 cm at end-systole) with
+ * 0.5 mm of endocardial excursion, and its epicardium moved 1.1 mm outward; it now thickens 4.4 % with 0.8 mm (a tenth
+ * of the normal walls' 42 % and 8 mm), and its epicardium moves 0.4 mm in.
  */
 export function wallThicknessAt(
   m: HeartModel,
   thickK: number,
   az: number,
   levelFrac: number,
-  amp: number,
+  motion: number,
 ): number {
   const lv = m.lv;
   const tBase =
@@ -72,7 +81,7 @@ export function wallThicknessAt(
       ) -
         0.5) *
       (1 - levelFrac * levelFrac);
-  return tED * Math.max(0.6, 1 + (thickK - 1) * (0.35 + 0.65 * amp)) * wallMod;
+  return tED * Math.max(0.6, 1 + (thickK - 1) * motion) * wallMod;
 }
 
 /** Septal shift toward the LV (cm) at azimuth/level: maximal at the mid septum, zero at the free wall, base and apex. */

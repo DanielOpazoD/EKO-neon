@@ -6,9 +6,10 @@ import type { Vec3 } from '@/core/vec3';
 import { add, scale, v3 } from '@/core/vec3';
 import {
   lvGeometryFromVolume,
+  lvRegionalMotion,
+  regionalCavityOffset,
   regionalMeanFraction,
   segmentAmplitudes,
-  ahaSegment,
   type LvGeometry,
   type SegmentAmplitudes,
 } from './lvGeometry';
@@ -55,7 +56,10 @@ export interface HeartModel {
   boundCenter: Vec3;
   /** Lattice for wall-thickness modulation (seeded). */
   wallNoise: Uint8Array;
-  /** Surface-weighted mean of (1 − amplitude) over the 17 segments: the outward cavity shift that akinetic segments add. */
+  /**
+   * Share of the systolic excursion the regional abnormalities withhold, integrated over the regional field
+   * (`regionalMeanFraction`); 0 when the case has none, and then nothing evaluates the field.
+   */
   regionalMeanFrac: number;
   /** Inferior vena cava diameter reduction 0..1 for the current respiratory state (sniff / inspiration). */
   ivcCollapse: number;
@@ -80,16 +84,17 @@ export function createHeartModel(
     anatomy.lv,
     anatomy.mitral.annulusDiameterCm / 2,
   );
+  const segAmp = segmentAmplitudes(anatomy);
   return {
     anatomy,
     physiology,
     lv,
-    segAmp: segmentAmplitudes(anatomy),
+    segAmp,
     frame: buildHeartFrame(anatomy, offset),
     boundRadius: lv.lengthCm * 0.5 + 8.5,
     boundCenter: v3(-1.2, 0.2, lv.lengthCm * 0.5 - 1.5),
     wallNoise: noiseLattice(seed ^ 0x5157),
-    regionalMeanFrac: regionalMeanFraction(segmentAmplitudes(anatomy)),
+    regionalMeanFrac: regionalMeanFraction(segAmp, lv.shape),
     ivcCollapse: Math.min(0.95, Math.max(0, ivcCollapse)),
     columnShiftCm,
     descAortaAreaStrain: 0,
@@ -206,7 +211,10 @@ export function lvCavityRadiusAt(m: HeartModel, hp: ChamberPose, az: number, z: 
   return lvCavityRadius(m.lv.shape, hp.prof, az, z);
 }
 
-/** LV epicardial radius at azimuth `az` and height `z`: cavity radius plus the local wall thickness (radial). */
+/**
+ * LV epicardial radius at azimuth `az` and height `z`: cavity radius plus the regional offset of the endocardium and the
+ * local wall thickness (radial), as the classifier draws them.
+ */
 export function lvEpicardialRadiusAt(
   m: HeartModel,
   hp: ChamberPose,
@@ -214,11 +222,11 @@ export function lvEpicardialRadiusAt(
   z: number,
 ): number {
   const levelFrac = Math.min(1, Math.max(0, (z - hp.zAnn) / Math.max(hp.lengthNow, 1)));
-  const amp = m.segAmp[ahaSegment(az, levelFrac)] ?? 1;
+  const motion = m.regionalMeanFrac > 0 ? lvRegionalMotion(m.segAmp, az, levelFrac) : 1;
   return (
     lvCavityRadius(m.lv.shape, hp.prof, az, z) +
-    wallThicknessAt(m, hp.thickK, az, levelFrac, amp) *
-      septalCrestFactor(az, z - hp.zAnn) *
+    (regionalCavityOffset(m.lv, hp.rMax, az, levelFrac, motion) +
+      wallThicknessAt(m, hp.thickK, az, levelFrac, motion) * septalCrestFactor(az, z - hp.zAnn)) *
       lvRadialOffsetFactor(m.lv.shape, hp.prof, az, z)
   );
 }

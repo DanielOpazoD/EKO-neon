@@ -1,10 +1,11 @@
 import { Structure, Tissue } from '../tissue';
 import { sdRoundCone, smax, smin } from '../sdf';
-import { lvCavitySdf, lvProfileG } from '../lvShape';
+import { lvCavitySdf } from '../lvShape';
 import { fastAtan2, latticeNoise3 } from '@/core/noise';
 import { insideMitralOutline, mitralHingeZ, mitralInflowSdf } from '../mitralValve';
 import { septalCrestFactor, septalShiftAt, wallThicknessAt } from '../lvWall';
-import { aha17FromCode, lvSegmentCode, lvWallKind } from '../lvSegments';
+import { lvSegmentCode, lvWallKind } from '../lvSegments';
+import { lvRegionalMotion, regionalCavityOffset } from '../lvGeometry';
 import { setSample, type ClassifyCtx } from './context';
 import { LV_WALL_BASAL_OVERHANG_CM } from '../heartFrame';
 
@@ -17,7 +18,7 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
   const lv = m.lv;
   const zAnn = hp.zAnn;
   const V = hp.valves;
-  // local wall thickness by azimuth (septal thicker if IVS > PW) & level, regional motion by segment
+  // local wall thickness by azimuth (septal thicker if IVS > PW) & level, regional motion across the segments
   const az = fastAtan2(y, x);
   const levelFrac = Math.min(1, Math.max(0, (z - zAnn) / Math.max(hp.lengthNow, 1)));
   c.az = az;
@@ -35,13 +36,19 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
   c.nx0 = nx0;
   c.ny0 = ny0;
   c.nz0 = nz0;
-  // segment of the tissue here (decision 152): its identity, and the regional amplitude of its AHA segment
+  // segment of the tissue here (decision 152)
   const segCode = lvSegmentCode(az, levelFrac, A.rvAzA, A.rvAzP);
-  const amp = m.segAmp[aha17FromCode(segCode)] ?? 1;
-  // Regional wall motion: an akinetic segment keeps its end-diastolic radius → local cavity SDF shifted outward
-  const regional = amp < 1 ? (1 - amp) * (lv.rMax - hp.rMax) * lvProfileG(sh, levelFrac) : 0;
+  // Regional wall motion, continuous across the segment borders: the share of the normal excursion the wall makes here
+  // (1 when the case has no regional abnormality). An akinetic wall keeps its end-diastolic radius → the local cavity SDF
+  // is shifted outward by the excursion it withholds, and the wall keeps its end-diastolic thickness (wallThicknessAt).
+  const motion = m.regionalMeanFrac > 0 ? lvRegionalMotion(m.segAmp, az, levelFrac) : 1;
+  const regional = regionalCavityOffset(lv, hp.rMax, az, levelFrac, motion);
   const rsc = hp.radialScale;
   const lsc = hp.longScale;
+  // The wall's own radial scale: its endocardium is at that share of its end-diastolic radius, so its material
+  // coordinates (speckle, trabeculae) stay with the tissue. With the global scale an akinetic wall, which stays where it
+  // was, read material points up to 45 % further out at end-systole, and its speckle swept through it as if it moved.
+  const rscWall = rsc + (1 - motion) * (1 - rsc);
   // trabeculation: rough endocardium with longitudinal ridges (material coordinates, so it moves with the
   // wall), growing from the mid cavity to the apex
   const trab =
@@ -49,8 +56,8 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
       ? 0.2 *
         Math.min(1, (levelFrac - 0.45) / 0.35) *
         (latticeNoise3(
-          (x / rsc) * 2.6 + 11.3,
-          (y / rsc) * 2.6 + 2.9,
+          (x / rscWall) * 2.6 + 11.3,
+          (y / rscWall) * 2.6 + 2.9,
           ((z - lv.lengthCm) / lsc) * 1.1 + 6.1,
           m.wallNoise,
         ) -
@@ -59,7 +66,7 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
   // Radial regional motion cannot displace the basal clipping plane into the atrium.
   // Apply deformation before intersecting the ventricular half-space (decision 291).
   const dCavR = smax(dProf - regional + trab, zAnn - z, 0.6);
-  const tFull = wallThicknessAt(m, hp.thickK, az, levelFrac, amp);
+  const tFull = wallThicknessAt(m, hp.thickK, az, levelFrac, motion);
   // the septum narrows under the membranous septum (decision 223); the atrium and the ventricle take the space
   const tNow = tFull * septalCrestFactor(az, z - zAnn);
   c.crestLoss = tFull - tNow;
@@ -77,7 +84,10 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
   const dLvBlood = smin(dCavR, dInflow, 0.3);
   // these are read by the aortic root, atria and pericardium blocks even when this one classifies nothing
   const wallT = tNow;
-  const dEllR = smin(dProf, dInflow, 0.3) - regional;
+  // the regional offset moves the profile, as in the cavity above, not the inflow column: offset after the union, it
+  // pushed the column out too, and at end-systole the akinetic basal inferior wall began 1-5 mm outside the blood, the
+  // gap between them filled by the epicardial fat of the blocks below
+  const dEllR = smin(dProf - regional, dInflow, 0.3);
   c.wallT = wallT;
   c.dEllR = dEllR;
   c.inAnnularRegion = dEllR < 0 && z < zAnn && !inRootLumen;
@@ -157,8 +167,8 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
       sign * nx0,
       sign * ny0,
       sign * nz0,
-      x / rsc,
-      y / rsc,
+      x / rscWall,
+      y / rscWall,
       (z - lv.lengthCm) / lsc,
       0,
       structure,

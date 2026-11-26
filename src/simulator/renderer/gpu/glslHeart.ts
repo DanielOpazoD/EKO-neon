@@ -153,14 +153,16 @@ bool classifyHeart(vec3 p0, out Sample s) {
   float xs = x - septalShift;
   vec3 n0;
   float dProf = lvCavitySdf(xs, y, z, n0);
-  int seg = ahaSegment(az, levelFrac);
-  float amp = P(SEG_AMP_BASE + seg);
-  // an akinetic segment keeps its end-diastolic radius; a hyperkinetic one (amp > 1) adds nothing, as on the CPU
-  float regional = amp < 1.0 ? (1.0 - amp) * (LV_RMAX_ED - LV_RMAX) * lvProfileG(levelFrac) : 0.0;
+  // regional wall motion, continuous across the segment borders (lvRegionalMotion, as on the CPU): an akinetic wall keeps
+  // its end-diastolic radius and thickness
+  float motion = lvMotionAt(az, levelFrac);
+  float regional = regionalCavityOffset(az, levelFrac, motion);
   float rs = RADIAL_SCALE, ls = LONG_SCALE;
-  float trab = levelFrac > 0.45 ? 0.2 * min(1.0, (levelFrac - 0.45) / 0.35) * (lat(vec3((x / rs) * 2.6 + 11.3, (y / rs) * 2.6 + 2.9, ((z - LV_LEN) / ls) * 1.1 + 6.1), 3) - 0.5) : 0.0;
+  // the wall's own radial scale, so that its speckle and trabeculae stay with the tissue (leftVentricle.ts)
+  float rsWall = rs + (1.0 - motion) * (1.0 - rs);
+  float trab = levelFrac > 0.45 ? 0.2 * min(1.0, (levelFrac - 0.45) / 0.35) * (lat(vec3((x / rsWall) * 2.6 + 11.3, (y / rsWall) * 2.6 + 2.9, ((z - LV_LEN) / ls) * 1.1 + 6.1), 3) - 0.5) : 0.0;
   float dCavR = smax(dProf - regional + trab, zAnn - z, 0.6);
-  float tFull = wallThicknessAt(az, levelFrac, amp);
+  float tFull = wallThicknessAt(az, levelFrac, motion);
   // decision 223
   float tNow = tFull * septalCrestFactor(az, z - zAnn);
   float crestLoss = tFull - tNow;
@@ -181,7 +183,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
     return true;
   }
   float wallT = tNow;
-  float dEllR = smin(dProf, dInflow, 0.3) - regional;
+  // the regional offset moves the profile, not the inflow column, as in the cavity (leftVentricle.ts)
+  float dEllR = smin(dProf - regional, dInflow, 0.3);
   // apical to the hinge at this azimuth, not to the mean annular plane (decision 327)
   if (dEllR + trab >= 0.0 && dEllR < wallT && z >= zHinge - LV_WALL_BASAL_OVERHANG_CM && !inOutflowLumen) {
     // the wall label follows the AHA wall of the segment, bounded by the RV insertions (lvSegments.ts, decision 154)
@@ -193,7 +196,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // only the smooth epicardium reflects coherently; the trabeculated endocardium scatters (decision 144)
     float dIn = nearEpi ? -(wallT - dEllR) : -wallT;
     float sg = nearEpi ? 1.0 : -1.0;
-    setSample(s, T_MYO, dIn, sg * n0, vec3(x / rs, y / rs, (z - LV_LEN) / ls), 0.0, structure);
+    setSample(s, T_MYO, dIn, sg * n0, vec3(x / rsWall, y / rsWall, (z - LV_LEN) / ls), 0.0, structure);
     s.transmural = clamp(dEllR / wallT, 0.0, 1.0);
     s.segment = int(segCode + 0.5);
     return true;

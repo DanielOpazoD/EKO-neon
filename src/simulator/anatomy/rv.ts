@@ -1,6 +1,6 @@
 import { lvCavityRadius, lvRadialOffsetFactor, type LvProfileTable } from './lvShape';
 import { latticeNoise3 } from '@/core/noise';
-import { ahaSegment } from './lvGeometry';
+import { lvRegionalMotion, regionalCavityOffset } from './lvGeometry';
 import { septalCrestFactor, septalShiftAt, wallThicknessAt } from './lvWall';
 import { tvShortening, TWO_PI, skirtOffsetAt, tvInflowSdf, type SkirtDesc } from './valveSkirt';
 import type { AnchorsCached } from './anchors';
@@ -184,12 +184,16 @@ export function rvRadii(
   const sh = m.lv.shape;
   const azN = az < 0 ? az + TWO_PI : az;
   const u = (azN - A.rvAzA) / (A.rvAzP - A.rvAzA);
-  const rCav = lvCavityRadius(sh, prof, az, z);
   const levelFrac = Math.min(1, Math.max(0, (z - zAnn) / Math.max(lengthNow, 1)));
-  const amp = m.segAmp[ahaSegment(az, levelFrac)] ?? 1;
+  // the LV epicardium as the classifier draws it: a wall that withholds its excursion (lvRegionalMotion) keeps its
+  // endocardium out and its thickness, and the crescent rests on it instead of reaching into it
+  const motion = m.regionalMeanFrac > 0 ? lvRegionalMotion(m.segAmp, az, levelFrac) : 1;
+  const radialFactor = lvRadialOffsetFactor(sh, prof, az, z);
+  const rCav =
+    lvCavityRadius(sh, prof, az, z) +
+    regionalCavityOffset(m.lv, prof.rMax, az, levelFrac, motion) * radialFactor;
   // the septal crest gives its thickness to the ventricle, whose free wall stays (decision 223)
-  const wFull =
-    wallThicknessAt(m, thickK, az, levelFrac, amp) * lvRadialOffsetFactor(sh, prof, az, z);
+  const wFull = wallThicknessAt(m, thickK, az, levelFrac, motion) * radialFactor;
   // below the tricuspid plane only: above it the space beside the crest is the atrium's (a smooth 0.3 cm step)
   const below = Math.min(1, Math.max(0, (z - (A.tvCenter.z + tvZ - 0.6)) / 0.3));
   const crestLoss = wFull * (1 - septalCrestFactor(az, z - zAnn)) * below * below * (3 - 2 * below);
