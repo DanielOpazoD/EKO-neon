@@ -89,14 +89,58 @@ export interface IqTone {
   accelMps2?: number;
 }
 
+let envScratch = new Float64Array(SPECTRAL_BINS);
+
 /**
- * Complex baseband from discrete slow-time phase increments 2*pi*(2*f0*v/c)/PRF.
- * Aliasing emerges directly from discrete slow-time sampling whenever |v| > c*PRF/(4*f0),
- * finite scatterer dwell time modulates amplitude across the packet for physical transit broadening,
- * and axial acceleration integrates exact quadratic slow-time phase (intra-packet Doppler chirp).
+ * Fill `out[0..n-1]` with `exp(-(i - center)^2 * inv2Sig2)` using an exact float64 outward
+ * recurrence from the nearest peak sample `k0`, avoiding underflow and replacing 2*N `Math.exp`
+ * calls per tone with 4 `Math.exp` calls. Returns the RMS power-preserving normalization factor.
  */
-export function synthesizeIq(
+function fillGaussianEnvelope(
+  n: number,
+  center: number,
+  inv2Sig2: number,
+  out: Float64Array,
+): number {
+  const k0 = Math.max(0, Math.min(n - 1, Math.round(center)));
+  const d0 = k0 - center;
+  const peak = Math.exp(-d0 * d0 * inv2Sig2);
+  out[k0] = peak;
+  let energy = peak * peak;
+  const stepDecay = Math.exp(-2 * inv2Sig2);
+
+  let val = peak;
+  let rRight = Math.exp(-(2 * d0 + 1) * inv2Sig2);
+  for (let i = k0 + 1; i < n; i++) {
+    val *= rRight;
+    if (val < 1e-16) {
+      out.fill(0, i, n);
+      break;
+    }
+    out[i] = val;
+    energy += val * val;
+    rRight *= stepDecay;
+  }
+
+  val = peak;
+  let rLeft = Math.exp((2 * d0 - 1) * inv2Sig2);
+  for (let i = k0 - 1; i >= 0; i--) {
+    val *= rLeft;
+    if (val < 1e-16) {
+      out.fill(0, 0, i + 1);
+      break;
+    }
+    out[i] = val;
+    energy += val * val;
+    rLeft *= stepDecay;
+  }
+
+  return Math.sqrt(n / Math.max(1e-6, energy));
+}
+
+function synthesizeIqRange(
   tones: readonly IqTone[],
+  count: number,
   frequencyMHz: number,
   prfHz: number,
   timeS: number,
@@ -106,13 +150,19 @@ export function synthesizeIq(
   re.fill(0);
   im.fill(0);
   const n = re.length;
+  if (n > envScratch.length) envScratch = new Float64Array(n);
+  const env = envScratch;
   const dt = 1 / prfHz;
   const packetDurationS = n * dt;
   const halfIdx = 0.5 * (n - 1);
-  for (const tone of tones) {
+  const twoPi = 2 * Math.PI;
+  const dopplerScale = (2 * frequencyMHz * 1e6) / SPEED_OF_SOUND_MPS;
+
+  for (let t = 0; t < count; t++) {
+    const tone = tones[t]!;
     if (!(tone.power > 0)) continue;
-    const fd = (2 * frequencyMHz * 1e6 * tone.velocityMps) / SPEED_OF_SOUND_MPS;
-    const angle = (2 * Math.PI * fd) / prfHz;
+    const fd = dopplerScale * tone.velocityMps;
+    const angle = (twoPi * fd) / prfHz;
     const baseAmp = Math.sqrt(tone.power);
     const accel = tone.accelMps2 ?? 0;
     const useChirp = Math.abs(accel) > 0.25;
@@ -121,14 +171,14 @@ export function synthesizeIq(
 
     if (useChirp) {
       // Exact quadratic phase centred at packet midpoint: v(t_rel) = v + a * t_rel
-      const chirpCoeff = (2 * Math.PI * frequencyMHz * 1e6 * accel) / SPEED_OF_SOUND_MPS;
+      const chirpCoeff = (Math.PI * dopplerScale) * accel;
       const chirpStep = chirpCoeff * dt * dt;
       const centerTimeS = timeS + halfIdx * dt;
       const tRel0 = -halfIdx * dt;
       const phi0 =
         tone.phaseRad +
-        2 * Math.PI * fd * centerTimeS +
-        2 * Math.PI * fd * tRel0 +
+        twoPi * fd * centerTimeS +
+        twoPi * fd * tRel0 +
         chirpCoeff * tRel0 * tRel0;
       let ar = baseAmp * Math.cos(phi0);
       let ai = baseAmp * Math.sin(phi0);
@@ -142,16 +192,9 @@ export function synthesizeIq(
         const center = (tone.transitCenterFrac ?? 0.5) * (n - 1);
         const sigmaIdx = Math.max(2.5, (tau * 0.55) / dt);
         const inv2Sig2 = 1 / (2 * sigmaIdx * sigmaIdx);
-        let envEnergy = 0;
+        const envNorm = fillGaussianEnvelope(n, center, inv2Sig2, env);
         for (let i = 0; i < n; i++) {
-          const d = i - center;
-          const e = Math.exp(-d * d * inv2Sig2);
-          envEnergy += e * e;
-        }
-        const envNorm = Math.sqrt(n / Math.max(1e-6, envEnergy));
-        for (let i = 0; i < n; i++) {
-          const d = i - center;
-          const w = Math.exp(-d * d * inv2Sig2) * envNorm;
+          const w = env[i]! * envNorm;
           re[i] = re[i]! + ar * w;
           im[i] = im[i]! + ai * w;
           const nextA = ar * wr - ai * wi;
@@ -178,7 +221,7 @@ export function synthesizeIq(
 
     const c = Math.cos(angle);
     const s = Math.sin(angle);
-    const phase = tone.phaseRad + 2 * Math.PI * fd * timeS;
+    const phase = tone.phaseRad + twoPi * fd * timeS;
     let ar = baseAmp * Math.cos(phase);
     let ai = baseAmp * Math.sin(phase);
     if (useTransit) {
@@ -186,16 +229,9 @@ export function synthesizeIq(
       const center = (tone.transitCenterFrac ?? 0.5) * (n - 1);
       const sigmaIdx = Math.max(2.5, (tau * 0.55) / dt);
       const inv2Sig2 = 1 / (2 * sigmaIdx * sigmaIdx);
-      let envEnergy = 0;
+      const envNorm = fillGaussianEnvelope(n, center, inv2Sig2, env);
       for (let i = 0; i < n; i++) {
-        const d = i - center;
-        const e = Math.exp(-d * d * inv2Sig2);
-        envEnergy += e * e;
-      }
-      const envNorm = Math.sqrt(n / Math.max(1e-6, envEnergy));
-      for (let i = 0; i < n; i++) {
-        const d = i - center;
-        const w = Math.exp(-d * d * inv2Sig2) * envNorm;
+        const w = env[i]! * envNorm;
         re[i] = re[i]! + ar * w;
         im[i] = im[i]! + ai * w;
         const next = ar * c - ai * s;
@@ -212,6 +248,23 @@ export function synthesizeIq(
       }
     }
   }
+}
+
+/**
+ * Complex baseband from discrete slow-time phase increments 2*pi*(2*f0*v/c)/PRF.
+ * Aliasing emerges directly from discrete slow-time sampling whenever |v| > c*PRF/(4*f0),
+ * finite scatterer dwell time modulates amplitude across the packet for physical transit broadening,
+ * and axial acceleration integrates exact quadratic slow-time phase (intra-packet Doppler chirp).
+ */
+export function synthesizeIq(
+  tones: readonly IqTone[],
+  frequencyMHz: number,
+  prfHz: number,
+  timeS: number,
+  re: Float64Array,
+  im: Float64Array,
+): void {
+  synthesizeIqRange(tones, tones.length, frequencyMHz, prfHz, timeS, re, im);
 }
 
 const PACKET = SPECTRAL_BINS;
@@ -234,6 +287,7 @@ const HALF_NORMAL_QUANTILES = [
 const MICROSCATTERERS = HALF_NORMAL_QUANTILES.length;
 const re = new Float64Array(PACKET),
   im = new Float64Array(PACKET);
+const tonePool: IqTone[] = [];
 const hannCache = new Map<number, { win: Float64Array; power: number }>();
 function hannWindowFor(len: number): { win: Float64Array; power: number } {
   let entry = hannCache.get(len);
@@ -290,7 +344,7 @@ export function accumulatePulsedSpectrum(
   const tCell = Math.floor(timeS / Math.max(1e-4, activeDurationS * 0.5));
   const packetSeed = (seed ^ Math.imul(tCell, 0x9e3779b1)) | 0;
   for (let ensemble = 0; ensemble < REALIZATIONS; ensemble++) {
-    const tones: IqTone[] = [];
+    let toneCount = 0;
     for (let j = 0; j < samples.length; j++) {
       const p = samples[j]!;
       if (!(p.weight > 0)) continue;
@@ -300,27 +354,47 @@ export function accumulatePulsedSpectrum(
       const gateLen = p.gateLengthCm ?? s.gateLengthCm;
       const tau = scattererTransitTimeS(p.v, p.vPerp ?? 0, depth, p.focusCm ?? focusCm, gateLen);
       const baseAccel = p.accelMps2 ?? 0;
+      const subPower = p.weight / MICROSCATTERERS;
+      const absV = Math.abs(p.v);
+      const signV = Math.sign(p.v);
+      const hasV = absV > 0.05;
       for (let k = 0; k < MICROSCATTERERS; k++) {
         // Half-normal deceleration, capped at zero; aperture rays span D/F uniformly.
-        const turbulent = Math.min(
-          Math.abs(p.v),
-          0.9 * p.dispersion * Math.abs(p.v) * HALF_NORMAL_QUANTILES[k]!,
-        );
+        const turbulent = Math.min(absV, 0.9 * p.dispersion * absV * HALF_NORMAL_QUANTILES[k]!);
         const geometric = aperture * (hash3(j, k, ensemble + 103, packetSeed) - 0.5);
-        const v = p.v - Math.sign(p.v) * turbulent + geometric;
-        const accelScale = Math.abs(p.v) > 0.05 ? Math.max(0, Math.min(1.2, v / p.v)) : 1;
-        tones.push({
-          velocityMps: v,
-          power: p.weight / MICROSCATTERERS,
-          phaseRad: 2 * Math.PI * hash3(j, k, ensemble + 211, packetSeed),
-          transitTimeS: tau,
-          transitCenterFrac: 0.25 + 0.5 * hash3(j, k, ensemble + 307, packetSeed),
-          accelMps2: baseAccel * accelScale,
-        });
+        const v = p.v - signV * turbulent + geometric;
+        const accelScale = hasV ? Math.max(0, Math.min(1.2, v / p.v)) : 1;
+        let slot = tonePool[toneCount];
+        if (!slot) {
+          slot = {
+            velocityMps: 0,
+            power: 0,
+            phaseRad: 0,
+            transitTimeS: undefined,
+            transitCenterFrac: 0.5,
+            accelMps2: 0,
+          };
+          tonePool[toneCount] = slot;
+        }
+        slot.velocityMps = v;
+        slot.power = subPower;
+        slot.phaseRad = 2 * Math.PI * hash3(j, k, ensemble + 211, packetSeed);
+        slot.transitTimeS = tau;
+        slot.transitCenterFrac = 0.25 + 0.5 * hash3(j, k, ensemble + 307, packetSeed);
+        slot.accelMps2 = baseAccel * accelScale;
+        toneCount++;
       }
     }
     // Strip timestamps denote the active packet centre, not its first pulse.
-    synthesizeIq(tones, frequencyMHz, prfHz, timeS - activeDurationS / 2, activeRe, activeIm);
+    synthesizeIqRange(
+      tonePool,
+      toneCount,
+      frequencyMHz,
+      prfHz,
+      timeS - activeDurationS / 2,
+      activeRe,
+      activeIm,
+    );
     for (let i = 0; i < activePulses; i++) {
       re[i] = re[i]! * win[i]!;
       im[i] = im[i]! * win[i]!;

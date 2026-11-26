@@ -1,4 +1,5 @@
 import type { SimOutput, SimRequest, SimResponse } from '@/simulator/core/protocol';
+import { dopplerPerfMonitor } from '@/simulator/doppler/dopplerPerf';
 
 /**
  * Hand-off between the simulation loop and the display canvas. The latest composite frame is
@@ -21,6 +22,9 @@ export const frameBus = {
     };
   },
   emit(out: SimOutput): void {
+    if (out.dopplerPerf && !out.frozen) {
+      dopplerPerfMonitor.record(out.dopplerPerf);
+    }
     if (listeners.size === 0) {
       // no display mounted (report, references, curriculum or progress screen): acknowledge the frame at once,
       // otherwise the worker keeps two frames outstanding and drops every later one until the case reloads

@@ -27,6 +27,7 @@ export interface CompositeTiming {
   consoleMs: number;
   cineMs: number;
   presentMs: number;
+  overlayColorMs?: number;
 }
 
 export interface CompositeContext {
@@ -166,11 +167,15 @@ export class FrameCompositor {
 
     const buffer = bitmap ? new ArrayBuffer(0) : this.takeBuffer(W * H * 4);
     const rgba = new Uint8ClampedArray(buffer);
+    ctx.timing.overlayColorMs = 0;
     if (!bitmap) {
       const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
       scanConvertLut(display, this.lut, sectorRgba, tintMap);
-      if (colorVel && colorVar)
+      if (colorVel && colorVar) {
+        const tOv = performance.now();
         overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings, colorPower);
+        ctx.timing.overlayColorMs = performance.now() - tOv;
+      }
     }
     if (isStrip) {
       rgba.fill(0, W * sectorH * 4);

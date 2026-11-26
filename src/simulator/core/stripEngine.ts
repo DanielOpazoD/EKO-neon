@@ -16,10 +16,18 @@ import {
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
 import {
+  presentSpectralColumn,
   SPECTRAL_BINS,
   spectralRange,
   type SpectralSettings,
 } from '@/simulator/doppler/spectral/spectrum';
+import { valveClickSignal } from '@/simulator/doppler/spectral/valveClicks';
+import { DUPLEX_BMODE_SHARE } from '@/simulator/renderer/pulseTiming';
+import {
+  createSpectralFrameTiming,
+  resetSpectralFrameTiming,
+  type SpectralFrameTiming,
+} from '@/simulator/doppler/dopplerPerf';
 import { depthLimitedPulsedAcquisition } from '@/simulator/doppler/spectral/scatteringModel';
 import { pulsedAcquisition } from '@/simulator/renderer/pulseTiming';
 import type { BeamFrame } from '@/simulator/probe/pose';
@@ -46,7 +54,15 @@ import {
 import type { GateInfo, SimInput, SimRequest, SimResponse, StripInfo } from './protocol';
 import { autoTraceSpectralEnvelope, STRIP_MM_WIDTH } from './strip/autoTrace';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
-import { drawSweepMarker, paintMmodeStripColumn, renderSpectralStripRgba } from './strip/stripPainter';
+import { relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
+import {
+  buildSpectralRowMap,
+  drawSweepMarker,
+  paintMmodeStripColumn,
+  paintSpectralStripColumn,
+  renderSpectralStripRgba,
+  type SpectralRowMap,
+} from './strip/stripPainter';
 import { StripTimeGrid } from './stripTimeGrid';
 import { resolveFrozenColorSettings, stripAcquisitionKey } from './acquisitionKeys';
 
@@ -127,12 +143,49 @@ export class StripEngine {
   /** The strip as displayed (RGBA, strip rows × columns), repainted one column at a time; its layout key. */
   private stripRgba: Uint8ClampedArray | null = null;
   private stripRgbaKey = '';
+  private spectralRgba: Uint8ClampedArray | null = null;
+  private spectralRgbaKey = '';
+  private spectralRowMap: SpectralRowMap | null = null;
+  private lastSpectralReject = 0;
+  private lastSpectralYbRel = -1;
+  private spectralColScratch = new Float32Array(SPECTRAL_BINS);
+  private spectralDispScratch = new Float32Array(SPECTRAL_BINS);
+  /** Per-phase-bin central-ray attenuation cache (128 bins/cycle) keyed by pose, physics, model & tables. */
+  private rayAccessKey = '';
+  private rayAccessBins: Array<((depthCm: number) => number) | undefined> = new Array(128);
+  /** Per-phase-bin raw CW spectrum cache (192 bins/cycle, ~4.4 ms/bin) keyed by pose, depth, CW scale/WF/invert, model & tables. */
+  private cwRawKey = '';
+  private cwRawBins: Array<
+    | {
+        rawColumn: Float32Array;
+        clickPoints: number[];
+        clickPowers: number[];
+        rayHeartDir: { x: number; y: number; z: number };
+      }
+    | undefined
+  > = new Array(192);
   private lastTintMap: TintMapId | undefined = undefined;
   private rowMap: RowMap | null = null;
   /** Peak flow vector over the cycle at the last gate position (heart frame), keyed by that position. */
   private gateFlow: GateFlowCache = { key: '', best: 0, bx: 0, by: 0, bz: 0 };
   private flowSample: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
   private tissueSample = makeSample();
+  private stepTiming: SpectralFrameTiming = createSpectralFrameTiming();
+  private cmmColorMs = 0;
+
+  /** Reset per-step Doppler timing accumulators at the beginning of a simulation step. */
+  resetStepTiming(): void {
+    resetSpectralFrameTiming(this.stepTiming);
+    this.cmmColorMs = 0;
+  }
+
+  get lastStepTiming(): Readonly<SpectralFrameTiming> {
+    return this.stepTiming;
+  }
+
+  get lastCmmColorMs(): number {
+    return this.cmmColorMs;
+  }
 
   /** Reset on a modality or acquisition-calibration change; old columns must not acquire new units. */
   reset(): void {
@@ -143,6 +196,10 @@ export class StripEngine {
     this.stripKind = null;
     this.lastColumn = null;
     this.acquired = null;
+    this.spectralRgba = null;
+    this.spectralRgbaKey = '';
+    this.rayAccessKey = '';
+    this.cwRawKey = '';
   }
 
   get historyId(): number {
@@ -295,43 +352,189 @@ export class StripEngine {
       this.stripSpan = new Uint16Array(stripWidth);
       this.stripRgba = null;
       this.stripRgbaKey = '';
+      this.spectralRgba = null;
+      this.spectralRgbaKey = '';
       this.mmodeSamples = lineSamples;
     }
     const times = this.timeline.advance(ctx.timeS, dt, cps);
     if (kind === 'm-mode') {
+      const tMm = cmm ? performance.now() : 0;
       this.advanceMmode(times, cps, ctx.rrS, ctx.phaseNow, traceBudgetMs, beam, spec, ctx);
+      if (cmm) {
+        this.cmmColorMs += performance.now() - tMm;
+        this.stepTiming.columns += times.length;
+      }
       return;
     }
+    const theta = Math.max(-spec.sectorRad / 2, Math.min(spec.sectorRad / 2, inp.cursorThetaRad));
+    const ct = Math.cos(theta);
+    const sn = Math.sin(theta);
+    const rayDir = {
+      x: beam.forward.x * ct + beam.lateral.x * sn,
+      y: beam.forward.y * ct + beam.lateral.y * sn,
+      z: beam.forward.z * ct + beam.lateral.z * sn,
+    };
     for (const timeS of times) {
+      const tMoment = performance.now();
       const moment = ctx.moment(timeS);
+      this.stepTiming.momentSetupMs += performance.now() - tMoment;
       const phase = moment.phase;
       const col = this.stripHead % this.stripCols;
-      const signal = sampleSpectralColumn(
-        beam,
-        spec,
-        phase,
-        col,
-        this.stripHead,
-        timeS,
-        {
-          ...ctx,
-          heart: moment.scene.heart,
-          tables: moment.tables,
-          flow: moment.flow,
-          scene: () => moment.scene,
-        },
-        this.flowSample,
-        this.tissueSample,
-      );
-      this.stripSpectral!.set(signal.column, col * SPECTRAL_BINS);
-      this.stripDisplay!.set(signal.display, col * SPECTRAL_BINS);
-      this.lastColumn = signal.column;
+      const sc = moment.scene;
+      const rayKey = [
+        beam.origin.x.toFixed(4),
+        beam.origin.y.toFixed(4),
+        beam.origin.z.toFixed(4),
+        rayDir.x.toFixed(5),
+        rayDir.y.toFixed(5),
+        rayDir.z.toFixed(5),
+        beam.contact.toFixed(4),
+        sc.physics.frequencyMHz,
+        (sc.physics.windowAttenuation ?? 0).toFixed(4),
+        sc.thorax.lungShiftCm.toFixed(3),
+        sc.thorax.diaphragmRiseCm.toFixed(3),
+        ctx.modelVersion,
+        moment.tablesVersion,
+      ].join('|');
+      if (this.rayAccessKey !== rayKey) {
+        this.rayAccessKey = rayKey;
+        this.rayAccessBins.fill(undefined);
+      }
+      const rayBin = Math.floor((((phase % 1) + 1) % 1) * 128) & 127;
+      let received = this.rayAccessBins[rayBin];
+      if (!received) {
+        received = relativeEchoAmplitude(sc, beam.origin, rayDir, beam.contact);
+        this.rayAccessBins[rayBin] = received;
+      }
+      let signalColumn: Float32Array;
+      let signalDisplay: Float32Array;
+      const isCw = inp.modality === 'cw';
+      if (isCw) {
+        const cwKey = `${rayKey}|${spec.depthCm.toFixed(2)}|${spec.focusCm.toFixed(2)}|${inp.spectral.scaleMps}|${inp.spectral.baselineShiftMps}|${inp.spectral.wallFilterMps}|${inp.spectral.invert ? 1 : 0}`;
+        if (this.cwRawKey !== cwKey) {
+          this.cwRawKey = cwKey;
+          this.cwRawBins.fill(undefined);
+        }
+        const cwBin = Math.floor((((phase % 1) + 1) % 1) * 192) % 192;
+        const cached = this.cwRawBins[cwBin];
+        if (cached) {
+          this.spectralColScratch.set(cached.rawColumn);
+          const tClicks = performance.now();
+          const clickSig = cached.clickPoints.length
+            ? valveClickSignal(
+                sc.heart,
+                sc.heartPose,
+                moment.tables,
+                phase * moment.tables.rrS,
+                cached.clickPoints,
+                cached.rayHeartDir,
+                cached.clickPowers,
+              )
+            : { weight: 0, direction: 0 };
+          this.stepTiming.valveClicksMs += performance.now() - tClicks;
+          const tPres = performance.now();
+          presentSpectralColumn(
+            this.spectralColScratch,
+            inp.spectral,
+            this.stripHead,
+            ctx.caseDef.seed,
+            inp.settings.frequencyMHz,
+            1 - DUPLEX_BMODE_SHARE,
+            clickSig.weight,
+            this.spectralDispScratch,
+            timeS,
+            true,
+            clickSig.direction,
+          );
+          this.stepTiming.spectrumPresentMs += performance.now() - tPres;
+          this.stepTiming.columns += 1;
+          signalColumn = this.spectralColScratch;
+          signalDisplay = this.spectralDispScratch;
+        } else {
+          const signal = sampleSpectralColumn(
+            beam,
+            spec,
+            phase,
+            col,
+            this.stripHead,
+            timeS,
+            {
+              ...ctx,
+              heart: sc.heart,
+              tables: moment.tables,
+              flow: moment.flow,
+              scene: () => sc,
+            },
+            this.flowSample,
+            this.tissueSample,
+            this.stepTiming,
+            {
+              received,
+              outColumn: this.spectralColScratch,
+              outDisplay: this.spectralDispScratch,
+              onRawCw: (rawColumn, clickPoints, clickPowers, rayHeartDir) => {
+                this.cwRawBins[cwBin] = {
+                  rawColumn: rawColumn.slice(),
+                  clickPoints: clickPoints.slice(),
+                  clickPowers: clickPowers.slice(),
+                  rayHeartDir,
+                };
+              },
+            },
+          );
+          signalColumn = signal.column;
+          signalDisplay = signal.display;
+        }
+      } else {
+        const signal = sampleSpectralColumn(
+          beam,
+          spec,
+          phase,
+          col,
+          this.stripHead,
+          timeS,
+          {
+            ...ctx,
+            heart: sc.heart,
+            tables: moment.tables,
+            flow: moment.flow,
+            scene: () => sc,
+          },
+          this.flowSample,
+          this.tissueSample,
+          this.stepTiming,
+          {
+            received,
+            outColumn: this.spectralColScratch,
+            outDisplay: this.spectralDispScratch,
+          },
+        );
+        signalColumn = signal.column;
+        signalDisplay = signal.display;
+      }
+      this.stripSpectral!.set(signalColumn, col * SPECTRAL_BINS);
+      this.stripDisplay!.set(signalDisplay, col * SPECTRAL_BINS);
+      this.lastColumn = signalColumn;
       this.stripPhase[col] = phase;
       this.stripSampleTime[col] = timeS;
       this.stripBeatIndex[col] = moment.beatIndex;
       this.stripTablesVersion[col] = moment.tablesVersion;
       this.headTimeS = timeS;
       this.stripHead++;
+      if (this.spectralRgba && this.spectralRowMap) {
+        const tPaint = performance.now();
+        paintSpectralStripColumn(
+          col,
+          this.spectralRgba,
+          this.spectralRowMap,
+          this.stripDisplay!,
+          this.stripCols,
+          this.lastSpectralReject,
+          this.lastSpectralYbRel,
+          this.lastTintMap,
+        );
+        this.stepTiming.stripRasterMs += performance.now() - tPaint;
+      }
     }
   }
 
@@ -613,7 +816,8 @@ export class StripEngine {
     structure: Uint8Array,
     ctx: StripCtx,
   ): GateInfo {
-    return computeGateInfo(
+    const t0 = performance.now();
+    const info = computeGateInfo(
       beam,
       spec,
       phase,
@@ -623,6 +827,8 @@ export class StripEngine {
       this.flowSample,
       this.tissueSample,
     );
+    this.stepTiming.gateInfoMs += performance.now() - t0;
+    return info;
   }
 
   /** Answer an on-demand request (auto-trace of the spectral envelope between two strip columns). */
@@ -720,22 +926,56 @@ export class StripEngine {
       };
     }
     if (kind === 'spectral' && this.stripDisplay && acquired) {
+      const tRaster = performance.now();
       const effectiveSpectral = this.effectiveSpectral(acquired);
-      const reject = liveSpectral?.reject ?? effectiveSpectral.reject ?? 0;
-      const { vMin, vMax } = renderSpectralStripRgba(
-        rgba,
-        W,
-        H,
-        y0,
-        h,
-        this.stripDisplay,
-        cols,
-        effectiveSpectral,
-        tintMap,
-        this.stripHead % Math.max(1, cols),
-        reject,
+      const reject = Math.max(
+        0,
+        Math.min(0.6, liveSpectral?.reject ?? effectiveSpectral.reject ?? 0),
       );
+      const { vMin, vMax } = spectralRange(effectiveSpectral);
+      if (cols === W && h > 0) {
+        const ybAbs = y0 + Math.round((vMax / (vMax - vMin)) * h);
+        const ybRel = ybAbs >= y0 && ybAbs < Math.min(H, y0 + h) ? ybAbs - y0 : -1;
+        const layout = `${cols}x${h}|${tintMap ?? 'gray'}|${reject.toFixed(4)}|${ybRel}`;
+        if (this.spectralRgbaKey !== layout || !this.spectralRgba) {
+          this.spectralRgba = new Uint8ClampedArray(cols * h * 4);
+          if (!this.spectralRowMap || this.spectralRowMap.rows !== h) {
+            this.spectralRowMap = buildSpectralRowMap(h);
+          }
+          this.spectralRgbaKey = layout;
+          this.lastSpectralReject = reject;
+          this.lastSpectralYbRel = ybRel;
+          for (let c = 0; c < cols; c++) {
+            paintSpectralStripColumn(
+              c,
+              this.spectralRgba,
+              this.spectralRowMap,
+              this.stripDisplay,
+              cols,
+              reject,
+              ybRel,
+              tintMap,
+            );
+          }
+        }
+        rgba.set(this.spectralRgba, y0 * W * 4);
+      } else {
+        renderSpectralStripRgba(
+          rgba,
+          W,
+          H,
+          y0,
+          h,
+          this.stripDisplay,
+          cols,
+          effectiveSpectral,
+          tintMap,
+          this.stripHead % Math.max(1, cols),
+          reject,
+        );
+      }
       drawSweepMarker(rgba, W, y0, h, head);
+      this.stepTiming.stripRasterMs += performance.now() - tRaster;
       const pulsedTiming = acquired.aliasing
         ? depthLimitedPulsedAcquisition(
             acquired.gateDepthCm,

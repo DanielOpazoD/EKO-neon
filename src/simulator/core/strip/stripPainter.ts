@@ -138,6 +138,99 @@ export function applySpectralRejectCurve(v: number, reject: number): number {
   return 0.72 * u + 0.28 * s;
 }
 
+/** Precomputed vertical resampling table mapping display rows to adjacent spectral bins. */
+export interface SpectralRowMap {
+  rows: number;
+  b0: Uint16Array;
+  b1: Uint16Array;
+  fy: Float64Array;
+  fy0: Float64Array;
+}
+
+/** Build the vertical bin-interpolation map for a spectral strip of `rows` pixels height. */
+export function buildSpectralRowMap(rows: number): SpectralRowMap {
+  const b0 = new Uint16Array(rows);
+  const b1 = new Uint16Array(rows);
+  const fy = new Float64Array(rows);
+  const fy0 = new Float64Array(rows);
+  const maxBin = SPECTRAL_BINS - 1;
+  for (let y = 0; y < rows; y++) {
+    const bf = ((y + 0.5) / rows) * SPECTRAL_BINS - 0.5;
+    const lo = Math.max(0, Math.min(maxBin, Math.floor(bf)));
+    const hi = Math.min(maxBin, lo + 1);
+    const f = Math.max(0, Math.min(1, bf - lo));
+    b0[y] = lo;
+    b1[y] = hi;
+    fy[y] = f;
+    fy0[y] = 1 - f;
+  }
+  return { rows, b0, b1, fy, fy0 };
+}
+
+const spectralLutCache = new Map<string, Uint8Array>();
+
+function spectralRgbLut(tintMap?: TintMapId): Uint8Array {
+  const key = tintMap && tintMap !== 'gray' ? tintMap : 'gray';
+  let lut = spectralLutCache.get(key);
+  if (lut) return lut;
+  lut = new Uint8Array(256 * 3);
+  const rgb: [number, number, number] = [0, 0, 0];
+  const customTint = tintMap && tintMap !== 'gray';
+  for (let g = 0; g < 256; g++) {
+    const o = g * 3;
+    if (customTint) {
+      tintGrayByte(g, tintMap, rgb);
+      lut[o] = rgb[0];
+      lut[o + 1] = rgb[1];
+      lut[o + 2] = rgb[2];
+    } else {
+      lut[o] = g;
+      lut[o + 1] = Math.round(g * 0.93);
+      lut[o + 2] = Math.round(g * 0.8);
+    }
+  }
+  spectralLutCache.set(key, lut);
+  return lut;
+}
+
+/**
+ * Paint a single column of the cached spectral strip RGBA buffer (`cols × map.rows`).
+ * Produces bit-exact pixels matching `renderSpectralStripRgba` when `cols === W`.
+ */
+export function paintSpectralStripColumn(
+  col: number,
+  img: Uint8ClampedArray,
+  map: SpectralRowMap,
+  stripDisplay: Float32Array,
+  cols: number,
+  reject: number,
+  ybRel: number,
+  tintMap?: TintMapId,
+): void {
+  const { rows, b0, b1, fy, fy0 } = map;
+  const r = Math.max(0, Math.min(0.6, reject));
+  const lut = spectralRgbLut(tintMap);
+  const base = col * SPECTRAL_BINS;
+  for (let y = 0; y < rows; y++) {
+    const o = (y * cols + col) * 4;
+    if (y === ybRel) {
+      img[o] = 90;
+      img[o + 1] = 160;
+      img[o + 2] = 90;
+      img[o + 3] = 255;
+      continue;
+    }
+    const v0 = stripDisplay[base + b0[y]!] ?? 0;
+    const v1 = stripDisplay[base + b1[y]!] ?? 0;
+    const v = applySpectralRejectCurve(v0 * fy0[y]! + v1 * fy[y]!, r);
+    const l = Math.round(v * 255) * 3;
+    img[o] = lut[l]!;
+    img[o + 1] = lut[l + 1]!;
+    img[o + 2] = lut[l + 2]!;
+    img[o + 3] = 255;
+  }
+}
+
 /** Rasterize the displayed spectral Doppler strip with bilinear resampling, reject/S-curve, baseline, and tint map. */
 export function renderSpectralStripRgba(
   rgba: Uint8ClampedArray,
@@ -154,8 +247,7 @@ export function renderSpectralStripRgba(
 ): { vMin: number; vMax: number } {
   const { vMin, vMax } = spectralRange(spectral);
   const reject = Math.max(0, Math.min(0.6, rejectOverride ?? spectral.reject ?? 0));
-  const customTint = tintMap && tintMap !== 'gray';
-  const rgb: [number, number, number] = [0, 0, 0];
+  const lut = spectralRgbLut(tintMap);
   const seamCol = headCol !== undefined && cols > 1 ? ((headCol % cols) + cols) % cols : -1;
   const maxBin = SPECTRAL_BINS - 1;
   const maxCol = Math.max(0, cols - 1);
@@ -189,18 +281,11 @@ export function renderSpectralStripRgba(
       const v0 = (stripDisplay[base0 + b0] ?? 0) * fx0 + (stripDisplay[base1 + b0] ?? 0) * fx;
       const v1 = (stripDisplay[base0 + b1] ?? 0) * fx0 + (stripDisplay[base1 + b1] ?? 0) * fx;
       const v = applySpectralRejectCurve(v0 * fy0 + v1 * fy, reject);
-      const g = Math.round(v * 255);
+      const l = Math.round(v * 255) * 3;
       const o = (rowOff + x) * 4;
-      if (customTint) {
-        tintGrayByte(g, tintMap, rgb);
-        rgba[o] = rgb[0];
-        rgba[o + 1] = rgb[1];
-        rgba[o + 2] = rgb[2];
-      } else {
-        rgba[o] = g;
-        rgba[o + 1] = Math.round(g * 0.93);
-        rgba[o + 2] = Math.round(g * 0.8);
-      }
+      rgba[o] = lut[l]!;
+      rgba[o + 1] = lut[l + 1]!;
+      rgba[o + 2] = lut[l + 2]!;
       rgba[o + 3] = 255;
     }
   }

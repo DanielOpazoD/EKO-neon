@@ -2,7 +2,7 @@ import { createRng } from '@/core/random';
 import { smoothstep } from '@/core/vec3';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
 import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
-import { Tissue, type TissueSample } from '@/simulator/anatomy/tissue';
+import { Structure, Tissue, type TissueSample } from '@/simulator/anatomy/tissue';
 import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
 import {
@@ -18,11 +18,12 @@ import {
   sliceHalfWidthCm,
 } from '@/simulator/doppler/spectral/scatteringModel';
 import {
-  buildSpectralColumn,
+  accumulateSpectrum,
   presentSpectralColumn,
   SPECTRAL_BINS,
   type VelocitySample,
 } from '@/simulator/doppler/spectral/spectrum';
+import type { SpectralFrameTiming } from '@/simulator/doppler/dopplerPerf';
 import { valveClickSignal, valveClickWeight } from '@/simulator/doppler/spectral/valveClicks';
 import type { BeamFrame } from '@/simulator/probe/pose';
 import { beamHalfWidthCm, focusingGain } from '@/simulator/renderer/acoustic/acoustics';
@@ -40,6 +41,22 @@ export interface GateFlowCache {
   bz: number;
 }
 
+export interface SpectralSampleOptions {
+  /** Optional pre-cached central-ray relative echo amplitude query for this pose and phase bin. */
+  received?: (depthCm: number) => number;
+  /** Optional reusable scratch buffer for the raw spectral column (SPECTRAL_BINS). */
+  outColumn?: Float32Array;
+  /** Optional reusable scratch buffer for the presented spectral column (SPECTRAL_BINS). */
+  outDisplay?: Float32Array;
+  /** Optional hook receiving the un-presented CW raw spectrum and valve-click ray geometry before presentation. */
+  onRawCw?: (
+    rawColumn: Float32Array,
+    clickPoints: readonly number[],
+    clickPowers: readonly number[],
+    rayHeartDir: { x: number; y: number; z: number },
+  ) => void;
+}
+
 /** Sample one spectral Doppler column (PW, CW or TDI) at a given cardiac phase and time instant. */
 export function sampleSpectralColumn(
   beam: BeamFrame,
@@ -51,6 +68,8 @@ export function sampleSpectralColumn(
   ctx: StripCtx,
   flowSample: FlowSample,
   tissueSample: TissueSample,
+  timing?: SpectralFrameTiming,
+  options?: SpectralSampleOptions,
 ): { column: Float32Array; display: Float32Array } {
   const inp = ctx.input;
   const hf = ctx.heart.frame;
@@ -72,12 +91,11 @@ export function sampleSpectralColumn(
   const scene = ctx.scene(phase);
   const hp = scene.heartPose;
   const classifyScene = sceneClassifier(scene);
-  const received = relativeEchoAmplitude(
-    scene,
-    beam.origin,
-    { x: dx, y: dy, z: dz },
-    beam.contact,
-  );
+  const tAcoustic = timing ? performance.now() : 0;
+  const received =
+    options?.received ??
+    relativeEchoAmplitude(scene, beam.origin, { x: dx, y: dy, z: dz }, beam.contact);
+  if (timing) timing.acousticAccessMs += performance.now() - tAcoustic;
   const samples: VelocitySample[] = [];
   const lx = beam.lateral.x * ct - beam.forward.x * sn,
     ly = beam.lateral.y * ct - beam.forward.y * sn,
@@ -85,7 +103,10 @@ export function sampleSpectralColumn(
   const aliasing = MODALITIES[inp.modality].aliasing;
 
   // Estimate axial blood acceleration (dv/dt) at the PW gate center for intra-packet chirp physics.
+  // Over ±4 ms cardiac geometry moves <0.4 mm, so reusing the column's already-computed HeartPose
+  // while querying beat flow tables at pPrev/pNext preserves dv/dt without two redundant pose builds.
   let gateAccelMps2 = 0;
+  const tAccel = timing && aliasing && !isTdi ? performance.now() : 0;
   if (aliasing && !isTdi) {
     const dtAcc = 0.004;
     const dPhase = dtAcc / ctx.tables.rrS;
@@ -101,36 +122,19 @@ export function sampleSpectralColumn(
       (px0 - hf.origin.x) * hf.ey.x + (py0 - hf.origin.y) * hf.ey.y + (pz0 - hf.origin.z) * hf.ey.z;
     const hz0 =
       (px0 - hf.origin.x) * hf.ez.x + (py0 - hf.origin.y) * hf.ez.y + (pz0 - hf.origin.z) * hf.ez.z;
-    sampleFlow(
-      ctx.flow,
-      ctx.tables,
-      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pPrev, ctx.flow.flowPeaks)),
-      pPrev,
-      hx0,
-      hy0,
-      hz0,
-      flowSample,
-    );
+    sampleFlow(ctx.flow, ctx.tables, hp, pPrev, hx0, hy0, hz0, flowSample);
     const vPrev = flowSample.present
       ? -(flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz)
       : 0;
-    sampleFlow(
-      ctx.flow,
-      ctx.tables,
-      computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, pNext, ctx.flow.flowPeaks)),
-      pNext,
-      hx0,
-      hy0,
-      hz0,
-      flowSample,
-    );
+    sampleFlow(ctx.flow, ctx.tables, hp, pNext, hx0, hy0, hz0, flowSample);
     const vNext = flowSample.present
       ? -(flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz)
       : 0;
     gateAccelMps2 = Math.max(-25, Math.min(25, (vNext - vPrev) / (2 * dtAcc)));
+    if (timing) timing.accelChirpMs += performance.now() - tAccel;
   }
 
-  const classify = (r: number, dr: number, du: number, dv: number, tapNorm: number): void => {
+  const classify = (r: number, dr: number, du: number, dv: number, tapNorm: number): number => {
     const px = beam.origin.x + dx * r + lx * du + beam.normal.x * dv;
     const py = beam.origin.y + dy * r + ly * du + beam.normal.y * dv;
     const pz = beam.origin.z + dz * r + lz * du + beam.normal.z * dv;
@@ -140,7 +144,8 @@ export function sampleSpectralColumn(
       (px - hf.origin.x) * hf.ey.x + (py - hf.origin.y) * hf.ey.y + (pz - hf.origin.z) * hf.ey.z;
     const hz =
       (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z;
-    const inScene = classifyScene(px, py, pz, tissueSample) !== 0;
+    const cls = classifyScene(px, py, pz, tissueSample);
+    const inScene = cls !== 0;
     const beamWeight =
       sampleVolumeWeight(r, focusCm, dr, du, dv, gateLenOrNull) * backscatterScale * tapNorm;
     if (isTdi) {
@@ -148,7 +153,7 @@ export function sampleSpectralColumn(
         // Myocardial parenchyma scatters ~30–40 dB more strongly than blood, keeping deep basal
         // annuli (11–13 cm in dilated LV) well above thermal noise across [-8, +8] dB gain.
         const power = received(r) ** 2 * beamWeight * 12;
-        if (power <= 0) return;
+        if (power <= 0) return cls;
         const tv = sampleTissueVelocity(
           ctx.heart,
           ctx.tables,
@@ -173,18 +178,18 @@ export function sampleSpectralColumn(
           frequencyMHz: f0MHz,
         });
       }
-      return;
+      return cls;
     }
-    if (!inScene || tissueSample.tissue !== Tissue.Blood) return;
+    if (!inScene || tissueSample.tissue !== Tissue.Blood) return cls;
     // Split-aperture CW probes have a broad, weakly focused depth sensitivity compared to PW,
     // preventing deep valve jets (11–14 cm) from being crushed relative to proximal LVOT blood.
     const cwDepthBalance = isCw ? 1 / Math.max(0.45, focusingGain(r, focusCm)) : 1;
     const power = received(r) ** 2 * beamWeight * cwDepthBalance;
-    if (power <= 0) return;
+    if (power <= 0) return cls;
     sampleFlow(ctx.flow, ctx.tables, hp, phase, hx, hy, hz, flowSample);
     if (!flowSample.present) {
       samples.push({ v: 0, weight: 0.3 * power, dispersion: 0.05, depthCm: r });
-      return;
+      return cls;
     }
     const axial = flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz;
     const vPerp = Math.sqrt(
@@ -216,6 +221,7 @@ export function sampleSpectralColumn(
       frequencyMHz: f0MHz,
       accelMps2: aliasing && !isTdi ? gateAccelMps2 : undefined,
     });
+    return cls;
   };
 
   // Heart-frame points where the sample volume can meet a valve's leaflets: along the CW line, or the PW gate
@@ -239,23 +245,39 @@ export function sampleSpectralColumn(
     clickPowers.push(received(r) ** 2);
   };
 
+  const tQuad = timing ? performance.now() : 0;
   if (isCw) {
-    // CW integrates along the entire focused beam with jittered 0.16 cm axial stations and 5-tap
+    // CW integrates along the entire focused beam with jittered 0.24 cm axial stations and 5-tap
     // 3D cross-beam quadrature (center + lateral + elevation) so narrow vena contractas (AS, MR,
     // HOCM SAM) are resolved smoothly on every column without axial aliasing.
     const rng = createRng(ctx.caseDef.seed ^ (col * 104729));
-    const drStep = 0.16;
+    const drStep = 0.24;
     const rJitter = rng.next() * drStep;
     for (let r = 1.0 + rJitter; r < spec.depthCm; r += drStep) {
       if (received(r) === 0) break;
       const wl = beamHalfWidthCm(r, focusCm);
       const we = sliceHalfWidthCm(r);
-      classify(r, 0, 0, 0, 0.4);
-      classify(r, 0, -0.55 * wl, 0, 0.16);
-      classify(r, 0, 0.55 * wl, 0, 0.16);
-      classify(r, 0, 0, -0.5 * we, 0.14);
-      classify(r, 0, 0, 0.5 * we, 0.14);
-      clickPoint(r);
+      const centerCls = classify(r, 0, 0, 0, 0.4);
+      if (centerCls === 2) {
+        classify(r, 0, -0.55 * wl, 0, 0.16);
+        classify(r, 0, 0.55 * wl, 0, 0.16);
+        classify(r, 0, 0, -0.5 * we, 0.14);
+        classify(r, 0, 0, 0.5 * we, 0.14);
+        clickPoint(r);
+      } else if (
+        centerCls === 1 &&
+        (tissueSample.tissue === Tissue.Blood ||
+          tissueSample.structure === Structure.DescendingAorta ||
+          tissueSample.structure === Structure.Mediastinum ||
+          tissueSample.structure === Structure.Diaphragm ||
+          (tissueSample.structure === Structure.ChestWall &&
+            tissueSample.sdf > -Math.max(0.55 * wl, 0.5 * we) - 0.1))
+      ) {
+        classify(r, 0, -0.55 * wl, 0, 0.16);
+        classify(r, 0, 0.55 * wl, 0, 0.16);
+        classify(r, 0, 0, -0.5 * we, 0.14);
+        classify(r, 0, 0, 0.5 * we, 0.14);
+      }
     }
   } else {
     const g = inp.spectral.gateLengthCm;
@@ -282,9 +304,15 @@ export function sampleSpectralColumn(
       }
     }
   }
+  if (timing) {
+    timing.quadratureMs += performance.now() - tQuad;
+    timing.samplesEvaluated += samples.length;
+    timing.columns += 1;
+  }
 
-  const column = new Float32Array(SPECTRAL_BINS);
-  const display = new Float32Array(SPECTRAL_BINS);
+  const column = options?.outColumn ?? new Float32Array(SPECTRAL_BINS);
+  const display = options?.outDisplay ?? new Float32Array(SPECTRAL_BINS);
+  const tClicks = timing ? performance.now() : 0;
   const clickSig = clickPoints.length
     ? valveClickSignal(
         ctx.heart,
@@ -296,6 +324,8 @@ export function sampleSpectralColumn(
         clickPowers,
       )
     : { weight: 0, direction: 0 };
+  if (timing) timing.valveClicksMs += performance.now() - tClicks;
+
   if (aliasing) {
     const { effectiveScaleMps } = depthLimitedPulsedAcquisition(
       inp.gateDepthCm,
@@ -309,6 +339,7 @@ export function sampleSpectralColumn(
       effectiveScaleMps < inp.spectral.scaleMps || clampedShift !== inp.spectral.baselineShiftMps
         ? { ...inp.spectral, scaleMps: effectiveScaleMps, baselineShiftMps: clampedShift }
         : inp.spectral;
+    const tSynth = timing ? performance.now() : 0;
     accumulatePulsedSpectrum(
       samples,
       effectiveSpectral,
@@ -319,6 +350,8 @@ export function sampleSpectralColumn(
       inp.gateDepthCm,
       focusCm,
     );
+    if (timing) timing.spectrumSynthMs += performance.now() - tSynth;
+    const tPres = timing ? performance.now() : 0;
     presentSpectralColumn(
       column,
       effectiveSpectral,
@@ -332,21 +365,29 @@ export function sampleSpectralColumn(
       true,
       clickSig.direction,
     );
+    if (timing) timing.spectrumPresentMs += performance.now() - tPres;
   } else {
-    buildSpectralColumn(
-      samples,
+    const tSynth = timing ? performance.now() : 0;
+    accumulateSpectrum(samples, inp.spectral, aliasing, column);
+    if (timing) timing.spectrumSynthMs += performance.now() - tSynth;
+    if (isCw && options?.onRawCw) {
+      options.onRawCw(column, clickPoints, clickPowers, { x: dhx, y: dhy, z: dhz });
+    }
+    const tPres = timing ? performance.now() : 0;
+    presentSpectralColumn(
+      column,
       inp.spectral,
       stripHead,
       ctx.caseDef.seed,
-      aliasing,
-      column,
       f0MHz,
       1 - DUPLEX_BMODE_SHARE,
       clickSig.weight,
       display,
       timeS,
+      true,
       clickSig.direction,
     );
+    if (timing) timing.spectrumPresentMs += performance.now() - tPres;
   }
   return { column, display };
 }

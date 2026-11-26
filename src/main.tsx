@@ -12,6 +12,10 @@ import type {
   compareImageChain,
 } from '@/app/debugCompare';
 import { frameBus } from '@/app/frameBus';
+import { dopplerPerfMonitor } from '@/simulator/doppler/dopplerPerf';
+
+// Expose console-only Doppler frame performance diagnostics (`dopplerPerf.report()`, `dopplerPerf.disable()`, etc.)
+(window as unknown as { dopplerPerf?: typeof dopplerPerfMonitor }).dopplerPerf = dopplerPerfMonitor;
 
 // Test/debug hook (used by Playwright E2E and the dev console). It exposes the stores, and with them the case's ground
 // truth, so a shipped build must not carry it or a learner reads the answers of the blind exam from the console: it is
@@ -31,6 +35,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_TEST_HOOKS === '1') {
       import('@/app/debugCompare').then((m) => m.compareImageChain(...args)),
     compareDeferredDoppler: (...args: Parameters<typeof compareDeferredDoppler>) =>
       import('@/app/debugCompare').then((m) => m.compareDeferredDoppler(...args)),
+    dopplerPerf: dopplerPerfMonitor,
     frameBus,
   };
 }

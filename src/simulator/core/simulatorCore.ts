@@ -12,6 +12,7 @@ import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
 import { cycleStateAt, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { respiratoryDepth } from '@/simulator/cardiac-cycle/respiration';
 import type { ColorField } from '@/simulator/doppler/color/colorDoppler';
+import { buildDopplerPerfFrame, isDopplerModality } from '@/simulator/doppler/dopplerPerf';
 import {
   buildFlowParams,
   type FlowFieldParams,
@@ -140,6 +141,9 @@ export class SimulatorCore {
   private analysisCounter = 0;
   private ecgRing = new EcgRing();
   private strips = new StripEngine();
+  private poseCacheHeart: HeartModel | null = null;
+  private poseCacheTablesVersion = -1;
+  private poseCacheBins: Array<HeartPose | undefined> = new Array(256);
   private patientKey = '';
   private compositor = new FrameCompositor();
   private modelVersion = 0;
@@ -153,7 +157,9 @@ export class SimulatorCore {
     consoleMs: 0,
     cineMs: 0,
     presentMs: 0,
+    overlayColorMs: 0,
   };
+  private lastColorStepMs = 0;
   private prevBeam: BeamFrame | null = null;
   private stationaryFrames = 0;
   private frameBudgetMs = 25;
@@ -258,6 +264,24 @@ export class SimulatorCore {
       moment: (timeS) => {
         const beat = this.beatHistory.at(timeS),
           bc = beat.context;
+        if (
+          this.poseCacheHeart !== bc.heart ||
+          this.poseCacheTablesVersion !== bc.tablesVersion
+        ) {
+          this.poseCacheHeart = bc.heart;
+          this.poseCacheTablesVersion = bc.tablesVersion;
+          this.poseCacheBins.fill(undefined);
+        }
+        const phaseBin = Math.floor((((beat.phase % 1) + 1) % 1) * 256) & 255;
+        let heartPose = this.poseCacheBins[phaseBin];
+        if (!heartPose) {
+          const binPhase = (phaseBin + 0.5) / 256;
+          heartPose = computeHeartPose(
+            bc.heart,
+            cycleStateAt(bc.tables, binPhase, bc.flow.flowPeaks),
+          );
+          this.poseCacheBins[phaseBin] = heartPose;
+        }
         return {
           phase: beat.phase,
           beatIndex: beat.beatIndex,
@@ -267,10 +291,7 @@ export class SimulatorCore {
           scene: {
             heart: bc.heart,
             thorax: bc.thorax,
-            heartPose: computeHeartPose(
-              bc.heart,
-              cycleStateAt(bc.tables, beat.phase, bc.flow.flowPeaks),
-            ),
+            heartPose,
             physics: this.physics(),
           },
         };
@@ -341,9 +362,12 @@ export class SimulatorCore {
   /** Advance simulation by dt seconds. Returns an output when a new composite frame is ready. */
   step(dtS: number): SimOutput | null {
     if (this.disposed) return null;
+    const tStepStart = performance.now();
     const inp = this.input;
     const dt = Math.min(0.1, Math.max(0, dtS));
     if (inp.frozen) return this.frozenOutput();
+    this.strips.resetStepTiming();
+    this.lastColorStepMs = 0;
     const tier = resolveQualityTier(
       inp.quality,
       this.gpu !== null && this.backend !== this.procedural,
@@ -389,14 +413,18 @@ export class SimulatorCore {
     this.frameIntervalS = frameInterval;
     this.frameBudgetMs = 600 * frameInterval;
     let produced = false;
+    let bmodeRenderMs = 0;
     if (this.frameAccumulator >= frameInterval * 0.85 || !this.frame) {
       this.frameAccumulator = Math.min(
         frameInterval,
         Math.max(0, this.frameAccumulator - frameInterval),
       );
+      const gateBefore = this.strips.lastStepTiming.gateInfoMs;
       const t0 = performance.now();
       this.renderFrame(beam, spec);
       this.timing.renderFrameMs = performance.now() - t0;
+      const gateInRender = this.strips.lastStepTiming.gateInfoMs - gateBefore;
+      bmodeRenderMs = Math.max(0, this.timing.renderFrameMs - this.lastColorStepMs - gateInRender);
       produced = true;
     }
     // Independent Deferred Doppler Re-shading: if Doppler-only console settings changed between
@@ -417,6 +445,7 @@ export class SimulatorCore {
       const beamUse = acquiredPrev ? acquiredPrev.beam : beam;
       const specUse = acquiredPrev ? acquiredPrev.spec : spec;
       const sceneUse = acquiredPrev ? acquiredPrev.scene : this.scene(phaseUse);
+      const tReshade = performance.now();
       dopplerReshaded = this.colorDriver.reshadeDeferredGpu(
         {
           frame: this.frame,
@@ -438,6 +467,7 @@ export class SimulatorCore {
         },
         this.gpu,
       );
+      if (dopplerReshaded) this.lastColorStepMs += performance.now() - tReshade;
       if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
     }
     if (!produced && !isStrip && !dopplerReshaded) return null;
@@ -445,6 +475,19 @@ export class SimulatorCore {
     const acquired = this.cine.newest;
     const out = this.composite(acquired?.beam ?? beam, acquired?.spec ?? spec, false, acquired);
     this.timing.compositeMs = performance.now() - t1;
+    if (out && isDopplerModality(inp.modality)) {
+      const totalMs = performance.now() - tStepStart;
+      const colorDopplerMs =
+        this.lastColorStepMs + this.timing.overlayColorMs + this.strips.lastCmmColorMs;
+      out.dopplerPerf = buildDopplerPerfFrame({
+        frameId: out.frameId,
+        modality: inp.modality,
+        totalMs,
+        spectral: this.strips.lastStepTiming,
+        colorDopplerMs,
+        bmodeRenderMs,
+      });
+    }
     return out;
   }
 
@@ -566,6 +609,7 @@ export class SimulatorCore {
     let colorTissue: Uint8Array | null = null;
     let colorTransCode: Uint8Array | null = null;
     if (inp.modality === 'color') {
+      const tColor = performance.now();
       const colorCtx = {
         frame: this.frame,
         scene,
@@ -609,6 +653,7 @@ export class SimulatorCore {
         colorVar = cOut.variance;
         colorPower = cOut.power;
       }
+      this.lastColorStepMs += performance.now() - tColor;
     } else {
       this.dopplerOnGpu = false;
     }

@@ -3,6 +3,7 @@ import type { ProbeControl } from '@/simulator/probe/pose';
 import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 import type { AcquisitionSettings, ImagingModality } from '@/simulator/renderer/types';
 import type { ColorSettings } from '@/simulator/doppler/color/colorDoppler';
+import type { DopplerPerfFrame } from '@/simulator/doppler/dopplerPerf';
 import type { SpectralSettings } from '@/simulator/doppler/spectral/spectrum';
 import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 import type { SectorMapping } from '@/simulator/renderer/scanConvert';
@@ -197,6 +198,8 @@ export interface SimOutput {
    */
   cineWindow: { startS: number; endS: number; frameS: number };
   stats: Record<string, number | string>;
+  /** Per-frame Doppler performance breakdown & spectral bottleneck diagnostics (present on Doppler modalities). */
+  dopplerPerf?: DopplerPerfFrame;
   colorFps: number;
   probeBeam: {
     origin: [number, number, number];
