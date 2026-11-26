@@ -151,6 +151,12 @@ export interface CycleState {
   mvOpen: number;
   /** Aortic valve opening 0..1 (driven by ejection flow). */
   avOpen: number;
+  /**
+   * Time since the aortic valve opened, in ejection times: 0 when it opens, 1 when it closes, negative before and above 1
+   * after, to the end of the beat. The outflow's drag on the anterior mitral leaflet (SAM, `samDrag`) follows it, along
+   * the same timeline as the Doppler's dynamic obstruction. Absent from hand-built states, which take no SAM.
+   */
+  ejectionProgress?: number;
   /** Tricuspid / pulmonic openings mirror the left side with a small delay. */
   tvOpen: number;
   pvOpen: number;
@@ -311,6 +317,7 @@ export function cycleStateAt(
     contraction: (tables.edvMl - vol) / Math.max(tables.edvMl - tables.esvMl, 1e-6),
     mvOpen,
     avOpen,
+    ejectionProgress: (t - tm.ejectionStartS) / Math.max(1e-3, tm.ejectionEndS - tm.ejectionStartS),
     tvOpen: inflowOpening(tables, p, qtvMax, tables.tricuspidFlowMlps, 'tricuspid'),
     pvOpen: Math.min(1, Math.pow(sampleTable(tables.pulmonaryFlowMlps, p) / qpvMax, 0.5)),
     longitudinal: sampleTable(tables.longitudinal, p),
