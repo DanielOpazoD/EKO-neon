@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { exportCaseTag, modePolicy, showsCaseIdentity } from './modePolicy';
+import { exportCaseTag, modePolicy, screenInMode, showsCaseIdentity } from './modePolicy';
 
 describe('Product mode policy & blind exam guards', () => {
   it('enables learning/dev aids in sandbox and guided modes, and locks them down in exam mode', () => {
@@ -38,5 +38,15 @@ describe('Product mode policy & blind exam guards', () => {
     assert.equal(exportCaseTag('exam', false, 'severe-as'), 'examen');
     assert.equal(exportCaseTag('exam', true, 'severe-as'), 'severe-as');
     assert.equal(exportCaseTag('sandbox', false, 'severe-as'), 'severe-as');
+  });
+
+  it('never shows a learning screen in the exam: it gives way to the simulator', () => {
+    for (const screen of ['references', 'curriculum', 'progress'] as const) {
+      assert.equal(screenInMode(screen, 'exam'), 'simulator', screen);
+      assert.equal(screenInMode(screen, 'sandbox'), screen);
+      assert.equal(screenInMode(screen, 'guided'), screen);
+    }
+    assert.equal(screenInMode('report', 'exam'), 'report', 'the exam is finished from its report');
+    assert.equal(screenInMode('simulator', 'exam'), 'simulator');
   });
 });

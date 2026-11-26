@@ -33,7 +33,7 @@ export function ShortcutsDialog() {
         </div>
         <p className="small">
           Cada atajo tiene su control en pantalla. Con el foco en un campo o un control, la tecla va
-          al control.
+          al control. Actúan en la pantalla del simulador; en las demás solo «?» y Esc.
         </p>
         <div className="sheet-cols">
           <section>

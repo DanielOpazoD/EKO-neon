@@ -71,9 +71,11 @@ export class SimClient {
 
   private handle(msg: WorkerToMain): void {
     if (msg.type === 'frame') this.handlers.onFrame(msg.output);
-    else if (msg.type === 'ready')
+    else if (msg.type === 'ready') {
+      // the worker builds every core it is asked for, in order: one a later load superseded is not announced
+      if (msg.generation !== undefined && msg.generation !== this.loadGeneration) return;
       this.handlers.onReady(msg.truth, msg.caseId, msg.phaseMarks, msg.lvLengthCm);
-    else if (msg.type === 'response') {
+    } else if (msg.type === 'response') {
       const p = this.pending.get(msg.id);
       if (p) {
         this.pending.delete(msg.id);
@@ -119,25 +121,27 @@ export class SimClient {
   /**
    * Load a case. With a worker the request is posted at once; inline, the core module is loaded on demand
    * first — it is the whole engine, and keeping it out of the entry chunk is what lets the application start
-   * with the worker alone (audit B7) — so the returned promise settles when `ready` has been announced.
+   * with the worker alone (audit B7) — so the returned promise settles when `ready` has been announced. Either way
+   * only the latest load is announced: a load superseded before its core is ready never reaches `onReady`.
    */
   loadCase(caseDef: CaseDefinition, input: SimInput): Promise<void> {
     this.lastInputKey = simInputKey(input);
     // a new core answers nothing asked of the old one
     this.rejectPending(new Error('simulation request cancelled: case reloaded'));
+    const generation = ++this.loadGeneration;
     if (this.worker) {
-      const m: MainToWorker = { type: 'loadCase', caseDef, input };
+      const m: MainToWorker = { type: 'loadCase', caseDef, input, generation };
       this.worker.postMessage(m);
       return Promise.resolve();
     }
-    const generation = ++this.inlineGeneration;
     return import('./simulatorCore').then(({ SimulatorCore }) => {
-      if (generation !== this.inlineGeneration || this.disposed) return; // superseded or disposed meanwhile
+      if (generation !== this.loadGeneration || this.disposed) return; // superseded or disposed meanwhile
       this.startInline(new SimulatorCore(caseDef, input), caseDef.id);
     });
   }
 
-  private inlineGeneration = 0;
+  /** The latest `loadCase`, worker or inline: the only one whose core is announced. */
+  private loadGeneration = 0;
   private disposed = false;
 
   private startInline(core: SimulatorCore, caseId: string): void {

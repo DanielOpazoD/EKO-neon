@@ -15,6 +15,7 @@ import { polarToPixel, type SectorMapping } from '@/simulator/renderer/scanConve
 import { canvasFont } from '../canvasFonts';
 import { ecgLayoutOf, ecgTracePoints, ecgX } from '../ecgTrace';
 import { drawColorBar } from './colorBarOverlay';
+import { measurementGeometryOn } from './measurementPlacement';
 import { drawPickedRegion, drawSegmentLayer, drawStructureOutline } from './rasterLayers';
 
 /** Where an image marker sits on the current display: strip markers keep their pixel, sector markers reproject. */
@@ -374,14 +375,16 @@ export function drawOverlay(
         ) *
           hud.strip.height
       : undefined;
-  const shown = measurements
-    .filter(
-      (ms) =>
-        ms.modality === modality ||
-        (ms.modality === '2d' && modality === 'color') ||
-        (ms.modality === 'color' && modality === '2d'),
-    )
-    .map((ms) => ({ ms, geometry: reprojectGeometry(ms.geometry, ms.captureSector, m) }));
+  // each measurement on the acquisition it was taken on, and nowhere else (measurementGeometryOn)
+  const shown: { ms: (typeof measurements)[number]; geometry: { x: number; y: number }[] }[] = [];
+  for (const ms of measurements) {
+    const sameModality =
+      ms.modality === modality ||
+      (ms.modality === '2d' && modality === 'color') ||
+      (ms.modality === 'color' && modality === '2d');
+    const geometry = sameModality ? measurementGeometryOn(ms, hud) : null;
+    if (geometry) shown.push({ ms, geometry });
+  }
   for (const { ms, geometry } of shown) {
     drawGeometry(ctx, geometry, ms.kind, '#ffc857', ms.kind === 'vti' ? stripBaselineY : undefined);
   }

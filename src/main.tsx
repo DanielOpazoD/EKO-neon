@@ -14,7 +14,8 @@ import type {
 import { frameBus } from '@/app/frameBus';
 import { dopplerPerfMonitor } from '@/simulator/doppler/dopplerPerf';
 
-// Expose console-only Doppler frame performance diagnostics (`dopplerPerf.report()`, `dopplerPerf.disable()`, etc.)
+// Console-only Doppler frame performance diagnostics: `dopplerPerf.report()` summarises the frames already recorded,
+// `dopplerPerf.enable()` / `disable()` switch the per-frame console line, which is off by default.
 (window as unknown as { dopplerPerf?: typeof dopplerPerfMonitor }).dopplerPerf = dopplerPerfMonitor;
 
 // Test/debug hook (used by Playwright E2E and the dev console). It exposes the stores, and with them the case's ground

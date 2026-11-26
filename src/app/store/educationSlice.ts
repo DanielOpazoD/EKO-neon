@@ -1,3 +1,4 @@
+import { loadCaseById } from '@/cases';
 import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import {
   addEvent,
@@ -8,12 +9,13 @@ import {
 } from '@/education/progress';
 import { expectedFindings, getFinding, scoreImpression } from '@/education/impression';
 import { examSummaryOf, impressionCorrected } from '../examSummary';
-import { modePolicy } from '../modePolicy';
-import { drawExamCase, freshSession } from './helpers';
+import { modePolicy, screenInMode } from '../modePolicy';
+import { OPENING_VIEW_LOST_BELOW, appPlacedPose, drawExamCase, freshSession } from './helpers';
 import type { EducationSlice, SimSliceCreator } from './types';
 
 export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) => ({
   caseId: 'normal-excellent-window',
+  sessionEpoch: 0,
   mode: 'sandbox',
   targetViewId: null,
   truth: null,
@@ -26,6 +28,7 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
   viewProgress: {},
   handViewProgress: {},
   presetViews: [],
+  openingView: null,
   examFinished: false,
   examResult: null,
 
@@ -36,7 +39,7 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       let caseId = s.caseId;
       let progress = s.progress;
       if (policy.assignsCase) {
-        caseId = examCaseId ?? drawExamCase();
+        caseId = loadCaseById(examCaseId ?? drawExamCase()).id;
         progress = addEvent(progress, { t: Date.now(), kind: 'exam-start', caseId });
         saveProgress(typeof localStorage !== 'undefined' ? localStorage : null, progress);
       }
@@ -45,12 +48,15 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       return {
         mode: m,
         caseId,
+        // another case's truth waits for its own core's `ready`: until then the previous case's would be read as its
+        ...(caseId !== s.caseId ? { truth: null } : {}),
         progress,
         examFinished: false,
         examResult: null,
         ...(m === 'exam' ? freshSession() : {}),
         ui: {
           ...s.ui,
+          screen: screenInMode(s.ui.screen, m),
           showHints: policy.hintsEnabled,
           showPhysics: policy.devToolsAllowed ? s.ui.showPhysics : false,
           devPanel: policy.devToolsAllowed ? s.ui.devPanel : false,
@@ -68,7 +74,17 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       ui: { ...s.ui, screen: 'simulator', guidanceOpen: Boolean(task.viewId) || s.ui.guidanceOpen },
     }));
   },
-  setTruth: (t, caseId) => set({ truth: t, caseId }),
+  setTruth: (t) => set({ truth: t }),
+  caseReady: (r) => {
+    // the store's case is the learner's choice: a core built for a case picked and then left while it loaded is not the
+    // one on screen, and its truth, phase marks and opening view are not this case's
+    if (r.caseId !== get().caseId) return;
+    get().setTruth(r.truth);
+    get().setCycleInfo(r.phaseMarks, r.lvLengthCm);
+    get().setWorkerMode(r.workerMode);
+    // free practice opens on the canonical PLAX once the case's models exist (decision 343)
+    get().openOnStartView();
+  },
   addMeasurement: (m) =>
     set((s) => {
       const progress = addEvent(s.progress, {
@@ -142,13 +158,19 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
     }),
   redoImpression: () =>
     set((s) => (s.mode === 'exam' ? s : { impressionSelection: [], impressionChecked: false })),
-  recordViewScore: (viewId, score) =>
+  recordViewScore: (viewId, score, pose) =>
     set((s) => {
       // the same state when nothing changes: a new one, even empty, notifies every subscriber (decision 173)
       const overall = (s.viewProgress[viewId] ?? 0) < score;
-      // a view reached with its preset does not count as acquired by hand (decision 174)
+      // not acquired by hand: a view reached with its preset (decision 174), the view free practice opened on until the
+      // learner has lost it (`openingView`), and any view analysed at a pose the app placed the probe at
+      const o = s.openingView;
       const handBefore = s.handViewProgress[viewId] ?? 0;
-      const byHand = !s.presetViews.includes(viewId) && handBefore < score;
+      const byHand =
+        !s.presetViews.includes(viewId) &&
+        !(o && !o.released && o.viewId === viewId) &&
+        !(pose && appPlacedPose(pose, o)) &&
+        handBefore < score;
       if (!overall && !byHand) return s;
       // the learner's record keeps only what they reached by hand, and only the first score and each rise of 5 points
       // or more over the best so far, so that a preset or a score that wavers does not fill it (decision 236)
@@ -162,6 +184,15 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
         handViewProgress: byHand ? { ...s.handViewProgress, [viewId]: score } : s.handViewProgress,
         progress,
       };
+    }),
+  observeView: (viewId, score, pose) =>
+    set((s) => {
+      const o = s.openingView;
+      // the opening pose and the start pose are the app's: nothing the learner did shows there
+      if (!o || o.released || !pose || appPlacedPose(pose, o)) return s;
+      if (viewId === o.viewId && score >= OPENING_VIEW_LOST_BELOW) return s;
+      // lost away from where the app put the probe: whatever the learner finds from here on is theirs
+      return { openingView: { ...o, released: true } };
     }),
   finishExam: () =>
     set((s) => {
@@ -199,8 +230,16 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
     }),
   loadCase: (id) =>
     set((s) => {
-      const progress = addEvent(s.progress, { t: Date.now(), kind: 'case', caseId: id });
+      // the case the simulator draws: an unknown id loads the normal case (`loadCaseById`), and the store says so
+      const caseId = loadCaseById(id).id;
+      const progress = addEvent(s.progress, { t: Date.now(), kind: 'case', caseId });
       saveProgress(typeof localStorage !== 'undefined' ? localStorage : null, progress);
-      return { caseId: id, ...freshSession(), progress };
+      return {
+        caseId,
+        ...freshSession(),
+        progress,
+        // another case's truth waits for its own core's `ready`
+        ...(caseId !== s.caseId ? { truth: null } : {}),
+      };
     }),
 });

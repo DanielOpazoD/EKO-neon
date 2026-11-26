@@ -129,5 +129,6 @@ export function simInputKey(inp: SimInput): string {
     artifactOverridesKey(inp.artifactOverrides),
     inp.needSegments === undefined ? 'u' : inp.needSegments ? 1 : 0,
     inp.needStructure === undefined ? 'u' : inp.needStructure ? 1 : 0,
+    inp.sessionEpoch ?? 0,
   ].join('#');
 }

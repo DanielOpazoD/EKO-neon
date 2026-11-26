@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { useHudStore, useSimStore } from './store';
-import { modePolicy } from './modePolicy';
+import { frameOfSession } from './store/helpers';
+import { modePolicy, screenInMode } from './modePolicy';
 import { correctedImpressionScore } from './examSummary';
 import { useSimulation } from './useSimulation';
 import { useShortcuts } from './shortcuts';
@@ -97,10 +98,16 @@ export function App() {
         lastHudRef.current = now;
         setHud(out);
         const st = useSimStore.getState();
-        if (out.view?.bestViewId && !out.frozen)
-          st.recordViewScore(out.view.bestViewId, out.view.score);
+        // only a frame acquired for this case in this session is scored, and a view is judged at the pose it was
+        // analysed at (an analysis rides on the next frames, which may show another pose)
+        const thisSession = frameOfSession(out.acquisition, st);
+        const view = out.view;
+        if (thisSession && !out.frozen) {
+          st.observeView(view?.bestViewId ?? null, view?.score ?? 0, view?.probe);
+          if (view?.bestViewId) st.recordViewScore(view.bestViewId, view.score, view.probe);
+        }
         // curriculum: evaluate the automatic task checks against the learner's current state (≈ 8 Hz)
-        if (modePolicy(st.mode).evaluateCurriculum) {
+        if (thisSession && modePolicy(st.mode).evaluateCurriculum) {
           const snapshot: LearnerSnapshot = {
             caseId: st.caseId,
             mode: st.mode,
@@ -176,7 +183,9 @@ export function App() {
   // (decision 256): where the probe sits on the chest is the learner's own reference, not a hint.
   const railVisible = ui.showTorso && !ui.minimal;
   const hints = modePolicy(mode).hintsEnabled;
-  const isSim = ui.screen === 'simulator';
+  // a learning screen the mode closes is never drawn, whatever the store holds (setMode moves off it too)
+  const screen = screenInMode(ui.screen, mode);
+  const isSim = screen === 'simulator';
   return (
     <div
       data-mobile-panel={mobilePanel ?? 'none'}
@@ -186,20 +195,20 @@ export function App() {
       <TopBar />
       {/* one key per screen: the same boundary type in the same place would otherwise carry one screen's error
           into the next (decision 154) */}
-      {ui.screen === 'references' ? (
+      {screen === 'references' ? (
         <ErrorBoundary key="references" label="La pantalla de referencias">
           <Suspense fallback={screenFallback}>
             <ReferencesScreen />
           </Suspense>
         </ErrorBoundary>
-      ) : isReportSection(ui.screen) ? (
+      ) : isReportSection(screen) ? (
         // the case report, the curriculum and the progress: sections of one tab (decision 244)
         <ReportSections>
-          <ErrorBoundary key={ui.screen} label={SECTION_LABEL[ui.screen]}>
+          <ErrorBoundary key={screen} label={SECTION_LABEL[screen]}>
             <Suspense fallback={screenFallback}>
-              {ui.screen === 'report' ? (
+              {screen === 'report' ? (
                 <ReportScreen />
-              ) : ui.screen === 'curriculum' ? (
+              ) : screen === 'curriculum' ? (
                 <CurriculumScreen />
               ) : (
                 <ProgressScreen />
@@ -337,7 +346,7 @@ export function App() {
                 <DevPanel />
               </Suspense>
             )}
-            {ui.screen === 'simulator' && !ui.tutorialDone && (
+            {isSim && !ui.tutorialDone && (
               <Suspense fallback={null}>
                 <Tutorial />
               </Suspense>

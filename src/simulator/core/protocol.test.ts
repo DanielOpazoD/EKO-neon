@@ -45,3 +45,27 @@ describe('Worker protocol conditional structure/segment transfer', () => {
     core.dispose();
   });
 });
+
+describe('Session identity of the frames', () => {
+  it('stamps case and session on each frame; a new session drops the last one’s view and cine', () => {
+    const caseDef = loadCaseById('normal-excellent-window');
+    const inp = baseInput({ rendererBackend: 'procedural', quality: 'low', sessionEpoch: 3 });
+    const core = new SimulatorCore(caseDef, inp);
+    let practice = core.step(0.05);
+    for (let i = 0; i < 6; i++) practice = core.step(0.05) ?? practice;
+    assert.ok(practice);
+    assert.equal(practice.acquisition?.caseId, 'normal-excellent-window');
+    assert.equal(practice.acquisition?.sessionEpoch, 3);
+    assert.ok(practice.view, 'the practice frames carry their view analysis');
+    assert.ok(practice.cineLength > 1);
+
+    // an exam begins on the same case: a new session, same pose and controls
+    core.setInput({ ...inp, sessionEpoch: 4 });
+    const exam = core.step(0.05);
+    assert.ok(exam);
+    assert.equal(exam.acquisition?.sessionEpoch, 4);
+    assert.notEqual(exam.view, practice.view, 'the view attached is analysed in the new session');
+    assert.equal(exam.cineLength, 1, 'the practice frames are not in the exam’s cine to scroll back to');
+    core.dispose();
+  });
+});

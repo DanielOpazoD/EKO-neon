@@ -71,6 +71,12 @@ export interface SimInput {
   needSegments?: boolean;
   /** True when the main thread needs the per-sample polar structure map (cut map, review mode, measurement tools, frozen). */
   needStructure?: boolean;
+  /**
+   * The learner's session, renewed by every case load and exam start (`freshSession`). The core stamps it on the frames
+   * it acquires and drops a view analysis made before it changed, so a frame still in flight from the session before
+   * cannot be scored in the new one. 0 when absent.
+   */
+  sessionEpoch?: number;
 }
 
 /** Acquisition controls and model versions that produced one image, independent of pending console changes. */
@@ -88,6 +94,12 @@ export interface FrameAcquisition {
   phaseMarks: PhaseMarks;
   stripAcquisitionId: number | null;
   colorTimeS: number | null;
+  /**
+   * The case and the learner's session (`SimInput.sessionEpoch`) the image was acquired in: what the app checks before
+   * it scores the frame's view. Absent on saved reports from earlier versions.
+   */
+  caseId?: string;
+  sessionEpoch?: number;
 }
 
 export interface EcgPoint {
@@ -309,10 +321,10 @@ export interface ProbePointInfo {
 }
 
 export type MainToWorker =
-  | { type: 'init'; caseDef: CaseDefinition; input: SimInput }
+  | { type: 'init'; caseDef: CaseDefinition; input: SimInput; generation?: number }
   | { type: 'input'; input: SimInput }
   | { type: 'recycle'; buffer: ArrayBuffer }
-  | { type: 'loadCase'; caseDef: CaseDefinition; input: SimInput }
+  | { type: 'loadCase'; caseDef: CaseDefinition; input: SimInput; generation?: number }
   | { type: 'request'; id: number; req: SimRequest };
 
 export type WorkerToMain =
@@ -322,6 +334,12 @@ export type WorkerToMain =
       caseId: string;
       phaseMarks: PhaseMarks;
       lvLengthCm: number;
+      /**
+       * The `generation` of the load this core answers, echoed: the client announces only the latest load's core. A case
+       * picked while another was still loading got the first one's `ready` too, which put the store back on that case
+       * and reloaded it, and the two loads then chased each other for as long as the app was open.
+       */
+      generation?: number;
     }
   | { type: 'frame'; output: SimOutput }
   | { type: 'response'; id: number; res: SimResponse | null }

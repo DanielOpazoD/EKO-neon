@@ -63,7 +63,7 @@ const ARROW_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '
  * Whether the focused element handles this key itself, so the global shortcut must yield (decision 176): every key in a
  * form field or an editable element; the arrows, Home and End in a tab, a slider or another composite widget; Enter on
  * a button, a link or a summary. With focus on a tab ArrowRight moved the probe. Space is not decided here: it is the
- * freeze everywhere but where text is typed (`typesText`, decision 244).
+ * freeze on the scanner's screen, but where text is typed and on the checkboxes Space alone toggles (`freezeKeyApplies`).
  */
 export function focusOwnsKey(target: EventTarget | null, key: string): boolean {
   const t = target as HTMLElement | null;
@@ -77,7 +77,7 @@ export function focusOwnsKey(target: EventTarget | null, key: string): boolean {
   return pressable && key === 'Enter';
 }
 
-/** Input types that hold no typed text: Space on them is the freeze, not a character (a slider, a checkbox, a button). */
+/** Input types that hold no typed text: Space on them is not a character (a slider, a checkbox, a button). */
 const NON_TEXT_INPUTS = new Set([
   'range',
   'checkbox',
@@ -99,10 +99,50 @@ export function typesText(target: EventTarget | null): boolean {
 }
 
 /**
- * Space freezes and resumes the scanner from anywhere in the program (decision 244): a button, a tab, a slider, the 3D
- * torso, the console, another screen. One listener on the window, in the capture phase, so it runs before any other
- * and is the only one: it takes the default (the focused button is not pressed by the key, the page does not scroll)
- * and stops the event there. Only where text is typed does Space stay a character. Holding the key toggles once.
+ * Whether Space is the only key that toggles the focused control: a native checkbox or radio button, or an element with
+ * that role that is not a button (Enter presses a button, never a checkbox). Taken as the freeze, the impression sheet
+ * of the report could not be filled from the keyboard, and it weighs 20 % of the exam.
+ */
+export function spaceToggles(target: EventTarget | null): boolean {
+  const t = target as HTMLElement | null;
+  if (!t || typeof t.tagName !== 'string') return false;
+  if (t.tagName === 'INPUT') {
+    const type = (t as HTMLInputElement).type;
+    return type === 'checkbox' || type === 'radio';
+  }
+  const role = t.getAttribute('role');
+  return t.tagName !== 'BUTTON' && (role === 'checkbox' || role === 'radio' || role === 'switch');
+}
+
+/** Whether Space, pressed on `target`, is the freeze: on the scanner's screen, away from text and from the checkboxes. */
+export function freezeKeyApplies(target: EventTarget | null, screen: string): boolean {
+  return screen === 'simulator' && !typesText(target) && !spaceToggles(target);
+}
+
+/**
+ * Whether a key press is one of the simulator's shortcuts. With ⌘, or with Ctrl alone, it is the browser's or the
+ * system's (copy, zoom, print), except Ctrl/⌘ + Z in review mode: ⌘C switched to colour and resumed a frozen image, ⌘+
+ * and ⌘− moved the gain. Alt with a letter or a digit is a menu accelerator (Alt+E opens the browser's menu on Windows).
+ * But a character the keyboard writes with Option or AltGr — AltGr reaches the page as Ctrl+Alt — is that character:
+ * on Spanish, German or French keyboards that is how «[» and «]» are typed. Alt also modifies the arrows (rock, tilt).
+ * Off the scanner's screen only «?» and Esc act: the arrows moved a probe no one saw and kept the page from scrolling.
+ */
+export function shortcutApplies(
+  e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'altKey'>,
+  screen: string,
+): boolean {
+  if (e.metaKey || (e.ctrlKey && !e.altKey))
+    return screen === 'simulator' && (e.key === 'z' || e.key === 'Z');
+  if (e.altKey && /^[a-z0-9]$/i.test(e.key)) return false;
+  return screen === 'simulator' || e.key === '?' || e.key === 'Escape';
+}
+
+/**
+ * Space freezes and resumes the scanner wherever the focus is on its screen (decision 244): a button, a tab, a slider,
+ * the 3D torso, the console. One listener on the window, in the capture phase, so it runs before any other and is the
+ * only one: it takes the default (the focused button is not pressed by the key) and stops the event there. Space stays
+ * itself where text is typed, on a checkbox or a radio button, whose only key it is, and on the other screens, where
+ * no image is in sight and Space scrolls the page. Holding the key toggles once.
  */
 function useFreezeKey(): void {
   useEffect(() => {
@@ -111,7 +151,7 @@ function useFreezeKey(): void {
     const onDown = (e: KeyboardEvent) => {
       taken = false;
       if (!isSpace(e) || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
-      if (typesText(e.target)) return;
+      if (!freezeKeyApplies(e.target, useSimStore.getState().ui.screen)) return;
       taken = true;
       e.preventDefault();
       e.stopPropagation();
@@ -136,8 +176,9 @@ export function useShortcuts(): void {
   useFreezeKey();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (focusOwnsKey(e.target, e.key)) return;
+      if (e.isComposing || focusOwnsKey(e.target, e.key)) return;
       const s = useSimStore.getState();
+      if (!shortcutApplies(e, s.ui.screen)) return;
       const big = e.shiftKey;
       const step = big ? 1 : 0.2;
       const ang = big ? 15 : 3;

@@ -101,7 +101,8 @@ export function TooltipLayer() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') return hide();
       // a key can change what the element says (Space turns «Congelar» into «Reanudar»): read it again once React
-      // has drawn it. Also on the release: the press of Space never gets here, the freeze key takes it (decision 244)
+      // has drawn it. Also on the release: on the scanner's screen the press of Space never gets here, the freeze key
+      // takes it (decision 244)
       window.setTimeout(() => {
         const el = target.current;
         if (!el?.isConnected) return;

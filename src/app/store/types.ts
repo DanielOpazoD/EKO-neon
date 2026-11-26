@@ -159,8 +159,9 @@ export interface AcquisitionSlice {
   startPresetView: (viewId: string, opts?: { instant?: boolean }) => void;
   /**
    * Free practice opens on the canonical parasternal long axis (decision 343): when a case has loaded in sandbox mode and
-   * the probe is still at START_PROBE, it goes there at once, as the PLAX preset (it does not count as acquired by hand).
-   * Guided practice and the exam keep the imperfect pose the learner starts from.
+   * the probe is still at START_PROBE, it goes there at once. It does not count as acquired by hand until the learner
+   * has lost the view and found it again (`openingView`). Guided practice and the exam keep the imperfect pose the
+   * learner starts from.
    */
   openOnStartView: () => void;
   /** Advance the preset animation; called from the animation loop. */
@@ -170,6 +171,11 @@ export interface AcquisitionSlice {
 
 export interface EducationSlice {
   caseId: string;
+  /**
+   * The learner's session: renewed by every case load and exam start (`freshSession`), sent to the simulator, and
+   * stamped back on the frames acquired in it. Only a frame of this case and this session is scored.
+   */
+  sessionEpoch: number;
   mode: ProductMode;
   targetViewId: string | null;
   truth: StructuredEchoTruth | null;
@@ -201,6 +207,14 @@ export interface EducationSlice {
   handViewProgress: Record<string, number>;
   /** Views whose preset was used since the case was loaded. */
   presetViews: string[];
+  /**
+   * The view free practice opened on (decision 343) and the pose the jump left the probe at. The learner pressed no
+   * preset, so the view is not in `presetViews`, but its score is the app's: it adds nothing to `handViewProgress` until
+   * `released`, when the learner, moving the probe, has lost that view (another view recognised, or below
+   * OPENING_VIEW_LOST_BELOW) or has reset the probe to the start pose. Found again from there, it counts like any other.
+   * A view analysed at the jump's pose itself never counts by hand (`appPlacedPose`). A new session clears it.
+   */
+  openingView: { viewId: string; pose: ProbeControl; released: boolean } | null;
   examFinished: boolean;
   /**
    * The exam's summary as it was when the learner finished, the one recorded for the teacher and the one the report shows
@@ -222,14 +236,39 @@ export interface EducationSlice {
    * and its view as the target of the guided mode, with the view guide open on the simulator.
    */
   openTask: (task: { caseId?: string; viewId?: string }) => void;
-  setTruth: (t: StructuredEchoTruth | null, caseId: string) => void;
+  /**
+   * The truth of the case on screen, from its core's `ready`. It never sets the case: the store's case is the learner's
+   * choice, and a `ready` that set it moved the store back to a case already left while it loaded.
+   */
+  setTruth: (t: StructuredEchoTruth | null) => void;
+  /**
+   * The simulator's `ready` for a case: its truth, its phase marks and, in free practice, the opening view. Ignored when
+   * the case is no longer the store's (picked, then left while it loaded).
+   */
+  caseReady: (r: {
+    truth: StructuredEchoTruth;
+    caseId: string;
+    phaseMarks: PhaseMarks;
+    lvLengthCm: number;
+    workerMode: 'worker' | 'inline';
+  }) => void;
   addMeasurement: (m: Measurement) => void;
   removeMeasurement: (id: string) => void;
   clearMeasurements: () => void;
   setActiveTool: (t: EducationSlice['activeTool']) => void;
   /** Start capturing a protocol measurement: selects its tool and remembers the semantic id. */
   setActiveMeasurement: (id: string | null) => void;
-  recordViewScore: (viewId: string, score: number) => void;
+  /**
+   * The best view of a live frame of this session and its score, with the pose it was analysed at (`ViewAnalysis.probe`):
+   * a score analysed at a pose the app placed the probe at counts in `viewProgress` only.
+   */
+  recordViewScore: (viewId: string, score: number, pose?: ProbeControl) => void;
+  /**
+   * One analysed live frame of this session (`viewId` null when no view is recognised), with the pose the analysis was
+   * made at: it releases `openingView` once that view is lost at a pose the learner reached. Analyses at the opening
+   * pose or at START_PROBE say nothing about the learner.
+   */
+  observeView: (viewId: string | null, score: number, pose: ProbeControl | undefined) => void;
   finishExam: () => void;
   resetProgress: () => void;
   loadCase: (id: string) => void;

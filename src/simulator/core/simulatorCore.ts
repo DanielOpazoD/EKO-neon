@@ -139,6 +139,8 @@ export class SimulatorCore {
   private lastPersistence = 0;
   private lastAnalysis: ViewAnalysis | null = null;
   private analysisCounter = 0;
+  /** The learner's session the frames are acquired in (`SimInput.sessionEpoch`). */
+  private sessionEpoch = 0;
   private ecgRing = new EcgRing();
   private strips = new StripEngine();
   private poseCacheHeart: HeartModel | null = null;
@@ -173,6 +175,7 @@ export class SimulatorCore {
     );
     this.input = constrainAcquisition(input);
     this.acquisitionModality = input.modality;
+    this.sessionEpoch = input.sessionEpoch ?? 0;
     const models = buildCaseModels(caseDef, input.patient);
     this.thorax = models.thorax;
     this.heart = models.heart;
@@ -332,7 +335,18 @@ export class SimulatorCore {
       this.artifactKey = nextArtifactKey;
       this.applyArtifactOverrides(input.artifactOverrides);
     }
-    if (!input.frozen && input.modality !== this.acquisitionModality) {
+    const sessionEpoch = input.sessionEpoch ?? 0;
+    const newSession = sessionEpoch !== this.sessionEpoch;
+    if (newSession) {
+      // a new session (an exam started on the case in practice, decision 235) acquires from scratch: the view analysed
+      // in the last one was still attached to the next frames and scored in the new one (A4C 97 the instant an exam
+      // began), and its cine and strips were there to scroll back to and measure
+      this.sessionEpoch = sessionEpoch;
+      this.lastAnalysis = null;
+      this.analysisCounter = 0;
+      this.cine.clear();
+    }
+    if (newSession || (!input.frozen && input.modality !== this.acquisitionModality)) {
       this.strips.reset();
       this.colorDriver.resetHistory();
       this.gpu?.resetDopplerHistory();
@@ -660,16 +674,20 @@ export class SimulatorCore {
     this.analysisCounter++;
     if (this.analysisCounter % 5 === 1) {
       const ta = performance.now();
-      this.lastAnalysis = analyzeView({
-        heart: this.heart,
-        thorax: scene.thorax,
-        control: inp.probe,
-        beam,
-        frame: this.frame,
-        display: this.display,
-        settings: inp.settings,
-        heartPose: scene.heartPose,
-      });
+      this.lastAnalysis = {
+        ...analyzeView({
+          heart: this.heart,
+          thorax: scene.thorax,
+          control: inp.probe,
+          beam,
+          frame: this.frame,
+          display: this.display,
+          settings: inp.settings,
+          heartPose: scene.heartPose,
+        }),
+        // the next frames carry this analysis too, possibly at other poses: the score is this pose's
+        probe: { ...inp.probe },
+      };
       this.timing.analysisMs = performance.now() - ta;
     }
     const tCine = performance.now();
@@ -691,6 +709,8 @@ export class SimulatorCore {
           inp.modality === 'color' && Number.isFinite(this.colorDriver.lastTimeS)
             ? this.colorDriver.lastTimeS
             : null,
+        caseId: this.caseDef.id,
+        sessionEpoch: this.sessionEpoch,
       },
       scene,
       gate: isStripModality(inp.modality)

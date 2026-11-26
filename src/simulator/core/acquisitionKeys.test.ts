@@ -172,6 +172,11 @@ test('simInputKey detects every field change deterministically without JSON.stri
   assert.notEqual(simInputKey(a), simInputKey(makeInput({ needStructure: false })));
   assert.notEqual(
     simInputKey(a),
+    simInputKey(makeInput({ sessionEpoch: 4 })),
+    'a new session reaches the worker even when the pose and the controls did not change',
+  );
+  assert.notEqual(
+    simInputKey(a),
     simInputKey(makeInput({ color: { ...DEFAULT_COLOR, showVariance: false } })),
     'simInputKey must still transmit presentation toggles to worker',
   );

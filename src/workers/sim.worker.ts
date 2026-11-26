@@ -133,6 +133,7 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
         caseId: msg.caseDef.id,
         phaseMarks: core.phaseMarks(),
         lvLengthCm: core.lvLengthCm(),
+        generation: msg.generation,
       });
       schedule(1);
       return;

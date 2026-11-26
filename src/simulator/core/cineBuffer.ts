@@ -143,6 +143,11 @@ export class CineBuffer {
     this.head = (this.head + 1) % this.capacity;
     this.count = Math.min(this.capacity, this.count + 1);
   }
+
+  /** Forgets every frame: a new session starts with an empty cine. The slots keep their arrays for reuse. */
+  clear(): void {
+    this.count = 0;
+  }
 }
 
 function reuseU8Clamped(
