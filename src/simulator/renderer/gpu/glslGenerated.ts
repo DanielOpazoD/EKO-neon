@@ -147,6 +147,13 @@ float septalCrestFactor(float az, float zRel) {
   }
   return 1.0 - cw * cw * (1.0 - f);
 }
+// src/simulator/anatomy/lvWall.ts: septalShare
+float septalShare(float az, float rvAzA, float rvAzP) {
+  float d = az - (rvAzA + rvAzP) * 0.5;
+  float off = abs(d - 2.0 * PI * floor(d / (2.0 * PI) + 0.5));
+  float t = min(1.0, max(0.0, ((rvAzP - rvAzA) * 0.5 + 0.2 - off) / 0.4));
+  return t * t * (3.0 - 2.0 * t);
+}
 // src/simulator/anatomy/lvSegments.ts: lvSegmentCode
 float lvSegmentCode(float azimuthRad, float levelFrac, float rvAzA, float rvAzP) {
   float septal = (rvAzA + rvAzP) * 0.5;

@@ -1,4 +1,14 @@
 /**
+ * Interventricular grooves, where the right ventricle inserts on the left (heart-frame azimuth, rad; 0 = lateral,
+ * π/2 = anterior). They bound the septum, the AHA segments (decision 152) and the septal wall thickness (lvWall.ts):
+ * anterior | anteroseptal at the anterior insertion (92°) and inferoseptal | inferior at the inferior one (212°). Model
+ * constants shared by all cases, not individual insertions measured on an image. They live in this leaf module, not in
+ * anchors.ts, so that the wall thickness reads them without joining the anchors' import cycle.
+ */
+export const RV_GROOVE_ANTERIOR_RAD = 1.6;
+export const RV_GROOVE_INFERIOR_RAD = 3.7;
+
+/**
  * Left-ventricular myocardial segments of a point of LV compact myocardium (decision 152), in the heart frame: azimuth
  * atan2(y, x) with 0 = lateral and π/2 = anterior, and the level fraction (z − zAnn) / (L − zAnn) from the mitral annulus
  * (0) to the end of the LV cavity (1; the endocardial apex stays at z = L through the cycle).

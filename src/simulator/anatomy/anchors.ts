@@ -12,6 +12,7 @@ import { fitOccupiedAtrium } from './laNormalization';
 import { Structure } from './tissue';
 import type { TissueSample } from './tissue';
 import { lvCavityRadius, lvProfileG } from './lvShape';
+import { RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD } from './lvSegments';
 import { rvRadialScale } from './rv';
 import {
   AV_AXIS,
@@ -148,15 +149,6 @@ export interface Anchors {
   papTipFrac: number;
   papR: number;
 }
-
-/**
- * Interventricular grooves, where the right ventricle inserts on the left (heart-frame azimuth, rad; 0 = lateral,
- * π/2 = anterior). They bound the septum and the AHA segments (decision 152): anterior | anteroseptal at the anterior
- * insertion (92°) and inferoseptal | inferior at the inferior one (212°). Model constants shared by all cases, not
- * individual insertions measured on an image.
- */
-export const RV_GROOVE_ANTERIOR_RAD = 1.6;
-export const RV_GROOVE_INFERIOR_RAD = 3.7;
 
 /** Anatomical anchors; LA size is normalized against the actual clipped body and nominal annular excursion. */
 export function anchors(m: HeartModel): Anchors {

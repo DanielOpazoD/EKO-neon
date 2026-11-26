@@ -1,6 +1,11 @@
 import type { AnatomyConfig } from '@/cases/schema';
-import { aha17FromCode, lvSegmentCode } from './lvSegments';
-import { RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD } from './anchors';
+import {
+  aha17FromCode,
+  lvSegmentCode,
+  RV_GROOVE_ANTERIOR_RAD,
+  RV_GROOVE_INFERIOR_RAD,
+} from './lvSegments';
+import { meanWallThicknessCm } from './lvWall';
 import { MITRAL_CENTRE_X } from './heartFrame';
 import {
   allocLvProfileTable,
@@ -45,7 +50,8 @@ export function lvGeometryFromVolume(
     lvNeckGain(shape, rMax, annulusR),
     Number.isFinite(annulusR) ? MITRAL_CENTRE_X : 0,
   );
-  const tBase = (anatomy.ivsdCm + anatomy.lvpwdCm) / 2;
+  // the shell carries the wall as drawn: its mean around the circumference, the septum a third of it
+  const tBase = meanWallThicknessCm(anatomy.ivsdCm, anatomy.lvpwdCm);
   const tMean = (zeta: number): number =>
     tBase * axialWallFactor(zeta, anatomy.apexWallThicknessCm / tBase);
   const wallVolumeMl = Math.max(20, lvShellVolume(edProfile, shape.ratio, tMean, 1));
