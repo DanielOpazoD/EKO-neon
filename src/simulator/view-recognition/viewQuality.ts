@@ -184,6 +184,11 @@ function testLandmark(
 
 export interface AnalyzeInput {
   heart: HeartModel;
+  /**
+   * The patient's thorax at rest, as `buildCaseModels` made it with the heart: the reference poses (the canonical plane
+   * and beam, the manipulation hints) are resolved against it. Whatever the breath does to the image reaches the
+   * analysis through `frame` (its transmission, tissue and structure), not through this thorax.
+   */
   thorax: ThoraxModel;
   control: ProbeControl;
   beam: BeamFrame;

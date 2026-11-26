@@ -677,7 +677,13 @@ export class SimulatorCore {
       this.lastAnalysis = {
         ...analyzeView({
           heart: this.heart,
-          thorax: scene.thorax,
+          // The view's reference pose is the patient's at rest, the thorax the presets are solved against; the breath
+          // reaches the analysis through the frame, whose transmission carries the lung sliding over the window. Given
+          // the frame's thorax, rebuilt every frame in free breathing, each analysis solved the reference poses again
+          // (A4C 29 ms on average, suprasternal 30 ms; 0.37 and 0.30 ms now, as in expiration) and the reference moved
+          // with the breath: past half an inspiration the apical window left the axis, and the A4C preset, held still,
+          // scored 68-97 instead of 87-97, up to 4.8° and 1.2 cm off its own reference.
+          thorax: this.thorax,
           control: inp.probe,
           beam,
           frame: this.frame,
