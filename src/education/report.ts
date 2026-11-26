@@ -385,12 +385,13 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
   if (t.wallMotion.abnormalSegments.length) out.push(`${t.wallMotion.description}.`);
   const mr = t.regurgitation.mr;
   if (mr) {
-    // EROA, regurgitant volume, fraction and vena contracta: integrative grading (ASE/EACVI 2017)
+    // graded on the EROA, regurgitant volume and fraction the line cites (valveGrading.ts, ASE 2017). It cites no vena
+    // contracta: the model's is the EROA as a width, and a mild orifice's (0.36–0.50 cm) sits in the guideline's
+    // intermediate band, so the line read «leve (… VC 0.44 cm)» against its own grade in the HCM case
     const grade = { none: 'trivial', mild: 'leve', moderate: 'moderada', severe: 'severa' }[
       gradeMitralRegurgitation(mr)
     ];
     const extra: string[] = [];
-    if (mr.venaContractaCm !== undefined) extra.push(`VC ${mr.venaContractaCm.toFixed(2)} cm`);
     if (mr.pisaRadius40Cm !== undefined)
       extra.push(`radio PISA@40 ${mr.pisaRadius40Cm.toFixed(2)} cm`);
     out.push(

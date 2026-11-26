@@ -181,24 +181,26 @@ test('MR PISA/vena contracta formulas, ground truth, integrative grading and pro
   assert.ok(Math.abs(pisaEroaCm2(r, va, vmax) - eroa) < 1e-9);
   assert.ok(Math.abs(pisaFlowRateMlps(r, va) - eroa * vmax * 100) < 1e-9);
 
-  // Vena contracta width physically aligns with ASE 2017 thresholds
-  assert.ok(venaContractaFromEroaCm(0.07) < 0.3);
+  // The circular-equivalent vena contracta is the EROA as a width (a circle that wide has that area). It nearly shares
+  // the ASE 2017 severe cut-off with the EROA but no gradable jet (≥ 0.10 cm²) reaches the mild one (VC < 0.3 cm): an
+  // expected value, not a criterion (valveGrading.ts)
+  assert.ok(Math.abs(Math.PI * (venaContractaFromEroaCm(eroa) / 2) ** 2 - eroa) < 1e-12);
   assert.ok(venaContractaFromEroaCm(0.4) >= 0.7);
+  assert.ok(venaContractaFromEroaCm(0.1) > 0.3);
 
-  // Ground truth populates VC & PISA radius for severe primary MR
+  // Ground truth populates the expected VC & PISA radius for severe primary MR
   const mvpTruth = truthFor('mvp-primary-mr');
   assert.ok(mvpTruth.regurgitation.mr !== null);
-  assert.ok((mvpTruth.regurgitation.mr!.venaContractaCm ?? 0) >= 0.7);
+  assert.ok((mvpTruth.regurgitation.mr!.expectedVenaContractaCm ?? 0) >= 0.7);
   assert.ok((mvpTruth.regurgitation.mr!.pisaRadius40Cm ?? 0) >= 0.9);
   assert.equal(gradeMitralRegurgitation(mvpTruth.regurgitation.mr!), 'severe');
 
-  // Integrative grading with VC respects ASE 2017 mild/severe cutoffs
+  // Integrative grading on the three quantitative criteria respects ASE 2017 mild/severe cutoffs
   assert.equal(
     gradeMitralRegurgitation({
       eroaCm2: 0.15,
       regurgitantVolumeMl: 20,
       regurgitantFractionPct: 22,
-      venaContractaCm: 0.25,
     }),
     'mild',
   );
@@ -207,7 +209,6 @@ test('MR PISA/vena contracta formulas, ground truth, integrative grading and pro
       eroaCm2: 0.42,
       regurgitantVolumeMl: 65,
       regurgitantFractionPct: 54,
-      venaContractaCm: 0.74,
     }),
     'severe',
   );
