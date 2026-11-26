@@ -72,8 +72,8 @@ export const AnatomySchema = z.object({
     /** Leaflet body displacement beyond the annulus into the LA in systole (prolapse), 0 = none. */
     prolapse: unit01.default(0),
   }),
+  // how far the cusps open is not typed here: it follows from hemodynamics.avEffectiveAreaCm2 (aorticOpeningForEoa)
   aorticValve: z.object({
-    maxOpeningFraction: unit01, // 1 = normal full opening
     calcification: unit01,
     cuspThicknessCm: z.number().min(0.05).max(0.5),
     bicuspid: z.boolean().default(false),

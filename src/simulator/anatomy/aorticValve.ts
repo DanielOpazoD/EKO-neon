@@ -15,6 +15,7 @@
  * triangle in every short-axis section instead of a Y, the free margin sat 13.5 mm above the annulus, and a thickness
  * floor made normal cusps 1.2-1.4 mm thick, as bright as the root wall in the long axis.
  */
+import type { AnatomyConfig } from '@/cases/schema';
 
 /** Aortic root levels along its axis from the annulus (cm): widest sinus, sinotubular waist, start of the tubular ascending aorta. */
 export const ROOT_SINUS_T = 0.95;
@@ -59,6 +60,17 @@ export const AV_OPEN_EDGE_FRACTION = 0.8;
 export const AV_OPEN_WALL_GAP = 0.05;
 /** Azimuth (rad, e1/e2 basis) of the centre of cusp 0; the sinus bulges share it. */
 export const AV_PHI0 = 0.5;
+/**
+ * Contraction coefficient of the aortic jet, EOA / GOA: the effective orifice area (the vena contracta that the Doppler
+ * and the continuity equation measure) over the geometric one (the orifice the cusps leave, which planimetry traces).
+ * The streamlines that converge on the orifice keep converging past it, so the jet is narrower than the hole, by an
+ * amount the shape of the valve's inflow sets: in models of patients' stenotic valves 0.85–0.90 for long tapered domes
+ * and 0.71–0.76 for flat valves, and in patients 0.94 for doming bicuspid valves against 0.73 for flat ones (Gilon et
+ * al., J Am Coll Cardiol 2002;40:1479–86). These cusps converge on their orifice as a dome at every opening (decision
+ * 79), so they take the domed value at its low end. The normal case lands beside it on its own: its fully open cusps
+ * leave 3.62 cm² for the 3.0 cm² of its Doppler (0.83), so they open to 0.99.
+ */
+export const AV_CONTRACTION_COEFFICIENT = 0.85;
 
 /**
  * Lumen radius of the outflow tract at height t < 0 below the annulus: from 0.95 of the annulus radius to the tract's
@@ -76,6 +88,17 @@ export interface RootProfile {
   ascR: number;
   lvotR: number;
   count: number;
+}
+
+/** The root profile of an anatomy: annulus, widest sinus, tubular aorta and outflow tract radii, and the cusp count. */
+export function aorticRootProfile(anatomy: Pick<AnatomyConfig, 'aorta' | 'aorticValve'>): RootProfile {
+  return {
+    avR: anatomy.aorta.annulusCm / 2,
+    sinusR: anatomy.aorta.sinusCm / 2,
+    ascR: anatomy.aorta.ascendingCm / 2,
+    lvotR: anatomy.aorta.lvotDiameterCm / 2,
+    count: anatomy.aorticValve.bicuspid ? 2 : 3,
+  };
 }
 
 /**
@@ -117,7 +140,7 @@ export interface AorticValve {
   cH: number;
   hComm: number;
   sag: number;
-  /** Opening 0 (closed) … 1 (profiles along the sinus wall): the cycle's opening times the case's maximum. */
+  /** Opening 0 (closed) … 1 (profiles along the sinus wall): the cycle's opening times the case's peak (aorticOpeningForEoa). */
   open: number;
   thickness: number;
 }
@@ -248,13 +271,70 @@ export function aorticCuspDistance(
     ax = bx;
     az = bz;
   }
-  const aq = Math.abs(q);
-  const tw = (aq - 0.85) / 0.15;
-  aorticHit.w = aq < 0.85 ? 1 : 1 - tw * tw * (3 - 2 * tw);
-  return (av.thickness * (0.7 + 0.3 * aorticHit.frac) * 0.5 + 0.012) * (0.4 + 0.6 * aorticHit.w);
+  aorticHit.w = cuspEdgeWeight(Math.abs(q));
+  return cuspHalfThickness(av.thickness, aorticHit.frac, aorticHit.w);
 }
 
-/** Free end of a cusp's profile at fraction q of its sector: radius from the axis and height, for tests and tools. */
+/** Weight of a cusp's thickness at |q| of its sector: 1 over its body, fading to 0 at the commissures. */
+function cuspEdgeWeight(aq: number): number {
+  const tw = (aq - 0.85) / 0.15;
+  return aq < 0.85 ? 1 : 1 - tw * tw * (3 - 2 * tw);
+}
+
+/** Half thickness (cm) of a cusp at fraction `frac` of its profile (0 attachment → 1 free edge, the nodule) and edge weight `w`. */
+function cuspHalfThickness(thickness: number, frac: number, w: number): number {
+  return (thickness * (0.7 + 0.3 * frac) * 0.5 + 0.012) * (0.4 + 0.6 * w);
+}
+
+/** Azimuths per half sector in the orifice integral: within 0.01 % of the converged area above 0.05 cm² on the 12 cases' roots. */
+const ORIFICE_SAMPLES = 64;
+
+/**
+ * Geometric orifice area (cm²) the cusps leave, as `aorticCuspDistance` draws them: at each azimuth the lumen is
+ * narrowest at the free edge, less the cusp's half thickness there, and that radius swept around the axis is the orifice
+ * projected on the root's cross-section. A single short-axis slice through the tips reads 3–6 % more (the free edges
+ * rise toward the commissures, so no plane holds them all). The free-edge centreline overstates it by the cusps'
+ * thickness: 1.40 against 0.92 cm² in the severe stenosis at its peak (cusps 2.5 mm thick).
+ */
+export function aorticOrificeAreaCm2(av: AorticValve, root: RootProfile): number {
+  // the cusps are symmetric about their centres: 2·count half sectors of π/count each, so the area Σ ½ r² dφ is π·mean(r²)
+  let sum = 0;
+  for (let i = 0; i < ORIFICE_SAMPLES; i++) {
+    const q = (i + 0.5) / ORIFICE_SAMPLES;
+    const r = aorticCuspTip(av, root, q).r - cuspHalfThickness(av.thickness, 1, cuspEdgeWeight(q));
+    if (r > 0) sum += r * r;
+  }
+  return (Math.PI * sum) / ORIFICE_SAMPLES;
+}
+
+/**
+ * Peak opening of the cusps (0 closed … 1 along the sinus wall) for an effective orifice area: the opening whose orifice,
+ * contracted by AV_CONTRACTION_COEFFICIENT, is `eoaCm2`, so the 2D, the short axis, the colour jet, the CW and the
+ * continuity equation show one valve. The orifice widens monotonically with the opening, so a bisection finds it. Cusps
+ * whose full opening leaves less open fully: they then lie along the flow and the contraction fades, so such a valve's
+ * own coefficient lies between AV_CONTRACTION_COEFFICIENT and 1 (EOA ≤ GOA in every case: aorticOpening.test.ts).
+ *
+ * The opening used to be typed per case (anatomy.aorticValve.maxOpeningFraction) and its orifice ignored the Doppler's:
+ * the severe stenosis (0.3) left 0.15 cm² for an EOA of 0.78, the moderate one (0.5) 0.56 cm² for 1.05 — severe by
+ * planimetry, moderate by continuity — and the artifact case (0.6) 1.04 cm² for 1.15. They now open to 0.58, 0.70 and
+ * 0.67, the low-output HFrEF valve to 0.94 and the normal ones to 0.98–1.
+ */
+export function aorticOpeningForEoa(root: RootProfile, thickness: number, eoaCm2: number): number {
+  const goa = eoaCm2 / AV_CONTRACTION_COEFFICIENT;
+  const orifice = (open: number): number =>
+    aorticOrificeAreaCm2(buildAorticValve(root.count, open, thickness), root);
+  if (orifice(1) <= goa) return 1;
+  let lo = 0,
+    hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (orifice(mid) < goa) lo = mid;
+    else hi = mid;
+  }
+  return 0.5 * (lo + hi);
+}
+
+/** Free end of a cusp's profile at fraction q of its sector: radius from the axis and height. */
 export function aorticCuspTip(
   av: AorticValve,
   root: RootProfile,

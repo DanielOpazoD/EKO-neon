@@ -40,7 +40,6 @@ export const normalExcellentCase: CaseDefinitionInput = {
       samSeverity: 0,
     },
     aorticValve: {
-      maxOpeningFraction: 1,
       calcification: 0,
       cuspThicknessCm: 0.08,
       bicuspid: false,

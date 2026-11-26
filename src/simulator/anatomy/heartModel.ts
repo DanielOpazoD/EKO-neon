@@ -63,6 +63,11 @@ export interface HeartModel {
   columnShiftCm: number;
   /** Shared age-dependent descending-aortic area strain, assigned by the case model builder. */
   descAortaAreaStrain: number;
+  /**
+   * Peak opening of the aortic cusps (0 closed … 1 along the sinus wall): the one whose orifice, contracted, is the
+   * case's effective orifice area (`aorticOpeningForEoa`). Assigned by the case model builder; fully open until then.
+   */
+  aorticOpening: number;
 }
 
 export function createHeartModel(
@@ -93,6 +98,7 @@ export function createHeartModel(
     ivcCollapse: Math.min(0.95, Math.max(0, ivcCollapse)),
     columnShiftCm,
     descAortaAreaStrain: 0,
+    aorticOpening: 1,
   };
 }
 

@@ -52,7 +52,6 @@ export function normalizeCase(input: CaseDefinitionInput): CaseDefinition {
         prolapse: input.anatomy.mitral.prolapse ?? 0,
       },
       aorticValve: {
-        maxOpeningFraction: input.anatomy.aorticValve.maxOpeningFraction,
         calcification: input.anatomy.aorticValve.calcification,
         cuspThicknessCm: input.anatomy.aorticValve.cuspThicknessCm,
         bicuspid: input.anatomy.aorticValve.bicuspid ?? false,
