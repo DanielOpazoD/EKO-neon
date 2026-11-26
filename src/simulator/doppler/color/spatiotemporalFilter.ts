@@ -240,10 +240,14 @@ export interface SpatialFilterParams {
   siMax: number;
   scaleMps: number;
   baselineShiftMps: number;
-  /** Smoothing strength in [0, 1]. At 0, copies src -> dst unchanged. */
+  /** Smoothing strength in [0, 1]. At 0, copies src -> dst unchanged (still applying breakthrough encoding). */
   smoothing: number;
   /** Box-indexed mask (`nL * nS`): 1 where unshadowed blood (or bloomed blood), 0 otherwise. */
   bloodMask: Float32Array;
+  /** Optional box-indexed Doppler class (`1.0` blood, `0.5` tissue/valve clutter, `0` invalid). */
+  cellClass?: Float32Array;
+  /** Color Doppler gain (dB) for extreme overgain tissue-write-priority breakthrough (> 4 dB). */
+  gainDb?: number;
   srcVel: Float32Array;
   srcVar: Float32Array;
   srcPow: Float32Array;
@@ -253,17 +257,30 @@ export interface SpatialFilterParams {
 }
 
 /**
+ * Encode tissue-write-priority breakthrough in `power > 1.0` (`1.0 + breakthrough`) for surviving
+ * tissue/valve clutter or extreme overgain (`gainDb > 4 dB`), leaving normal blood (`gainDb <= 4 dB`)
+ * strictly in `[0, 1]` so standard tissue write priority is bit-for-bit unchanged.
+ */
+export function encodeColorBreakthroughPower(
+  powVal: number,
+  isClutter: boolean,
+  gainDb: number,
+): number {
+  const bt = isClutter
+    ? smoothstep(0.25, 0.9, powVal)
+    : smoothstep(4.0, 12.0, gainDb) * 0.45;
+  return bt > 0 ? 1 + bt : powVal;
+}
+
+/**
  * Coherence- & Variance-Adaptive Circular Spatial Filter for Color Doppler (CPU mirror of Pass D3).
  *
  * Inside the polar ROI box:
- *  1. Rejects isolated salt-and-pepper speckle pixels with insufficient 8-neighbor support.
- *  2. Closes isolated single-sample pinholes strictly inside unshadowed blood (never bleeds into tissue).
- *  3. Estimates local spatial circular phase coherence `|Σ w·p·e^{iφ}| / Σ w·p` and local variance:
- *     - Laminar flow (high coherence, low variance) receives strong circular bilateral phasor
- *       smoothing and sub-threshold variance cleanup -> silky, unified laminar jets with razor-sharp
- *       PISA aliasing contours.
- *     - Turbulent flow (high variance, low coherence) automatically drops velocity smoothing to preserve
- *       high-frequency mosaic texture while gently consolidating turbulent variance legibility.
+ *  1. Rejects isolated salt-and-pepper speckle pixels with insufficient same-class 8-neighbor support.
+ *  2. Closes isolated single-sample pinholes strictly inside unshadowed blood (`class >= 0.75`, never myocardium).
+ *  3. Estimates local spatial circular phase coherence `|Σ w·p·e^{iφ}| / Σ w·p` and local variance strictly
+ *     within the same class (blood vs clutter) so wall flash never biases adjacent laminar blood flow.
+ *  4. Encodes tissue-write-priority breakthrough (`power = 1 + breakthrough`) on surviving clutter / extreme overgain.
  */
 export function applyColorSpatialFilter(p: SpatialFilterParams): void {
   const { samples, liMin, liMax, siMin, siMax } = p;
@@ -272,14 +289,25 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
   if (nL === 0 || nS === 0) return;
 
   const sm = clamp01(p.smoothing);
+  const gainDb = p.gainDb ?? 0;
+  const clsArr = p.cellClass;
   if (sm <= 0) {
-    for (let li = liMin; li <= liMax; li++) {
-      const row = li * samples;
-      for (let si = siMin; si <= siMax; si++) {
-        const idx = row + si;
+    for (let l = 0; l < nL; l++) {
+      const li = liMin + l;
+      const row = li * samples + siMin;
+      const gRow = l * nS;
+      for (let k = 0; k < nS; k++) {
+        const idx = row + k;
+        const pw = p.srcPow[idx]!;
         p.dstVel[idx] = p.srcVel[idx]!;
         p.dstVar[idx] = p.srcVar[idx]!;
-        p.dstPow[idx] = p.srcPow[idx]!;
+        if (pw > 0) {
+          const cls = clsArr ? clsArr[gRow + k]! : p.bloodMask[gRow + k]! > 0.5 ? 1 : 0;
+          const isClutter = cls > 0.25 && cls < 0.75;
+          p.dstPow[idx] = encodeColorBreakthroughPower(pw, isClutter, gainDb);
+        } else {
+          p.dstPow[idx] = 0;
+        }
       }
     }
     return;
@@ -333,6 +361,9 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
       const cosC = cosBuf[g]!;
       const sinC = sinBuf[g]!;
       const varC = varBuf[g]!;
+      const centerClass = clsArr ? clsArr[g]! : p.bloodMask[g]! > 0.5 ? 1 : 0;
+      const isClutter = centerClass > 0.25 && centerClass < 0.75;
+      const targetClass = powC <= 0 ? 1 : centerClass;
 
       let nCount = 0;
       let nGeomW = 0;
@@ -353,6 +384,10 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
           const h = nRow + kk;
           const pw = powBuf[h]!;
           if (pw <= 0) continue;
+          if (clsArr) {
+            const nCls = clsArr[h]!;
+            if (Math.abs(nCls - targetClass) >= 0.25) continue;
+          }
           const wGeom = wl * (dk === 0 ? 2 : 1);
           const wp = wGeom * pw;
           nCount++;
@@ -364,10 +399,10 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
         }
       }
 
-      // Case 1: Center uncolored -> safe blood-pool pinhole closure only
+      // Case 1: Center uncolored -> safe blood-pool pinhole closure strictly on blood (class >= 0.75)
       if (powC <= 0) {
         if (
-          p.bloodMask[g]! > 0.5 &&
+          centerClass >= 0.75 &&
           sm >= 0.25 &&
           nCount >= minPinholeCount &&
           nGeomW >= 7.0 &&
@@ -377,9 +412,10 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
           if (meanPow >= ST_PINHOLE_MIN_POWER) {
             const angle =
               Math.abs(nReSum) + Math.abs(nImSum) > 1e-12 ? Math.atan2(nImSum, nReSum) : 0;
+            const powFill = Math.min(1, meanPow * (0.65 + 0.25 * sm));
             p.dstVel[idx] = aliasVelocity(baseline + invPiScale * angle, scale, baseline);
             p.dstVar[idx] = nVarPowSum / nPowSum;
-            p.dstPow[idx] = Math.min(1, meanPow * (0.65 + 0.25 * sm));
+            p.dstPow[idx] = encodeColorBreakthroughPower(powFill, false, gainDb);
             continue;
           }
         }
@@ -414,7 +450,7 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
       const cohLaminar = smoothstep(0.55, 0.92, spatialCoherence);
       const laminarFactor = varLaminar * cohLaminar;
 
-      // Edge-preserving circular phase-similarity bilateral gather (preserves PISA shells & shear layers)
+      // Edge-preserving circular phase-similarity bilateral gather (strictly within the same class)
       const bCenterW = 2 * powC;
       let bRe = bCenterW * cosC;
       let bIm = bCenterW * sinC;
@@ -435,6 +471,7 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
           const h = nRow + kk;
           const pw = powBuf[h]!;
           if (pw <= 0) continue;
+          if (clsArr && Math.abs(clsArr[h]! - centerClass) >= 0.25) continue;
           const wGeom = wl * (dk === 0 ? 2 : 1);
           const cn = cosBuf[h]!;
           const sn = sinBuf[h]!;
@@ -481,7 +518,7 @@ export function applyColorSpatialFilter(p: SpatialFilterParams): void {
 
       p.dstVel[idx] = aliasVelocity(baseline + invPiScale * outAngle, scale, baseline);
       p.dstVar[idx] = varOut;
-      p.dstPow[idx] = powOut;
+      p.dstPow[idx] = encodeColorBreakthroughPower(powOut, isClutter, gainDb);
     }
   }
 }

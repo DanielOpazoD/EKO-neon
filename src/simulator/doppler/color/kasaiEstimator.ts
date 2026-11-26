@@ -1,4 +1,5 @@
 import { hash3 } from '@/core/random';
+import { APERTURE_MM } from '@/simulator/probe/transducer';
 
 /**
  * The colour field as a scanner estimates it (decision 116). Each update the velocity comes from the autocorrelation of a short
@@ -40,7 +41,46 @@ export const NOISE_POWER_GATE = 2.5;
 export const LAMINAR_DECORRELATION =
   1 - Math.exp(-(TRANSIT_JITTER_RAD ** 2)) / (1 + NOISE_POWER);
 
-/** Precomputed orthonormal linear regression basis over the fixed packet length COLOR_PACKET. */
+/** Active transducer aperture in cm (shared with spectral Doppler geometric broadening). */
+const APERTURE_CM = APERTURE_MM / 10;
+const INV_SQRT12 = 1 / Math.sqrt(12);
+/** Turbulent spectral-width factor (same 0.9 * disp * |v| calibration as `spectrum.ts`). */
+export const COLOR_TURBULENT_WIDTH_K = 0.9;
+
+/**
+ * Absolute Doppler spectral velocity width σ_v (m/s) combining turbulent dispersion and
+ * transverse aperture geometric broadening (Newhouse et al. 1980: v_perp · D / (r · √12)),
+ * matching `spectrum.ts` so near-90° transverse flow retains geometric broadening even as v_axial → 0.
+ */
+export function colorSpectralWidthMps(
+  vAxialMps: number,
+  disp: number,
+  vPerpMps: number,
+  depthCm: number,
+): number {
+  const turb = COLOR_TURBULENT_WIDTH_K * disp * Math.abs(vAxialMps);
+  const geom =
+    vPerpMps > 0 && depthCm > 0.25
+      ? (Math.abs(vPerpMps) * APERTURE_CM * INV_SQRT12) / Math.max(1.0, depthCm)
+      : 0;
+  return geom > 0 ? Math.hypot(turb, geom) : turb;
+}
+
+/** Effective post-RF-compression clutter-to-blood power ratio (+8 dB ≈ 6.31×). */
+export const CLUTTER_BLOOD_RATIO_POW = 6.31;
+/** Narrowband coherent spectral width (m/s) of solid myocardial/valve tissue clutter. */
+export const CLUTTER_SIGMA_V_MPS = 0.02;
+/** Low pulse-to-pulse phase jitter (rad) of rigid myocardial/valve scatterers over a ~1.5 ms packet. */
+export const CLUTTER_JITTER_RAD = 0.04;
+
+/** Continuous 3-basis Legendre regression wall-filter ramp parameters (in fractions of Nyquist). */
+export const WF_MEAN_SPAN = 0.03;
+export const WF_TREND_START = 0.02;
+export const WF_TREND_SPAN = 0.04;
+export const WF_QUAD_START = 0.055;
+export const WF_QUAD_SPAN = 0.06;
+
+/** Precomputed orthonormal linear Legendre basis (P1) over the fixed packet length COLOR_PACKET. */
 export const KASAI_LIN_BASIS = (() => {
   const lin = new Float64Array(COLOR_PACKET);
   let normSq = 0;
@@ -53,6 +93,29 @@ export const KASAI_LIN_BASIS = (() => {
   return lin;
 })();
 const LIN_BASIS = KASAI_LIN_BASIS;
+
+/** Precomputed orthonormal quadratic Legendre basis (P2) over COLOR_PACKET, orthogonal to P0 and P1. */
+export const KASAI_QUAD_BASIS = (() => {
+  const quad = new Float64Array(COLOR_PACKET);
+  const mid = (COLOR_PACKET - 1) / 2;
+  let meanU2 = 0;
+  for (let p = 0; p < COLOR_PACKET; p++) {
+    const u = p - mid;
+    meanU2 += u * u;
+  }
+  meanU2 /= COLOR_PACKET;
+  let normSq = 0;
+  for (let p = 0; p < COLOR_PACKET; p++) {
+    const u = p - mid;
+    const q = u * u - meanU2;
+    quad[p] = q;
+    normSq += q * q;
+  }
+  const invNorm = 1 / Math.sqrt(normSq);
+  for (let p = 0; p < COLOR_PACKET; p++) quad[p]! *= invNorm;
+  return quad;
+})();
+const QUAD_BASIS = KASAI_QUAD_BASIS;
 
 /** Module-level scratch buffers reused across every packet evaluation (zero per-update heap churn). */
 const XR_BUF = new Float64Array(COLOR_PACKET);
@@ -124,7 +187,7 @@ function smoothGrid(g: Float32Array, nL: number, nS: number, tmp: Float32Array):
  */
 export function kasaiEstimate(
   cellV: Float32Array,
-  cellDisp: Float32Array,
+  cellSigmaV: Float32Array,
   cellRel: Float32Array,
   liMin: number,
   siMin: number,
@@ -133,6 +196,7 @@ export function kasaiEstimate(
   scaleMps: number,
   wallFilterMps: number,
   estimate: ColorEstimate,
+  cellClass?: Float32Array,
 ): KasaiResult {
   const n = nL * nS;
   const stream = estimate.realization * 64;
@@ -168,13 +232,14 @@ export function kasaiEstimate(
   }
   // [1 2 1]/4 in two directions keeps (6/16)² of the variance; each part then carries half the unit power
   const unit = 1 / (0.375 * Math.SQRT2);
-  // the wall filter follows its cutoff continuously (decision 304): the share of the packet's mean it removes grows to the
-  // whole of it at 10 % of Nyquist, then the share of its linear trend up to 35 % (removing part of the trend below that
-  // biased a laminar 0.30 m/s to 0.31). With an order chosen by thresholds the
-  // slider had three states: 0.01-0.09 m/s drew the same image, and so did 0.10-0.30
+  // 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic)
+  // with smooth continuous cutoffs: suppresses physiological myocardial clutter (2–10 cm/s) at
+  // default WF = 6 cm/s while preserving laminar blood velocity (|bias| <= 0.005 m/s) and
+  // releasing clinical wall flash when WF is lowered to 2–4 cm/s.
   const cut = Math.max(0, wallFilterMps / scaleMps);
-  const meanShare = Math.min(1, cut / 0.1);
-  const trendShare = Math.min(1, Math.max(0, (cut - 0.16) / 0.24));
+  const meanShare = Math.min(1, cut / WF_MEAN_SPAN);
+  const trendShare = Math.min(1, Math.max(0, (cut - WF_TREND_START) / WF_TREND_SPAN));
+  const quadShare = Math.min(1, Math.max(0, (cut - WF_QUAD_START) / WF_QUAD_SPAN));
   const r0 = colorScratch('r0', n);
   const r1r = colorScratch('r1r', n);
   const r1i = colorScratch('r1i', n);
@@ -184,7 +249,10 @@ export function kasaiEstimate(
   for (let g = 0; g < n; g++) {
     const v = cellV[g]!;
     if (Number.isNaN(v)) continue;
-    valid[g] = 1;
+    const cls = cellClass ? cellClass[g]! : 1;
+    if (cls < 0.25) continue;
+    valid[g] = cls;
+    const isClutter = cls < 0.75;
     const l = Math.floor(g / nS);
     const k = g - l * nS;
     const li = liMin + l;
@@ -200,8 +268,9 @@ export function kasaiEstimate(
     const ar = amp * z1r * unit * lookBoost;
     const ai = amp * z1i * unit * lookBoost;
     const phi = (Math.PI * v) / scaleMps;
-    const turbulent = (Math.PI * 0.9 * cellDisp[g]! * Math.abs(v)) / scaleMps / Math.SQRT2;
-    const jitter = Math.hypot(TRANSIT_JITTER_RAD, turbulent);
+    const turbulent = (Math.PI * cellSigmaV[g]!) / scaleMps / Math.SQRT2;
+    const baseJitter = isClutter ? CLUTTER_JITTER_RAD : TRANSIT_JITTER_RAD;
+    const jitter = Math.hypot(baseJitter, turbulent);
     const noise = Math.sqrt(NOISE_POWER / 2);
     for (let p = 0; p < N; p++) {
       const ph = p * phi + jitter * JIT_SLOTS[p]![g]!;
@@ -211,7 +280,7 @@ export function kasaiEstimate(
       XR_BUF[p] = ar * c - ai * sn + noise * PAIR_TMP.a;
       XI_BUF[p] = ar * sn + ai * c + noise * PAIR_TMP.b;
     }
-    // regression wall filter: the packet less its projection on the low-order polynomials, in the shares above
+    // 3-basis orthonormal Legendre regression wall filter (P0, P1, P2)
     if (meanShare > 0) {
       let mr = 0;
       let mi = 0;
@@ -238,6 +307,20 @@ export function kasaiEstimate(
           XR_BUF[p]! -= pr * LIN_BASIS[p]!;
           XI_BUF[p]! -= pi * LIN_BASIS[p]!;
         }
+        if (quadShare > 0) {
+          let qr = 0;
+          let qi = 0;
+          for (let p = 0; p < N; p++) {
+            qr += XR_BUF[p]! * QUAD_BASIS[p]!;
+            qi += XI_BUF[p]! * QUAD_BASIS[p]!;
+          }
+          qr *= quadShare;
+          qi *= quadShare;
+          for (let p = 0; p < N; p++) {
+            XR_BUF[p]! -= qr * QUAD_BASIS[p]!;
+            XI_BUF[p]! -= qi * QUAD_BASIS[p]!;
+          }
+        }
       }
     }
     let a0 = 0;
@@ -254,14 +337,16 @@ export function kasaiEstimate(
     r1i[g] = a1i / (N - 1);
   }
 
-  // averaged over the resolution cell ([1 2 1] in range and across lines), over the samples that carry colour only
+  // averaged over the resolution cell ([1 2 1] in range and across lines), strictly within the same class
+  // (blood 1.0 vs tissue clutter 0.5) so wall flash never biases adjacent laminar blood flow
   const avg = (src: Float32Array, name: string): Float32Array => {
     const outA = colorScratch(name, n);
     outA.fill(0);
     for (let l = 0; l < nL; l++)
       for (let k = 0; k < nS; k++) {
         const g = l * nS + k;
-        if (!valid[g]) continue;
+        const cls = valid[g]!;
+        if (cls < 0.25) continue;
         let sum = 0;
         let w = 0;
         for (let dl = -1; dl <= 1; dl++)
@@ -270,7 +355,8 @@ export function kasaiEstimate(
             const kk = k + dk;
             if (ll < 0 || ll >= nL || kk < 0 || kk >= nS) continue;
             const h = ll * nS + kk;
-            if (!valid[h]) continue;
+            const nCls = valid[h]!;
+            if (nCls < 0.25 || Math.abs(nCls - cls) >= 0.25) continue;
             const wt = (dl === 0 ? 2 : 1) * (dk === 0 ? 2 : 1);
             sum += wt * src[h]!;
             w += wt;

@@ -394,7 +394,74 @@ export function computeGateInfo(
   const inScene = sceneClassifier(ctx.scene(phase))(px, py, pz, tissueSample) !== 0;
   let flowPresent = false;
   let flowAngleDeg: number | null = null;
-  if (inScene && tissueSample.tissue === Tissue.Blood) {
+  if (inp.modality === 'cw') {
+    const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+    const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+    const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+    const cwKey = `cw|${beam.origin.x.toFixed(4)},${beam.origin.y.toFixed(4)},${beam.origin.z.toFixed(4)}|${dhx.toFixed(5)},${dhy.toFixed(5)},${dhz.toFixed(5)}|${spec.depthCm.toFixed(2)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
+    if (gateFlow.key !== cwKey) {
+      let best = 0;
+      let bx = 0,
+        by = 0,
+        bz = 0;
+      const oxH =
+        (beam.origin.x - hf.origin.x) * hf.ex.x +
+        (beam.origin.y - hf.origin.y) * hf.ex.y +
+        (beam.origin.z - hf.origin.z) * hf.ex.z;
+      const oyH =
+        (beam.origin.x - hf.origin.x) * hf.ey.x +
+        (beam.origin.y - hf.origin.y) * hf.ey.y +
+        (beam.origin.z - hf.origin.z) * hf.ey.z;
+      const ozH =
+        (beam.origin.x - hf.origin.x) * hf.ez.x +
+        (beam.origin.y - hf.origin.y) * hf.ez.y +
+        (beam.origin.z - hf.origin.z) * hf.ez.z;
+      for (let k = 0; k < 12; k++) {
+        const ph = k / 12;
+        const sc = ctx.scene(ph);
+        const cls = sceneClassifier(sc);
+        const hp = sc.heartPose;
+        for (let rr = 1.5; rr <= spec.depthCm - 0.5; rr += 0.4) {
+          const rx = beam.origin.x + dx * rr;
+          const ry = beam.origin.y + dy * rr;
+          const rz = beam.origin.z + dz * rr;
+          if (cls(rx, ry, rz, tissueSample) === 0 || tissueSample.tissue !== Tissue.Blood) continue;
+          sampleFlow(
+            ctx.flow,
+            ctx.tables,
+            hp,
+            ph,
+            oxH + dhx * rr,
+            oyH + dhy * rr,
+            ozH + dhz * rr,
+            flowSample,
+          );
+          if (!flowSample.present) continue;
+          const sp = Math.hypot(flowSample.vx, flowSample.vy, flowSample.vz);
+          if (sp > best) {
+            best = sp;
+            bx = flowSample.vx;
+            by = flowSample.vy;
+            bz = flowSample.vz;
+          }
+        }
+      }
+      gateFlow.key = cwKey;
+      gateFlow.best = best;
+      gateFlow.bx = bx;
+      gateFlow.by = by;
+      gateFlow.bz = bz;
+      // Restore tissueSample at gate depth for consistent structure/tissue fields
+      sceneClassifier(ctx.scene(phase))(px, py, pz, tissueSample);
+    }
+    if (gateFlow.best > 0.05) {
+      flowPresent = true;
+      const cos = Math.abs(
+        (gateFlow.bx * dhx + gateFlow.by * dhy + gateFlow.bz * dhz) / gateFlow.best,
+      );
+      flowAngleDeg = (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
+    }
+  } else if (inScene && tissueSample.tissue === Tissue.Blood) {
     // Cache peak flow vector over the cycle for this heart-frame gate position.
     const gateKey = `${hx.toFixed(5)},${hy.toFixed(5)},${hz.toFixed(5)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
     if (gateFlow.key !== gateKey) {

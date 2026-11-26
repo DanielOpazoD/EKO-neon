@@ -107,7 +107,8 @@ export class GlPresentUploads {
         t[o + 1] = Math.sin(ph);
         t[o + 2] = c.variance[i] ?? 0;
         if (powArr) {
-          t[o + 3] = 0.5 + 0.5 * colorPowerConfidence(powArr[i] ?? 1, COLOR_THRESHOLD);
+          const pw = powArr[i] ?? 1;
+          t[o + 3] = pw > 1 ? pw : 0.5 + 0.5 * colorPowerConfidence(pw, COLOR_THRESHOLD);
         } else {
           t[o + 3] = 1;
         }

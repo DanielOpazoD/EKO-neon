@@ -2,6 +2,16 @@ import { useSimStore } from '@/app/store';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
 import { SPECTRAL_SCALE_RANGE, type SpectralModality } from '@/simulator/doppler/spectral/spectrum';
 import {
+  COLOR_PALETTE_DEFAULT,
+  COLOR_PALETTE_OPTIONS,
+  type ColorPaletteId,
+} from '@/simulator/renderer/postprocess/colorMap';
+import {
+  TINT_DEFAULT,
+  TINT_MAP_OPTIONS,
+  type TintMapId,
+} from '@/simulator/renderer/postprocess/tintMap';
+import {
   hasGate,
   isSpectralModality,
   isStripModality,
@@ -24,6 +34,7 @@ export function DopplerTab() {
       setColor: st.setColor,
       setCursor: st.setCursor,
       setModality: st.setModality,
+      setSettings: st.setSettings,
       setSpectral: st.setSpectral,
       setUi: st.setUi,
       settings: st.settings,
@@ -54,8 +65,11 @@ export function DopplerTab() {
     <>
       {s.frozen && (
         <p className="small" role="status">
-          {isStripModality(mod) ? 'Tira congelada' : 'Imagen congelada'}: los ajustes de adquisición
-          se aplicarán al reanudar.
+          {mod === 'color' || mod === 'cmm'
+            ? `${mod === 'cmm' ? 'Tira congelada' : 'Imagen congelada'}: Paleta, Varianza y Línea base responden al instante; los demás ajustes se aplicarán al reanudar.`
+            : isSpectralModality(mod)
+              ? 'Tira congelada: Rechazo y Tinte responden al instante; los demás ajustes se aplicarán al reanudar.'
+              : `${isStripModality(mod) ? 'Tira congelada' : 'Imagen congelada'}: los ajustes de adquisición se aplicarán al reanudar.`}
         </p>
       )}
       {mod === 'color' && (
@@ -128,6 +142,15 @@ export function DopplerTab() {
               'Filtro espacio-temporal adaptativo: reduce el parpadeo y suaviza el flujo laminar preservando el mosaico turbulento.',
             )}
           />
+          <div className="row">
+            <label>Paleta</label>
+            <Segmented
+              ariaLabel="Paleta Doppler color"
+              value={s.color.palette ?? COLOR_PALETTE_DEFAULT}
+              onChange={(v) => s.setColor({ palette: v as ColorPaletteId })}
+              options={COLOR_PALETTE_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+            />
+          </div>
           <Toggle
             label="Mapa de varianza"
             value={s.color.showVariance}
@@ -212,6 +235,18 @@ export function DopplerTab() {
             unit=" dB"
             onChange={(v) => s.setSpectral({ gainDb: v })}
           />
+          <Slider
+            label="Rechazo"
+            value={s.spectral.reject ?? 0}
+            min={0}
+            max={0.5}
+            step={0.02}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={(v) => s.setSpectral({ reject: v })}
+            title={tip(
+              'Postprocesado de rechazo: limpia el piso de ruido térmico sin alterar el trazo ni la velocidad pico (funciona incluso congelado).',
+            )}
+          />
           {hasGate(mod) && (
             <>
               <Slider
@@ -293,6 +328,15 @@ export function DopplerTab() {
                   { id: '50', label: '50' },
                   { id: '100', label: '100' },
                 ]}
+              />
+            </div>
+            <div className="row">
+              <label>Tinte</label>
+              <Segmented
+                ariaLabel="Tinte espectral"
+                value={s.settings.tintMap ?? TINT_DEFAULT}
+                onChange={(v) => s.setSettings({ tintMap: v as TintMapId })}
+                options={TINT_MAP_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
               />
             </div>
           </details>
@@ -387,6 +431,15 @@ export function DopplerTab() {
             PRF {(limits.color.prfHz / 1000).toFixed(2)} kHz · límite{' '}
             {(limits.color.maxPrfHz / 1000).toFixed(2)} kHz
           </p>
+          <div className="row">
+            <label>Paleta</label>
+            <Segmented
+              ariaLabel="Paleta Modo M Color"
+              value={s.color.palette ?? COLOR_PALETTE_DEFAULT}
+              onChange={(v) => s.setColor({ palette: v as ColorPaletteId })}
+              options={COLOR_PALETTE_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+            />
+          </div>
           <Toggle
             label="Mapa de varianza"
             value={s.color.showVariance}

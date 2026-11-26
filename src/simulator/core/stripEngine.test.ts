@@ -17,7 +17,14 @@ import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
 import { DEFAULT_SPECTRAL, SPECTRAL_BINS } from '@/simulator/doppler/spectral/spectrum';
 import { aliasVelocity } from '@/clinical/formulas';
 import { constrainAcquisition } from './acquisitionInput';
-import { paintMmodeStripColumn, renderSpectralStripRgba } from './strip/stripPainter';
+import {
+  applySpectralRejectCurve,
+  paintMmodeStripColumn,
+  renderSpectralStripRgba,
+} from './strip/stripPainter';
+import { controlThroughCrux, getViewTarget } from '@/simulator/windows/viewTargets';
+import { beamFrameFromPose, poseFromControl } from '@/simulator/probe/pose';
+import { buildFlowParams } from '@/simulator/doppler/flow-primitives/flowField';
 import type { SimInput } from './protocol';
 
 function baseInput(overrides: Partial<SimInput> = {}): SimInput {
@@ -246,6 +253,156 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
         const o = (y * W + x) * 4;
         assert.equal(rgba[o + 1], 0, `Green baseline bled into B-mode sector at row ${y}`);
       }
+    }
+  });
+
+  it('applySpectralRejectCurve zeroes low noise, stays monotonic, and preserves bright spectral peaks', () => {
+    assert.equal(applySpectralRejectCurve(0.24, 0.25), 0);
+    assert.equal(applySpectralRejectCurve(0.25, 0.25), 0);
+    assert.equal(applySpectralRejectCurve(0, 0), 0);
+    assert.equal(applySpectralRejectCurve(1, 0.25), 1);
+
+    let prev = 0;
+    for (let i = 0; i <= 100; i++) {
+      const y = applySpectralRejectCurve(i / 100, 0.25);
+      assert.ok(y >= prev - 1e-9, `reject curve lost monotonicity at x=${i / 100}`);
+      prev = y;
+    }
+    const peakByte = applySpectralRejectCurve(0.92, 0.25) * 255;
+    assert.ok(
+      peakByte > 200,
+      `Expected bright spectral peak (0.92) to stay > 200/255 at reject=0.25, got ${peakByte.toFixed(1)}`,
+    );
+  });
+
+  it('applies spectral.reject immediately live and frozen without resetting strip acquisitionId', () => {
+    const caseDef = loadCaseById('normal-excellent-window');
+    const core = new SimulatorCore(
+      caseDef,
+      baseInput({ modality: 'pw', spectral: { ...DEFAULT_SPECTRAL, gainDb: 14, reject: 0 } }),
+    );
+    try {
+      const a4cPose = controlThroughCrux(
+        getViewTarget('a4c'),
+        core.models.heart,
+        core.models.thorax,
+        null,
+      );
+      const pwLive = baseInput({
+        modality: 'pw',
+        probe: a4cPose,
+        gateDepthCm: 8.5,
+        spectral: { ...DEFAULT_SPECTRAL, gainDb: 14, reject: 0 },
+      });
+      core.setInput(pwLive);
+      let out0 = null;
+      for (let i = 0; i < 8; i++) out0 = core.step(1 / 30);
+      assert.ok(out0 && out0.strip.kind === 'spectral');
+      const acqIdBefore = out0.strip.acquisitionId;
+
+      // Freeze and raise reject to 0.30: strip history must survive and dark pixels must increase
+      core.setInput({ ...pwLive, frozen: true });
+      const frozen0 = core.step(1 / 30);
+      assert.ok(frozen0 && frozen0.strip.kind === 'spectral');
+      const rgba0 = new Uint8ClampedArray(frozen0.rgba);
+
+      core.setInput({
+        ...pwLive,
+        frozen: true,
+        spectral: { ...pwLive.spectral, reject: 0.3 },
+      });
+      const frozenRej = core.step(1 / 30);
+      assert.ok(frozenRej && frozenRej.strip.kind === 'spectral');
+      assert.equal(
+        frozenRej.strip.acquisitionId,
+        acqIdBefore,
+        'changing spectral.reject while frozen must NOT reset strip acquisitionId',
+      );
+
+      const rgbaRej = new Uint8ClampedArray(frozenRej.rgba);
+      const stripStart = frozen0.strip.y * frozen0.width * 4;
+      let darkBefore = 0;
+      let darkAfter = 0;
+      for (let i = stripStart; i < rgba0.length; i += 4) {
+        if (rgba0[i] === 0 && rgba0[i + 1] === 0 && rgba0[i + 2] === 0) darkBefore++;
+        if (rgbaRej[i] === 0 && rgbaRej[i + 1] === 0 && rgbaRej[i + 2] === 0) darkAfter++;
+      }
+      assert.ok(
+        darkAfter > darkBefore + 100,
+        `Raising spectral.reject to 0.30 while frozen should zero noisy background pixels (darkBefore=${darkBefore}, darkAfter=${darkAfter})`,
+      );
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it('computes CW beam-flow angle along the ray on severe aortic stenosis (A5C)', () => {
+    const caseDef = loadCaseById('aortic-stenosis-severe');
+    const core = new SimulatorCore(caseDef, baseInput({ modality: 'cw' }));
+    try {
+      const a5cPose = controlThroughCrux(
+        getViewTarget('a5c'),
+        core.models.heart,
+        core.models.thorax,
+        null,
+      );
+      const beam = beamFrameFromPose(poseFromControl(core.models.thorax, a5cPose), 1);
+      const hf = core.models.heart.frame;
+      const av = buildFlowParams(
+        caseDef,
+        core.models.heart,
+        core.models.tables,
+        core.models.thorax,
+      ).avAxis;
+      const expectedAngleAt = (thetaRad: number) => {
+        const ct = Math.cos(thetaRad);
+        const sn = Math.sin(thetaRad);
+        const dx = beam.forward.x * ct + beam.lateral.x * sn;
+        const dy = beam.forward.y * ct + beam.lateral.y * sn;
+        const dz = beam.forward.z * ct + beam.lateral.z * sn;
+        const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+        const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+        const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+        const cos = Math.abs(av.x * dhx + av.y * dhy + av.z * dhz);
+        return (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
+      };
+
+      // Center A5C ray intersects the stenotic AV jet and reports its exact geometric angle vs avAxis
+      core.setInput(
+        baseInput({
+          modality: 'cw',
+          probe: a5cPose,
+          cursorThetaRad: 0,
+        }),
+      );
+      const outCenter = core.step(1 / 30);
+      assert.ok(outCenter && outCenter.gate !== null, 'CW mode should emit GateInfo');
+      assert.equal(outCenter.gate.flowPresent, true, 'CW ray in A5C should intersect blood flow');
+      const expectedCenter = expectedAngleAt(0);
+      assert.ok(
+        outCenter.gate.flowAngleDeg !== null &&
+          Number.isFinite(outCenter.gate.flowAngleDeg) &&
+          Math.abs(outCenter.gate.flowAngleDeg - expectedCenter) < 2.5,
+        `Expected CW A5C center ray angle near geometric avAxis (${expectedCenter.toFixed(1)}°), got ${outCenter.gate.flowAngleDeg}`,
+      );
+
+      // Steering the CW cursor -5° toward the aortic orifice aligns the ray tighter (< 25°)
+      const steeredTheta = (-5 * Math.PI) / 180;
+      core.setInput(
+        baseInput({
+          modality: 'cw',
+          probe: a5cPose,
+          cursorThetaRad: steeredTheta,
+        }),
+      );
+      const outSteered = core.step(0.1);
+      assert.ok(outSteered && outSteered.gate !== null && outSteered.gate.flowAngleDeg !== null);
+      assert.ok(
+        outSteered.gate.flowAngleDeg < 25,
+        `Expected steered CW A5C jet angle < 25°, got ${outSteered.gate.flowAngleDeg}`,
+      );
+    } finally {
+      core.dispose();
     }
   });
 });

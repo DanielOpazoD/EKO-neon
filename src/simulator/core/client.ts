@@ -10,6 +10,7 @@ import type {
 } from './protocol';
 import type { SimulatorCore } from './simulatorCore';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import { simInputKey } from './acquisitionKeys';
 
 /**
  * SimClient: drives the simulator either in a Web Worker (default) or inline on the main thread
@@ -32,7 +33,7 @@ export class SimClient {
   private inline: SimulatorCore | null = null;
   private inlineTimer: ReturnType<typeof setInterval> | null = null;
   private inlineLast = 0;
-  private lastInputJson = '';
+  private lastInputKey = '';
   private handlers: SimClientHandlers;
   readonly mode: 'worker' | 'inline';
   /** Requests still waiting for the worker; every one is settled — by reply, error, reload, timeout or dispose. */
@@ -121,7 +122,7 @@ export class SimClient {
    * with the worker alone (audit B7) — so the returned promise settles when `ready` has been announced.
    */
   loadCase(caseDef: CaseDefinition, input: SimInput): Promise<void> {
-    this.lastInputJson = JSON.stringify(input);
+    this.lastInputKey = simInputKey(input);
     // a new core answers nothing asked of the old one
     this.rejectPending(new Error('simulation request cancelled: case reloaded'));
     if (this.worker) {
@@ -156,9 +157,9 @@ export class SimClient {
 
   /** Push the current input if it changed. Cheap enough to call every animation frame. */
   send(input: SimInput): void {
-    const json = JSON.stringify(input);
-    if (json === this.lastInputJson) return;
-    this.lastInputJson = json;
+    const key = simInputKey(input);
+    if (key === this.lastInputKey) return;
+    this.lastInputKey = key;
     if (this.worker) {
       const m: MainToWorker = { type: 'input', input };
       this.worker.postMessage(m);

@@ -52,6 +52,7 @@ export const DOPPLER_SPATIAL_UNIFORMS = [
   'uCorr',
   'uBoxBounds',
   'uSmoothing',
+  'uGainDb',
 ] as const;
 
 /** GPU-resident Polar G-Buffer produced independently by B-mode anatomical reconstruction. */
@@ -94,7 +95,7 @@ export interface DeferredDopplerRequest {
   frequencyMHz: number;
   harmonics: boolean;
   /**
-   * Compact box-only RGBA float buffer (`boxW * boxH * 4`) holding `[vAxial, dispersion, present, 0]`
+   * Compact box-only RGBA float buffer (`boxW * boxH * 4`) holding `[vAxial, sigmaVMps, present, vWall]`
    * in row-major line order (`li = liMin..liMax`, `si = siMin..siMax`).
    * Omit to re-shade directly against the already-resident GPU raw flow texture when only Doppler
    * console settings (scale, baseline, wall filter, gain, persistence, invert) changed.
@@ -482,6 +483,7 @@ export class DeferredDopplerPipeline {
     gl.useProgram(this.progSpatial);
     gl.uniform4i(usp.uBoxBounds, box.siMin, box.liMin, box.siMax, box.liMax);
     gl.uniform1f(usp.uSmoothing, smoothing);
+    gl.uniform1f(usp.uGainDb, settings.gainDb);
     this.bindAt(2, this.texRawShade);
     this.bindAt(3, this.texCorr);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

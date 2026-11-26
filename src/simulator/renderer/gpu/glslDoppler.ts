@@ -4,13 +4,23 @@ import {
   DOPPLER_SHADOW_TRANSMISSION,
 } from '@/simulator/doppler/color/colorDoppler';
 import {
+  CLUTTER_BLOOD_RATIO_POW,
+  CLUTTER_JITTER_RAD,
+  CLUTTER_SIGMA_V_MPS,
   COLOR_PACKET,
+  COLOR_TURBULENT_WIDTH_K,
   KASAI_LIN_BASIS,
+  KASAI_QUAD_BASIS,
   LAMINAR_DECORRELATION,
   NOISE_COHERENCE,
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
+  WF_MEAN_SPAN,
+  WF_QUAD_SPAN,
+  WF_QUAD_START,
+  WF_TREND_SPAN,
+  WF_TREND_START,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { spatiotemporalDefinesGlsl } from '@/simulator/doppler/color/spatiotemporalFilter';
 import {
@@ -26,8 +36,11 @@ import {
  */
 export function dopplerDefinesGlsl(): string {
   const linBasisLiterals = Array.from(KASAI_LIN_BASIS, (v) => glslFloat(v)).join(', ');
+  const quadBasisLiterals = Array.from(KASAI_QUAD_BASIS, (v) => glslFloat(v)).join(', ');
   return [
     `#define T_BLOOD ${Tissue.Blood}`,
+    `#define T_MYOCARDIUM ${Tissue.Myocardium}`,
+    `#define T_VALVE ${Tissue.Valve}`,
     `#define ATTEN_NP_PER_DB ${glslFloat(ATTEN_NP_PER_DB)}`,
     `#define SOFT_TISSUE_ATTEN_DB ${glslFloat(SOFT_TISSUE_ATTEN_DB)}`,
     `#define DOPPLER_SHADOW_TRANSMISSION ${glslFloat(DOPPLER_SHADOW_TRANSMISSION)}`,
@@ -35,11 +48,21 @@ export function dopplerDefinesGlsl(): string {
     `#define COLOR_PACKET ${COLOR_PACKET}`,
     `#define NOISE_POWER ${glslFloat(NOISE_POWER)}`,
     `#define TRANSIT_JITTER_RAD ${glslFloat(TRANSIT_JITTER_RAD)}`,
+    `#define CLUTTER_BLOOD_RATIO_POW ${glslFloat(CLUTTER_BLOOD_RATIO_POW)}`,
+    `#define CLUTTER_SIGMA_V_MPS ${glslFloat(CLUTTER_SIGMA_V_MPS)}`,
+    `#define CLUTTER_JITTER_RAD ${glslFloat(CLUTTER_JITTER_RAD)}`,
+    `#define WF_MEAN_SPAN ${glslFloat(WF_MEAN_SPAN)}`,
+    `#define WF_TREND_START ${glslFloat(WF_TREND_START)}`,
+    `#define WF_TREND_SPAN ${glslFloat(WF_TREND_SPAN)}`,
+    `#define WF_QUAD_START ${glslFloat(WF_QUAD_START)}`,
+    `#define WF_QUAD_SPAN ${glslFloat(WF_QUAD_SPAN)}`,
     `#define NOISE_COHERENCE ${glslFloat(NOISE_COHERENCE)}`,
     `#define NOISE_POWER_GATE ${glslFloat(NOISE_POWER_GATE)}`,
     `#define LAMINAR_DECORRELATION ${glslFloat(LAMINAR_DECORRELATION)}`,
+    `#define COLOR_TURBULENT_WIDTH_K ${glslFloat(COLOR_TURBULENT_WIDTH_K)}`,
     spatiotemporalDefinesGlsl(),
     `const float KASAI_LIN_BASIS[COLOR_PACKET] = float[COLOR_PACKET](${linBasisLiterals});`,
+    `const float KASAI_QUAD_BASIS[COLOR_PACKET] = float[COLOR_PACKET](${quadBasisLiterals});`,
   ].join('\n');
 }
 
@@ -84,7 +107,7 @@ vec2 correlatedGaussianPair(int li, int si, uint stream, uint seed) {
  *
  * Output (`RGBA32F`):
  *  - Kasai mode (`uUseKasai != 0`): `(r0, r1r, r1i, 1.0)` when valid, `vec4(0.0)` otherwise.
- *  - Expected mode (`uUseKasai == 0`): `(vSigned, dispersion, relTrans, 1.0)` when valid, `vec4(0.0)` otherwise.
+ *  - Expected mode (`uUseKasai == 0`): `(vSigned, sigmaVMps, relTrans, 1.0)` when valid, `vec4(0.0)` otherwise.
  */
 export const GLSL_DOPPLER_AUTOCORR_FRAG = /* glsl */ `#version 300 es
 precision highp float;
@@ -93,7 +116,7 @@ precision highp sampler2D;
 
 uniform sampler2D uGbufEnv;   // Polar G-Buffer: envelope (r), exact two-way transmission (g)
 uniform sampler2D uGbufIds;   // Polar G-Buffer: structure/255 (r), tissue/255 (g)
-uniform sampler2D uFlowRaw;   // Sparse ROI flow: axial v m/s (r), dispersion (g), present (b)
+uniform sampler2D uFlowRaw;   // Sparse ROI flow: axial v m/s (r), absolute sigmaVMps (g), present (b)
 uniform int uSamples;
 uniform int uLines;
 uniform float uDepthCm;
@@ -136,7 +159,8 @@ void main() {
   }
 
   // 2. Tissue gate & gain-driven blooming dilation on the Polar G-Buffer
-  bool isBlood = tissueAt(si, li) == T_BLOOD;
+  int tId = tissueAt(si, li);
+  bool isBlood = tId == T_BLOOD;
   if (!isBlood && uBloomSamples > 0) {
     int maxBloom = min(uBloomSamples, 12);
     for (int d = 1; d <= 12; d++) {
@@ -147,29 +171,35 @@ void main() {
     if (!isBlood && li > 0 && tissueAt(si, li - 1) == T_BLOOD) isBlood = true;
     if (!isBlood && li < uLines - 1 && tissueAt(si, li + 1) == T_BLOOD) isBlood = true;
   }
-  if (!isBlood) {
+  bool isClutterTissue = (tId == T_MYOCARDIUM || tId == T_VALVE);
+  if (!isBlood && !isClutterTissue) {
     outCorr = vec4(0.0);
     return;
   }
 
-  // 3. Raw hemodynamic velocity sample inside the Color ROI box
+  // 3. Raw hemodynamic velocity (r,g,b) or myocardial/valve clutter velocity (a) inside the Color ROI box
   vec4 raw = texelFetch(uFlowRaw, ivec2(si, li), 0);
-  if (raw.b < 0.5) {
+  bool useBlood = isBlood && raw.b >= 0.5;
+  bool useClutter = !useBlood && isClutterTissue && abs(raw.a) > 1e-4;
+  if (!useBlood && !useClutter) {
     outCorr = vec4(0.0);
     return;
   }
 
-  float v = uInvert != 0 ? -raw.r : raw.r;
-  float disp = raw.g;
-  float rel = min(1.0, relTrans);
+  float classFlag = useBlood ? 1.0 : 0.5;
+  float v = useBlood
+    ? (uInvert != 0 ? -raw.r : raw.r)
+    : (uInvert != 0 ? -raw.a : raw.a);
+  float sigmaV = useBlood ? raw.g : CLUTTER_SIGMA_V_MPS;
+  float rel = min(1.0, relTrans) * (useBlood ? 1.0 : CLUTTER_BLOOD_RATIO_POW);
 
-  // Expected (noise-free) mode forwards exact flow parameters directly to Pass D2
+  // Expected (noise-free) mode forwards exact flow/clutter parameters directly to Pass D2
   if (uUseKasai == 0) {
-    outCorr = vec4(v, disp, rel, 1.0);
+    outCorr = vec4(v, sigmaV, rel, classFlag);
     return;
   }
 
-  // 4. Kasai 8-pulse complex echo packet synthesis + continuous regression wall filter
+  // 4. Kasai 8-pulse complex echo packet synthesis + 3-basis Legendre regression wall filter
   float scale = max(1e-3, uScaleMps);
   uint baseStream = uRealization * 64u;
   float amp = sqrt(rel);
@@ -190,8 +220,9 @@ void main() {
   jit[6] = jp3.x; jit[7] = jp3.y;
 
   float phi = (PI * v) / scale;
-  float turbulent = (PI * 0.9 * disp * abs(v)) / scale * INV_SQRT2;
-  float jitter = length(vec2(TRANSIT_JITTER_RAD, turbulent));
+  float turbulent = (PI * sigmaV) / scale * INV_SQRT2;
+  float baseJitter = useBlood ? TRANSIT_JITTER_RAD : CLUTTER_JITTER_RAD;
+  float jitter = length(vec2(baseJitter, turbulent));
   float noiseAmp = sqrt(NOISE_POWER * 0.5);
 
   float xr[COLOR_PACKET];
@@ -205,10 +236,11 @@ void main() {
     xi[p] = ar * sn + ai * cs + noiseAmp * nz.y;
   }
 
-  // Continuous regression wall filter (mean + orthonormal linear trend removal)
+  // Continuous 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic)
   float cut = max(0.0, uWallFilterMps / scale);
-  float meanShare = min(1.0, cut / 0.1);
-  float trendShare = min(1.0, max(0.0, (cut - 0.16) / 0.24));
+  float meanShare = min(1.0, cut / WF_MEAN_SPAN);
+  float trendShare = min(1.0, max(0.0, (cut - WF_TREND_START) / WF_TREND_SPAN));
+  float quadShare = min(1.0, max(0.0, (cut - WF_QUAD_START) / WF_QUAD_SPAN));
   if (meanShare > 0.0) {
     float mr = 0.0;
     float mi = 0.0;
@@ -235,6 +267,20 @@ void main() {
         xr[p] -= pr * KASAI_LIN_BASIS[p];
         xi[p] -= pi * KASAI_LIN_BASIS[p];
       }
+      if (quadShare > 0.0) {
+        float qr = 0.0;
+        float qi = 0.0;
+        for (int p = 0; p < COLOR_PACKET; p++) {
+          qr += xr[p] * KASAI_QUAD_BASIS[p];
+          qi += xi[p] * KASAI_QUAD_BASIS[p];
+        }
+        qr *= quadShare;
+        qi *= quadShare;
+        for (int p = 0; p < COLOR_PACKET; p++) {
+          xr[p] -= qr * KASAI_QUAD_BASIS[p];
+          xi[p] -= qi * KASAI_QUAD_BASIS[p];
+        }
+      }
     }
   }
 
@@ -254,7 +300,7 @@ void main() {
     a0 / float(COLOR_PACKET),
     a1r / float(COLOR_PACKET - 1),
     a1i / float(COLOR_PACKET - 1),
-    1.0
+    classFlag
   );
 }
 `;
@@ -315,13 +361,14 @@ void main() {
   int si = int(gl_FragCoord.x);
   int li = int(gl_FragCoord.y);
 
-  // Non-blood or shadowed sample: cut immediately so moving valves/myocardium never carry color trails
+  // Shadowed or non-Doppler sample: cut immediately so moving structures never carry stale trails
   vec4 center = texelFetch(uCorr, ivec2(si, li), 0);
-  if (center.a < 0.5) {
+  if (center.a < 0.25) {
     outShade = vec4(0.0);
     outHist = vec4(0.0);
     return;
   }
+  bool isClutter = center.a < 0.75;
 
   float scale = max(1e-3, uScaleMps);
   bool hasCurr = false;
@@ -330,7 +377,7 @@ void main() {
   float variance = 0.0;
 
   if (uUseKasai != 0) {
-    // 3x3 binomial [1 2 1] resolution-cell averaging over valid neighbors strictly inside uBoxBounds
+    // 3x3 binomial [1 2 1] resolution-cell averaging strictly within the same class (blood 1.0 vs clutter 0.5)
     float sumR0 = 0.0;
     float sumR1r = 0.0;
     float sumR1i = 0.0;
@@ -343,7 +390,7 @@ void main() {
         int ss = si + ds;
         if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
         vec4 tap = texelFetch(uCorr, ivec2(ss, ll), 0);
-        if (tap.a < 0.5) continue;
+        if (tap.a < 0.25 || abs(tap.a - center.a) >= 0.25) continue;
         float wt = wl * ((ds == 0) ? 2.0 : 1.0);
         sumR0 += wt * tap.r;
         sumR1r += wt * tap.g;
@@ -368,20 +415,22 @@ void main() {
     }
   } else {
     float vTrue = center.r;
-    float disp = center.g;
+    float sigmaV = center.g;
     float rel = center.b;
     if (abs(vTrue) >= uWallFilterMps) {
       power = min(1.0, uGainLin * rel * wallFilterResponse(abs(vTrue), uWallFilterMps));
       vEstimate = vTrue;
-      variance = min(1.0, disp * 1.6);
+      float effDisp = min(1.0, sigmaV / max(0.08, COLOR_TURBULENT_WIDTH_K * abs(vTrue)));
+      variance = min(1.0, effDisp * 1.6);
       hasCurr = power >= COLOR_THRESHOLD;
     }
   }
 
   float pBase = clamp(uPersist, 0.0, 0.95);
   float sm = clamp(uSmoothing, 0.0, 1.0);
-  vec4 prev = (uUseHistory != 0) ? texelFetch(uHist, ivec2(si, li), 0) : vec4(0.0);
-  bool hasPrev = (uUseHistory != 0) && prev.a > 0.0;
+  // Tissue/valve clutter never uses temporal persistence or hysteresis (avoids trails on moving myocardium)
+  vec4 prev = (!isClutter && uUseHistory != 0) ? texelFetch(uHist, ivec2(si, li), 0) : vec4(0.0);
+  bool hasPrev = (!isClutter && uUseHistory != 0) && prev.a > 0.0;
 
   if (hasCurr) {
     float v = aliasVelocity(vEstimate, scale, uBaselineMps);
@@ -421,7 +470,7 @@ void main() {
     }
 
     outShade = vec4(phOut, varOut, powOut);
-    outHist = vec4(phOut * powOut, varOut, powOut);
+    outHist = isClutter ? vec4(0.0) : vec4(phOut * powOut, varOut, powOut);
     return;
   }
 
@@ -458,9 +507,10 @@ precision highp int;
 precision highp sampler2D;
 
 uniform sampler2D uShade;    // Pass D2 output (RGBA16F): cos(phi), sin(phi), var, power
-uniform sampler2D uCorr;     // Pass D1 output (RGBA32F): .a >= 0.5 marks unshadowed blood
+uniform sampler2D uCorr;     // Pass D1 output (RGBA32F): .a = 1.0 blood, 0.5 tissue/valve clutter, 0.0 invalid
 uniform ivec4 uBoxBounds;    // (siMin, liMin, siMax, liMax) inclusive
 uniform float uSmoothing;    // [0..1]
+uniform float uGainDb;       // Color gain (dB) for overgain breakthrough (> 4 dB)
 
 layout(location = 0) out vec4 outDisplay;
 
@@ -470,22 +520,33 @@ float colorPowerConf(float p) {
   return smoothstep(COLOR_THRESHOLD * ST_HYSTERESIS_RATIO, COLOR_THRESHOLD + 0.30, p);
 }
 
+float encodeDisplayAlpha(float powVal, bool isClutter) {
+  float bt = isClutter
+    ? smoothstep(0.25, 0.90, powVal)
+    : smoothstep(4.0, 12.0, uGainDb) * 0.45;
+  if (bt > 0.0) return 1.0 + bt;
+  return 0.5 + 0.5 * colorPowerConf(powVal);
+}
+
 void main() {
   int si = int(gl_FragCoord.x);
   int li = int(gl_FragCoord.y);
 
   vec4 c = texelFetch(uShade, ivec2(si, li), 0);
+  float centerClass = texelFetch(uCorr, ivec2(si, li), 0).a;
+  bool isClutter = centerClass > 0.25 && centerClass < 0.75;
   float sm = clamp(uSmoothing, 0.0, 1.0);
 
   if (sm <= 0.0) {
     if (c.a <= 0.0) {
       outDisplay = vec4(0.0);
     } else {
-      outDisplay = vec4(c.rg, c.b, 0.5 + 0.5 * colorPowerConf(c.a));
+      outDisplay = vec4(c.rg, c.b, encodeDisplayAlpha(c.a, isClutter));
     }
     return;
   }
 
+  float targetClass = (c.a <= 0.0) ? 1.0 : centerClass;
   int nCount = 0;
   float nGeomW = 0.0;
   float nPowSum = 0.0;
@@ -502,6 +563,8 @@ void main() {
       if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
       vec4 tap = texelFetch(uShade, ivec2(ss, ll), 0);
       if (tap.a <= 0.0) continue;
+      float tapClass = texelFetch(uCorr, ivec2(ss, ll), 0).a;
+      if (abs(tapClass - targetClass) >= 0.25) continue;
       float wGeom = wl * ((ds == 0) ? 2.0 : 1.0);
       float wp = wGeom * tap.a;
       nCount++;
@@ -512,18 +575,17 @@ void main() {
     }
   }
 
-  // Case 1: Center uncolored -> safe blood-pool pinhole closure only (never bleeds into tissue/shadow)
+  // Case 1: Center uncolored -> safe blood-pool pinhole closure strictly on blood (uCorr.a >= 0.75)
   if (c.a <= 0.0) {
-    float isBlood = texelFetch(uCorr, ivec2(si, li), 0).a;
     int minPinhole = (sm >= 0.5) ? ST_PINHOLE_MIN_COUNT : 6;
-    if (isBlood >= 0.5 && sm >= 0.25 && nCount >= minPinhole && nGeomW >= 7.0 && nPowSum > 1e-6) {
+    if (centerClass >= 0.75 && sm >= 0.25 && nCount >= minPinhole && nGeomW >= 7.0 && nPowSum > 1e-6) {
       float meanPow = nPowSum / nGeomW;
       if (meanPow >= ST_PINHOLE_MIN_POWER) {
         float phLen = length(nPhSum);
         vec2 phFill = phLen > 1e-6 ? (nPhSum / phLen) : vec2(1.0, 0.0);
         float varFill = nVarPowSum / nPowSum;
         float powFill = min(1.0, meanPow * (0.65 + 0.25 * sm));
-        outDisplay = vec4(phFill, varFill, 0.5 + 0.5 * colorPowerConf(powFill));
+        outDisplay = vec4(phFill, varFill, encodeDisplayAlpha(powFill, false));
         return;
       }
     }
@@ -552,7 +614,7 @@ void main() {
   float cohLaminar = smoothstep(0.55, 0.92, spatialCoherence);
   float laminarFactor = varLaminar * cohLaminar;
 
-  // Edge-preserving circular phase-similarity bilateral gather
+  // Edge-preserving circular phase-similarity bilateral gather (strictly within the same class)
   float bCenterW = 2.0 * c.a;
   vec2 bPh = bCenterW * c.rg;
   float bVar = bCenterW * c.b;
@@ -570,6 +632,8 @@ void main() {
       if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
       vec4 tap = texelFetch(uShade, ivec2(ss, ll), 0);
       if (tap.a <= 0.0) continue;
+      float tapClass = texelFetch(uCorr, ivec2(ss, ll), 0).a;
+      if (abs(tapClass - centerClass) >= 0.25) continue;
       float wGeom = wl * ((ds == 0) ? 2.0 : 1.0);
       float cosDiff = clamp(dot(tap.rg, c.rg), -1.0, 1.0);
       float wPhase = exp(-(1.0 - cosDiff) * ST_PHASE_BILATERAL_K);
@@ -607,7 +671,7 @@ void main() {
   float powMix = sm * (0.25 + 0.45 * laminarFactor);
   float powOut = clamp(mix(c.a, powSmooth, powMix), 0.0, 1.0);
 
-  outDisplay = vec4(outPh, varOut, 0.5 + 0.5 * colorPowerConf(powOut));
+  outDisplay = vec4(outPh, varOut, encodeDisplayAlpha(powOut, isClutter));
 }
 `;
 

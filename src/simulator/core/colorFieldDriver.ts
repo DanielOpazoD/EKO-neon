@@ -11,17 +11,25 @@ import { TRANS_DECODE } from '@/simulator/renderer/transmissionCode';
 import type { PolarFrame, PolarFrameSpec, Scene } from '@/simulator/renderer/types';
 import { persistenceOverTime } from '@/simulator/renderer/postprocess/consolePipeline';
 import {
+  prepareClutterContext,
+  sampleClutterAxialVelocity,
   sampleFlow,
   type FlowFieldParams,
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
 import {
   allocColorField,
+  colorSpectralWidthMps,
   computeColorField,
   type ColorField,
   type ColorSettings,
 } from '@/simulator/doppler/color/colorDoppler';
 import type { CineFrame } from './cineBuffer';
+import {
+  colorAcquisitionKey,
+  colorCpuAcquisitionKey,
+  colorGeometryKey,
+} from './acquisitionKeys';
 
 export interface ColorUpdateContext {
   frame: PolarFrame;
@@ -96,26 +104,19 @@ export class ColorFieldDriver {
 
   /** Build the per-geometry key (probe, ROI box, frequency/harmonics, polar grid) for GPU raw-flow reuse. */
   private geometryKey(ctx: ColorUpdateContext): string {
-    const c = ctx.color;
-    return JSON.stringify([
+    return colorGeometryKey(
       ctx.probe,
-      c.boxThetaMinRad,
-      c.boxThetaMaxRad,
-      c.boxRMinCm,
-      c.boxRMaxCm,
+      ctx.color,
       ctx.scene.physics.frequencyMHz,
       ctx.scene.physics.harmonics,
       ctx.modelVersion,
-      ctx.spec.lines,
-      ctx.spec.samples,
-      ctx.spec.depthCm,
-      ctx.spec.sectorRad,
-    ]);
+      ctx.spec,
+    );
   }
 
-  /** Build the Doppler console-only settings key (scale, baseline, wall filter, gain, persistence, invert, variance). */
+  /** Build the Doppler acquisition-only settings key (excludes presentation-only toggles like `showVariance`). */
   static settingsKey(c: ColorSettings): string {
-    return `${c.boxThetaMinRad}|${c.boxThetaMaxRad}|${c.boxRMinCm}|${c.boxRMaxCm}|${c.scaleMps}|${c.baselineShiftMps}|${c.wallFilterMps}|${c.gainDb}|${c.persistence}|${c.smoothing}|${c.invert ? 1 : 0}|${c.showVariance ? 1 : 0}`;
+    return colorAcquisitionKey(c);
   }
 
   /**
@@ -216,7 +217,7 @@ export class ColorFieldDriver {
     return ok;
   }
 
-  /** Sample only the polar ROI box into a compact RGBA float buffer `[vAxial, dispersion, present, 0]`. */
+  /** Sample only the polar ROI box into a compact RGBA float buffer `[vAxial, sigmaVMps, present, vWall]`. */
   private sampleRawFlowBox(
     ctx: ColorUpdateContext,
     liMin: number,
@@ -240,7 +241,10 @@ export class ColorFieldDriver {
     const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
     const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
     const tissue = frame.tissue;
-    const filterByBlood = bloomSamples === 0 && tissue.length === lines * samples;
+    const structure = frame.structure;
+    const hasTissueMap = tissue.length === lines * samples;
+    const filterByBlood = bloomSamples === 0 && hasTissueMap;
+    const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
 
     for (let li = liMin; li <= liMax; li++) {
       const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
@@ -257,26 +261,64 @@ export class ColorFieldDriver {
       const polarRow = li * samples;
       for (let si = siMin; si <= siMax; si++) {
         const o = rowOff + (si - siMin) * 4;
-        if (filterByBlood && tissue[polarRow + si] !== Tissue.Blood) {
+        const pIdx = polarRow + si;
+        const tId = hasTissueMap ? tissue[pIdx]! : Tissue.Blood;
+        const isClutterTissue = tId === Tissue.Myocardium || tId === Tissue.Valve;
+
+        if (filterByBlood && tId !== Tissue.Blood) {
           out[o] = 0;
           out[o + 1] = 0;
           out[o + 2] = 0;
-          out[o + 3] = 0;
+          if (isClutterTissue) {
+            const r = (si + 0.5) * dr;
+            out[o + 3] = sampleClutterAxialVelocity(
+              clutterCtx,
+              heart,
+              ohx + dhx * r,
+              ohy + dhy * r,
+              ohz + dhz * r,
+              tId,
+              structure[pIdx] ?? -1,
+              dhx,
+              dhy,
+              dhz,
+            );
+          } else {
+            out[o + 3] = 0;
+          }
           continue;
         }
         const r = (si + 0.5) * dr;
-        sampleFlow(flow, tables, hp, phase, ohx + dhx * r, ohy + dhy * r, ohz + dhz * r, fs);
+        const hx = ohx + dhx * r;
+        const hy = ohy + dhy * r;
+        const hz = ohz + dhz * r;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
         if (fs.present) {
-          out[o] = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
-          out[o + 1] = fs.dispersion;
+          const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+          const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+          const vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
+          out[o] = vAxial;
+          out[o + 1] = colorSpectralWidthMps(vAxial, fs.dispersion, vPerp, r);
           out[o + 2] = 1;
-          out[o + 3] = 0;
         } else {
           out[o] = 0;
           out[o + 1] = 0;
           out[o + 2] = 0;
-          out[o + 3] = 0;
         }
+        out[o + 3] = isClutterTissue
+          ? sampleClutterAxialVelocity(
+              clutterCtx,
+              heart,
+              hx,
+              hy,
+              hz,
+              tId,
+              structure[pIdx] ?? -1,
+              dhx,
+              dhy,
+              dhz,
+            )
+          : 0;
       }
     }
   }
@@ -325,11 +367,14 @@ export class ColorFieldDriver {
     const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
     const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
 
+    const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
+    const bloomSamples = Math.max(0, Math.round((cf.acquisition.color.gainDb - 2) * 0.6));
+
     computeColorField(
       syntheticFrame,
       { ...cf.acquisition.color, persistence: 0 },
       null,
-      (_idx, li, si, o) => {
+      (idx, li, si, o) => {
         if (li !== cachedLi) {
           cachedLi = li;
           const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
@@ -343,9 +388,35 @@ export class ColorFieldDriver {
           dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
         }
         const r = (si + 0.5) * dr;
-        sampleFlow(flow, tables, hp, phase, ohx + dhx * r, ohy + dhy * r, ohz + dhz * r, fs);
-        o.v = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+        const hx = ohx + dhx * r;
+        const hy = ohy + dhy * r;
+        const hz = ohz + dhz * r;
+        const tId = syntheticFrame.tissue[idx]!;
+        const isClutterTissue = tId === Tissue.Myocardium || tId === Tissue.Valve;
+        if (isClutterTissue) {
+          o.vWall = sampleClutterAxialVelocity(
+            clutterCtx,
+            heart,
+            hx,
+            hy,
+            hz,
+            tId,
+            syntheticFrame.structure[idx] ?? -1,
+            dhx,
+            dhy,
+            dhz,
+          );
+          if (bloomSamples === 0) {
+            o.present = 0;
+            return;
+          }
+        }
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+        const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+        o.v = vAxial;
         o.disp = fs.dispersion;
+        o.vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
         o.present = fs.present;
       },
       out,
@@ -366,17 +437,14 @@ export class ColorFieldDriver {
     variance: Float32Array | null;
     power: Float32Array | null;
   } {
-    const colorKey = JSON.stringify([
+    const colorKey = colorCpuAcquisitionKey(
       ctx.probe,
       ctx.color,
       ctx.scene.physics.frequencyMHz,
       ctx.scene.physics.harmonics,
       ctx.modelVersion,
-      ctx.spec.lines,
-      ctx.spec.samples,
-      ctx.spec.depthCm,
-      ctx.spec.sectorRad,
-    ]);
+      ctx.spec,
+    );
     if (colorKey !== this.acquisitionKey) {
       this.prev = null;
       this.acquisitionKey = colorKey;
@@ -418,6 +486,8 @@ export class ColorFieldDriver {
     const ohx = ox * hf.ex.x + oy * hf.ex.y + oz * hf.ex.z;
     const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
     const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
+    const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
+    const bloomSamples = Math.max(0, Math.round((ctx.color.gainDb - 2) * 0.6));
     computeColorField(
       frame,
       {
@@ -429,7 +499,7 @@ export class ColorFieldDriver {
         ),
       },
       this.prev,
-      (_idx, li, si, o) => {
+      (idx, li, si, o) => {
         if (li !== cachedLi) {
           cachedLi = li;
           const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
@@ -446,9 +516,32 @@ export class ColorFieldDriver {
         const hx = ohx + dhx * r;
         const hy = ohy + dhy * r;
         const hz = ohz + dhz * r;
+        const tId = frame.tissue[idx]!;
+        const isClutterTissue = tId === Tissue.Myocardium || tId === Tissue.Valve;
+        if (isClutterTissue) {
+          o.vWall = sampleClutterAxialVelocity(
+            clutterCtx,
+            heart,
+            hx,
+            hy,
+            hz,
+            tId,
+            frame.structure[idx] ?? -1,
+            dhx,
+            dhy,
+            dhz,
+          );
+          if (bloomSamples === 0) {
+            o.present = 0;
+            return;
+          }
+        }
         sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
-        o.v = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz); // + = toward the transducer
+        const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz); // + = toward the transducer
+        const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+        o.v = vAxial;
         o.disp = fs.dispersion;
+        o.vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
         o.present = fs.present;
       },
       out,

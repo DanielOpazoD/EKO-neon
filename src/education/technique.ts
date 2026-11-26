@@ -65,6 +65,23 @@ export interface MeasurementContext {
   userAssisted?: boolean;
 }
 
+/** Canonical clinical beam–flow angle thresholds (ASE): ≤20° green (≤6% cos θ error), 21–32° amber, >32° red. */
+export const DOPPLER_ANGLE_OK_DEG = 20;
+export const DOPPLER_ANGLE_WARN_MARGIN_DEG = 12;
+export const DOPPLER_ANGLE_WARN_DEG = DOPPLER_ANGLE_OK_DEG + DOPPLER_ANGLE_WARN_MARGIN_DEG;
+
+export type DopplerAngleQuality = 'ok' | 'warn' | 'invalid';
+
+/** Classify a beam–flow angle (deg) against the acceptable threshold (default 20°). */
+export function classifyDopplerAngle(
+  angleDeg: number,
+  okMaxDeg = DOPPLER_ANGLE_OK_DEG,
+): DopplerAngleQuality {
+  if (angleDeg <= okMaxDeg) return 'ok';
+  if (angleDeg <= okMaxDeg + DOPPLER_ANGLE_WARN_MARGIN_DEG) return 'warn';
+  return 'invalid';
+}
+
 const LEVEL_FACTOR: Record<FindingLevel, number> = { ok: 1, warn: 0.75, invalid: 0.3 };
 
 const BLOOD_STRUCTURES = new Set<number>([
@@ -295,20 +312,23 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
         'warn',
         'Sin flujo en el volumen de muestra en el instante de la medida: no se puede juzgar la alineación.',
       );
-    else if (a <= spec.maxAngleDeg)
-      add('alignment', 'ok', `Ángulo haz–flujo ${a.toFixed(0)}° (≤ ${spec.maxAngleDeg}°).`);
-    else if (a <= spec.maxAngleDeg + 12)
-      add(
-        'alignment',
-        'warn',
-        `Ángulo haz–flujo ${a.toFixed(0)}°: la velocidad se subestima un ${((1 - Math.cos((a * Math.PI) / 180)) * 100).toFixed(0)} % (cos θ).`,
-      );
-    else
-      add(
-        'alignment',
-        'invalid',
-        `Ángulo haz–flujo ${a.toFixed(0)}°: subestimación del ${((1 - Math.cos((a * Math.PI) / 180)) * 100).toFixed(0)} %; realinea la sonda con el chorro.`,
-      );
+    else {
+      const q = classifyDopplerAngle(a, spec.maxAngleDeg);
+      if (q === 'ok')
+        add('alignment', 'ok', `Ángulo haz–flujo ${a.toFixed(0)}° (≤ ${spec.maxAngleDeg}°).`);
+      else if (q === 'warn')
+        add(
+          'alignment',
+          'warn',
+          `Ángulo haz–flujo ${a.toFixed(0)}°: la velocidad se subestima un ${((1 - Math.cos((a * Math.PI) / 180)) * 100).toFixed(0)} % (cos θ).`,
+        );
+      else
+        add(
+          'alignment',
+          'invalid',
+          `Ángulo haz–flujo ${a.toFixed(0)}°: subestimación del ${((1 - Math.cos((a * Math.PI) / 180)) * 100).toFixed(0)} %; realinea la sonda con el chorro.`,
+        );
+    }
   }
 
   // the chamber cut by the depth of the sector (Simpson, decision 180)

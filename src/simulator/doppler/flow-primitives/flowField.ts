@@ -39,19 +39,26 @@ import {
   type FlowSample,
 } from './jetProfiles';
 import {
+  prepareClutterContext,
   RA_VESTIBULE_CM,
+  sampleClutterAxialVelocity,
+  sampleLeafletVelocity,
   samplePulmonaryVeins,
   sampleRegurgitantJets,
   sampleTissueVelocity,
+  type ClutterContext,
 } from './regurgitantJets';
 
-export type { FlowSample };
+export type { ClutterContext, FlowSample };
 export {
   conventionalPropagation,
   flowPropagationCmps,
   lvotNarrowing,
+  prepareClutterContext,
   pulmonaryVeinPeaks,
   RA_VESTIBULE_CM,
+  sampleClutterAxialVelocity,
+  sampleLeafletVelocity,
   samplePulmonaryVeins,
   sampleRegurgitantJets,
   sampleTissueVelocity,

@@ -7,6 +7,7 @@ import './app/fonts.css';
 import './app/styles.css';
 import type {
   compareBackends,
+  compareDeferredDoppler,
   compareExperimentalBackends,
   compareImageChain,
 } from '@/app/debugCompare';
@@ -28,6 +29,8 @@ if (import.meta.env.DEV || import.meta.env.VITE_TEST_HOOKS === '1') {
       import('@/app/debugCompare').then((m) => m.compareExperimentalBackends(...args)),
     compareImageChain: (...args: Parameters<typeof compareImageChain>) =>
       import('@/app/debugCompare').then((m) => m.compareImageChain(...args)),
+    compareDeferredDoppler: (...args: Parameters<typeof compareDeferredDoppler>) =>
+      import('@/app/debugCompare').then((m) => m.compareDeferredDoppler(...args)),
     frameBus,
   };
 }

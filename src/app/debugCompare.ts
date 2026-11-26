@@ -22,10 +22,22 @@ import {
   scanConvertLut,
 } from '@/simulator/renderer/scanConvert';
 import {
+  allocColorField,
+  colorSpectralWidthMps,
+  computeColorField,
   DEFAULT_COLOR,
   overlayColorField,
   type ColorSettings,
 } from '@/simulator/doppler/color/colorDoppler';
+import {
+  buildFlowParams,
+  prepareClutterContext,
+  sampleClutterAxialVelocity,
+  sampleFlow,
+  type FlowSample,
+} from '@/simulator/doppler/flow-primitives/flowField';
+import { computeDopplerBoxBounds } from '@/simulator/renderer/gpu/deferredDoppler';
+import { Tissue } from '@/simulator/anatomy/tissue';
 import {
   beamFrameFromPose,
   poseFromControl,
@@ -111,7 +123,7 @@ function canonicalSetup(
     // the comparison (decision 163)
     physics: scenePhysicsFor(c, settings, { bloodFrame: 7 }),
   });
-  return { c, heart, beam, spec, scene: sceneAt(phase), sceneAt };
+  return { c, heart, thorax, tables, beam, spec, scene: sceneAt(phase), sceneAt };
 }
 
 /**
@@ -511,4 +523,343 @@ export function compareImageChain(
   result.presentColorPixels = colored;
   result.presentColourFlips = flips;
   return result;
+}
+
+export interface DeferredDopplerComparison {
+  error?: string;
+  boxW: number;
+  boxH: number;
+  /** Deterministic mode (estimate = undefined): sample-by-sample CPU vs GPU agreement inside ROI box. */
+  detValidAgreement: number;
+  detColoredCount: number;
+  detVelMeanDiff: number;
+  detVelMaxDiff: number;
+  detVarMaxDiff: number;
+  /** Deterministic deferred present RGBA parity (CPU overlayColorField vs GPU deferred present). */
+  detPresentMaxDiff: number;
+  detPresentFracOver1: number;
+  /** Stochastic Kasai (8-pulse 3-basis Legendre): blood & clutter parity at WF=6 cm/s vs WF=2 cm/s. */
+  kasaiWf6: {
+    cpuBloodFill: number;
+    gpuBloodFill: number;
+    cpuBloodMeanV: number;
+    gpuBloodMeanV: number;
+    cpuClutterFill: number;
+    gpuClutterFill: number;
+  };
+  kasaiWf2: {
+    cpuBloodFill: number;
+    gpuBloodFill: number;
+    cpuBloodMeanV: number;
+    gpuBloodMeanV: number;
+    cpuClutterFill: number;
+    gpuClutterFill: number;
+  };
+}
+
+/**
+ * Debug/QA hook (`window.__echotwin.compareDeferredDoppler`): runs the real WebGL2 deferred Color
+ * Doppler pipeline (Pass D1 + D2 + D3 + Present) against CPU `computeColorField` + `overlayColorField`
+ * on the exact same Polar G-Buffer and ROI raw-flow/clutter samples, verifying both deterministic
+ * sample-by-sample parity and stochastic 3-basis Legendre Kasai clutter rejection/flash parity.
+ */
+export function compareDeferredDoppler(
+  viewId = 'plax',
+  phase = 0.22,
+  caseId = 'normal-excellent-window',
+  tier: Tier = 'low',
+  colorOverrides: Partial<ColorSettings> = {},
+): DeferredDopplerComparison {
+  const emptyStats = {
+    cpuBloodFill: 0,
+    gpuBloodFill: 0,
+    cpuBloodMeanV: 0,
+    gpuBloodMeanV: 0,
+    cpuClutterFill: 0,
+    gpuClutterFill: 0,
+  };
+  const empty: DeferredDopplerComparison = {
+    boxW: 0,
+    boxH: 0,
+    detValidAgreement: 0,
+    detColoredCount: 0,
+    detVelMeanDiff: 1,
+    detVelMaxDiff: 1,
+    detVarMaxDiff: 1,
+    detPresentMaxDiff: 255,
+    detPresentFracOver1: 1,
+    kasaiWf6: { ...emptyStats },
+    kasaiWf2: { ...emptyStats },
+  };
+  const g = createWebgl2Renderer(undefined, { allowSoftware: true });
+  if (!g.renderer) return { ...empty, error: g.reason };
+  const gpu = g.renderer;
+  try {
+    const settings: AcquisitionSettings = { ...DEFAULT_ACQUISITION };
+    const { c, heart, thorax, tables, beam, spec, scene } = canonicalSetup(
+      viewId,
+      phase,
+      caseId,
+      tier,
+      settings,
+    );
+    const flow = buildFlowParams(c, heart, tables, thorax);
+    const n = spec.lines * spec.samples;
+    const frame = allocPolarFrame(spec);
+    const disp = new Uint8ClampedArray(n);
+    const consoleState = createConsoleState(c.seed);
+    // Populate CPU exact float transmission FIRST, then GPU Polar G-Buffer + packed display
+    // (keeping packedFresh=true so zero-readback gpu.present() runs)
+    const frameFloat = allocPolarFrame(spec);
+    gpu.render(scene, beam, spec, phase, frameFloat);
+    gpu.renderDisplay(scene, beam, spec, phase, frame, undefined, { settings, state: consoleState }, disp);
+    frame.transmission.set(frameFloat.transmission);
+    frame.tissue.set(frameFloat.tissue);
+    frame.structure.set(frameFloat.structure);
+
+    const baseColor: ColorSettings = {
+      ...DEFAULT_COLOR,
+      boxRMinCm: 3.5,
+      boxRMaxCm: 12.0,
+      boxThetaMinRad: -0.32,
+      boxThetaMaxRad: 0.32,
+      persistence: 0,
+      smoothing: 0.45,
+      gainDb: 0,
+      ...colorOverrides,
+    };
+    const box = computeDopplerBoxBounds(spec, baseColor);
+    const rawFlowBox = new Float32Array(box.boxW * box.boxH * 4);
+    const boxDisp = new Float32Array(box.boxW * box.boxH);
+    const boxVPerp = new Float32Array(box.boxW * box.boxH);
+    const hf = heart.frame;
+    const hp = scene.heartPose;
+    const ox = beam.origin.x - hf.origin.x;
+    const oy = beam.origin.y - hf.origin.y;
+    const oz = beam.origin.z - hf.origin.z;
+    const ohx = ox * hf.ex.x + oy * hf.ex.y + oz * hf.ex.z;
+    const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
+    const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
+    const dr = spec.depthCm / spec.samples;
+    const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
+    const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+    for (let li = box.liMin; li <= box.liMax; li++) {
+      const theta = -spec.sectorRad / 2 + (spec.sectorRad * (li + 0.5)) / spec.lines;
+      const ct = Math.cos(theta);
+      const sn = Math.sin(theta);
+      const dx = beam.forward.x * ct + beam.lateral.x * sn;
+      const dy = beam.forward.y * ct + beam.lateral.y * sn;
+      const dz = beam.forward.z * ct + beam.lateral.z * sn;
+      const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+      const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+      const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+      const rowIdx = (li - box.liMin) * box.boxW;
+      for (let si = box.siMin; si <= box.siMax; si++) {
+        const gIdx = rowIdx + (si - box.siMin);
+        const o = gIdx * 4;
+        const pIdx = li * spec.samples + si;
+        const r = (si + 0.5) * dr;
+        const hx = ohx + dhx * r;
+        const hy = ohy + dhy * r;
+        const hz = ohz + dhz * r;
+        const tId = frame.tissue[pIdx]!;
+        const isClutterTissue = tId === Tissue.Myocardium || tId === Tissue.Valve;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        if (fs.present) {
+          const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+          const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+          const vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
+          rawFlowBox[o] = vAxial;
+          rawFlowBox[o + 1] = colorSpectralWidthMps(vAxial, fs.dispersion, vPerp, r);
+          rawFlowBox[o + 2] = 1;
+          boxDisp[gIdx] = fs.dispersion;
+          boxVPerp[gIdx] = vPerp;
+        }
+        rawFlowBox[o + 3] = isClutterTissue
+          ? sampleClutterAxialVelocity(
+              clutterCtx,
+              heart,
+              hx,
+              hy,
+              hz,
+              tId,
+              frame.structure[pIdx] ?? -1,
+              dhx,
+              dhy,
+              dhz,
+            )
+          : 0;
+      }
+    }
+
+    const sampleFromBox = (
+      _idx: number,
+      li: number,
+      si: number,
+      out: { v: number; disp: number; present: number; vPerp?: number; vWall?: number },
+    ) => {
+      const gIdx = (li - box.liMin) * box.boxW + (si - box.siMin);
+      const o = gIdx * 4;
+      out.v = rawFlowBox[o]!;
+      out.disp = boxDisp[gIdx]!;
+      out.vPerp = boxVPerp[gIdx]!;
+      out.present = rawFlowBox[o + 2]!;
+      out.vWall = rawFlowBox[o + 3]!;
+    };
+
+    const acq = { frequencyMHz: settings.frequencyMHz, harmonics: settings.harmonics };
+    const cpuDet = allocColorField(n);
+    const detCfg: ColorSettings = { ...baseColor, wallFilterMps: 0.06 };
+    computeColorField(frame, detCfg, null, sampleFromBox, cpuDet, acq, undefined);
+
+    const shadedDet = gpu.shadeDoppler({
+      spec,
+      settings: detCfg,
+      frequencyMHz: settings.frequencyMHz,
+      harmonics: settings.harmonics,
+      rawFlowBox,
+      resetHistory: true,
+    });
+    if (!shadedDet) return { ...empty, error: 'shadeDoppler deterministic failed' };
+    const gpuDetVel = new Float32Array(n);
+    const gpuDetVar = new Float32Array(n);
+    gpu.readbackDopplerBox(spec, detCfg.scaleMps, detCfg.baselineShiftMps, gpuDetVel, gpuDetVar);
+
+    let agree = 0;
+    let bothColored = 0;
+    let velDiffSum = 0;
+    let velMaxDiff = 0;
+    let varMaxDiff = 0;
+    const span = 2 * detCfg.scaleMps;
+    for (let li = box.liMin; li <= box.liMax; li++) {
+      for (let si = box.siMin; si <= box.siMax; si++) {
+        const i = li * spec.samples + si;
+        const vc = cpuDet.vel[i]!;
+        const vg = gpuDetVel[i]!;
+        const cOk = Number.isFinite(vc);
+        const gOk = Number.isFinite(vg);
+        if (cOk === gOk) agree++;
+        if (cOk && gOk) {
+          bothColored++;
+          let dv = Math.abs(vc - vg);
+          if (dv > detCfg.scaleMps) dv = Math.abs(dv - span);
+          velDiffSum += dv;
+          if (dv > velMaxDiff) velMaxDiff = dv;
+          const dvar = Math.abs(cpuDet.variance[i]! - gpuDetVar[i]!);
+          if (dvar > varMaxDiff) varMaxDiff = dvar;
+        }
+      }
+    }
+
+    // End-to-end zero-readback deferred present parity on deterministic color field
+    const W = 480;
+    const H = 360;
+    const mapping = computeSectorMapping(spec, W, H, false, 1);
+    const lut = buildScanLut(spec, mapping);
+    const cpuRgba = new Uint8ClampedArray(W * H * 4);
+    scanConvertLut(disp, lut, cpuRgba, settings.tintMap);
+    overlayColorField(cpuRgba, lut, cpuDet.vel, cpuDet.variance, detCfg, cpuDet.power);
+    const gpuRgba = new Uint8Array(W * H * 4);
+    gpu.present({
+      lut,
+      width: W,
+      height: H,
+      color: { deferred: true, settings: detCfg },
+      tintMap: settings.tintMap,
+      readback: gpuRgba,
+    });
+    let detPresentMaxDiff = 0;
+    let detPresentOver1 = 0;
+    let inside = 0;
+    for (let p = 0; p < W * H; p++) {
+      if ((lut.idx[p] ?? -1) < 0) continue;
+      inside++;
+      const o = p * 4;
+      const d = Math.max(
+        Math.abs(cpuRgba[o]! - gpuRgba[o]!),
+        Math.abs(cpuRgba[o + 1]! - gpuRgba[o + 1]!),
+        Math.abs(cpuRgba[o + 2]! - gpuRgba[o + 2]!),
+      );
+      if (d > detPresentMaxDiff) detPresentMaxDiff = d;
+      if (d > 1) detPresentOver1++;
+    }
+
+    // Stochastic 8-pulse Kasai + 3-basis Legendre clutter check at WF = 6 cm/s vs WF = 2 cm/s
+    const runKasai = (wfMps: number) => {
+      const cfg: ColorSettings = { ...baseColor, wallFilterMps: wfMps };
+      const cpuOut = allocColorField(n);
+      const est = { realization: 2, seed: 42 };
+      computeColorField(frame, cfg, null, sampleFromBox, cpuOut, acq, est);
+      gpu.shadeDoppler({
+        spec,
+        settings: cfg,
+        frequencyMHz: settings.frequencyMHz,
+        harmonics: settings.harmonics,
+        estimate: est,
+        resetHistory: true,
+      });
+      const gVel = new Float32Array(n);
+      const gVar = new Float32Array(n);
+      gpu.readbackDopplerBox(spec, cfg.scaleMps, cfg.baselineShiftMps, gVel, gVar);
+
+      let bloodTot = 0,
+        cpuBloodN = 0,
+        gpuBloodN = 0,
+        cpuBloodV = 0,
+        gpuBloodV = 0;
+      let clutTot = 0,
+        cpuClutN = 0,
+        gpuClutN = 0;
+      for (let li = box.liMin; li <= box.liMax; li++) {
+        for (let si = box.siMin; si <= box.siMax; si++) {
+          const i = li * spec.samples + si;
+          const tId = frame.tissue[i]!;
+          const o = ((li - box.liMin) * box.boxW + (si - box.siMin)) * 4;
+          if (tId === Tissue.Blood && rawFlowBox[o + 2]! > 0.5) {
+            bloodTot++;
+            if (Number.isFinite(cpuOut.vel[i])) {
+              cpuBloodN++;
+              cpuBloodV += cpuOut.vel[i]!;
+            }
+            if (Number.isFinite(gVel[i])) {
+              gpuBloodN++;
+              gpuBloodV += gVel[i]!;
+            }
+          } else if (tId === Tissue.Myocardium || tId === Tissue.Valve) {
+            clutTot++;
+            if (Number.isFinite(cpuOut.vel[i])) cpuClutN++;
+            if (Number.isFinite(gVel[i])) gpuClutN++;
+          }
+        }
+      }
+      return {
+        cpuBloodFill: bloodTot ? cpuBloodN / bloodTot : 0,
+        gpuBloodFill: bloodTot ? gpuBloodN / bloodTot : 0,
+        cpuBloodMeanV: cpuBloodN ? cpuBloodV / cpuBloodN : 0,
+        gpuBloodMeanV: gpuBloodN ? gpuBloodV / gpuBloodN : 0,
+        cpuClutterFill: clutTot ? cpuClutN / clutTot : 0,
+        gpuClutterFill: clutTot ? gpuClutN / clutTot : 0,
+      };
+    };
+
+    const kasaiWf6 = runKasai(0.06);
+    const kasaiWf2 = runKasai(0.02);
+
+    return {
+      boxW: box.boxW,
+      boxH: box.boxH,
+      detValidAgreement: box.totalTexels ? agree / box.totalTexels : 1,
+      detColoredCount: bothColored,
+      detVelMeanDiff: bothColored ? velDiffSum / bothColored : 0,
+      detVelMaxDiff: velMaxDiff,
+      detVarMaxDiff: varMaxDiff,
+      detPresentMaxDiff,
+      detPresentFracOver1: inside ? detPresentOver1 / inside : 0,
+      kasaiWf6,
+      kasaiWf2,
+    };
+  } finally {
+    gpu.dispose();
+  }
 }

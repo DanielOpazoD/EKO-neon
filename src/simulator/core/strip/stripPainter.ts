@@ -101,7 +101,7 @@ export function paintMmodeStripColumn(
       const v = baseline + invPiScale * Math.atan2(im, re);
       const vari = varAcc / wSum;
       const powAlpha = powAcc / wSum;
-      colorMap(v, scale, vari, color.showVariance, rgb, baseline);
+      colorMap(v, scale, vari, color.showVariance, rgb, baseline, color.palette);
 
       const edgeT = Math.min(1, Math.max(0, (wSum - 0.18) / 0.54));
       const edgeAlpha = edgeT * edgeT * (3 - 2 * edgeT);
@@ -124,7 +124,21 @@ export function paintMmodeStripColumn(
   }
 }
 
-/** Rasterize the displayed spectral Doppler strip with bilinear resampling, baseline, and tint map. */
+/**
+ * Postprocess spectral display tone curve: zeroes low-level background snow at or below `reject`,
+ * remaps the surviving span cleanly to [0, 1], and applies a gentle clinical S-curve that keeps
+ * dense modal ridges crisp without altering the underlying `stripSpectral` envelope buffer.
+ */
+export function applySpectralRejectCurve(v: number, reject: number): number {
+  const x = Math.max(0, Math.min(1, v));
+  const r = Math.max(0, Math.min(0.6, reject));
+  if (x <= r) return 0;
+  const u = (x - r) / (1 - r);
+  const s = u * u * (3 - 2 * u);
+  return 0.72 * u + 0.28 * s;
+}
+
+/** Rasterize the displayed spectral Doppler strip with bilinear resampling, reject/S-curve, baseline, and tint map. */
 export function renderSpectralStripRgba(
   rgba: Uint8ClampedArray,
   W: number,
@@ -136,8 +150,10 @@ export function renderSpectralStripRgba(
   spectral: SpectralSettings,
   tintMap?: TintMapId,
   headCol?: number,
+  rejectOverride?: number,
 ): { vMin: number; vMax: number } {
   const { vMin, vMax } = spectralRange(spectral);
+  const reject = Math.max(0, Math.min(0.6, rejectOverride ?? spectral.reject ?? 0));
   const customTint = tintMap && tintMap !== 'gray';
   const rgb: [number, number, number] = [0, 0, 0];
   const seamCol = headCol !== undefined && cols > 1 ? ((headCol % cols) + cols) % cols : -1;
@@ -172,8 +188,8 @@ export function renderSpectralStripRgba(
       const base1 = c1 * SPECTRAL_BINS;
       const v0 = (stripDisplay[base0 + b0] ?? 0) * fx0 + (stripDisplay[base1 + b0] ?? 0) * fx;
       const v1 = (stripDisplay[base0 + b1] ?? 0) * fx0 + (stripDisplay[base1 + b1] ?? 0) * fx;
-      const v = v0 * fy0 + v1 * fy;
-      const g = Math.round(Math.max(0, Math.min(1, v)) * 255);
+      const v = applySpectralRejectCurve(v0 * fy0 + v1 * fy, reject);
+      const g = Math.round(v * 255);
       const o = (rowOff + x) * 4;
       if (customTint) {
         tintGrayByte(g, tintMap, rgb);

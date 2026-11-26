@@ -1,4 +1,5 @@
 import {
+  ahaSegment,
   heartAnchors,
   ROOT_EXCURSION,
   type HeartModel,
@@ -6,9 +7,10 @@ import {
 } from '@/simulator/anatomy/heartModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
+import type { FlowPeaks } from '@/simulator/cardiac-cycle/flowPeaks';
 import { tvShortening } from '@/simulator/anatomy/valveSkirt';
 import { smoothstep } from '@/core/vec3';
-import { Structure } from '@/simulator/anatomy/tissue';
+import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { atrialScale, RA_ROOF_DESCENT_SHARE } from '@/simulator/anatomy/classify/atria';
 import { PV_RADIUS, PV_REACH, pulmonaryVeinSegment } from '@/simulator/anatomy/pulmonaryVeins';
 import type { FlowFieldParams } from './flowField';
@@ -248,10 +250,84 @@ const RV_TISSUE = new Set<number>([
 /** Basal annular myocardial cuff thickness (cm) that moves rigidly at full annular velocity before tapering to the fixed apex. */
 const BASAL_ANNULAR_CUFF_CM = 0.85;
 
+/** Axial extent (cm) a valve's leaflets sweep from its annulus (mirrors valveClicks.ts). */
+const LEAFLET_SWEEP_CM = 1.5;
+/** Spatial reach (cm) of valve leaflet clutter velocity around each valve cylinder. */
+const LEAFLET_REACH_CM = 0.85;
+/** Effective leaflet excursion length (m) scaling d(open)/dt into physiological snap speed (~12–24 cm/s). */
+const LEAFLET_EXCURSION_M = 0.012;
+/** Peak physiological valve leaflet snap velocity clamp (m/s). */
+const LEAFLET_MAX_SPEED_MPS = 0.24;
+
+function clampLeafletSpeed(dOpenDt: number): number {
+  const v = dOpenDt * LEAFLET_EXCURSION_M;
+  return v > LEAFLET_MAX_SPEED_MPS
+    ? LEAFLET_MAX_SPEED_MPS
+    : v < -LEAFLET_MAX_SPEED_MPS
+      ? -LEAFLET_MAX_SPEED_MPS
+      : v;
+}
+
+/** Distance (cm) from heart-frame point (px,py,pz) to a valve's leaflet sweep cylinder. */
+function valveCylinderDistance(
+  px: number,
+  py: number,
+  pz: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  ax: number,
+  ay: number,
+  az: number,
+  radius: number,
+): number {
+  const dx = px - cx;
+  const dy = py - cy;
+  const dz = pz - cz;
+  const t = dx * ax + dy * ay + dz * az;
+  const radial = Math.max(0, Math.hypot(dx - ax * t, dy - ay * t, dz - az * t) - radius);
+  const axial = t < 0 ? -t : t > LEAFLET_SWEEP_CM ? t - LEAFLET_SWEEP_CM : 0;
+  return Math.hypot(radial, axial);
+}
+
+/** Instantaneous LV radial cavity expansion rate dR/dt (cm/s; negative during systolic inward contraction). */
+function lvRadialRateCmps(heart: HeartModel, tables: BeatTables, phase: number): number {
+  const dPhase = 0.005;
+  const edv = Math.max(1, tables.edvMl);
+  const vPlus = Math.max(1, sampleTable(tables.lvVolumeMl, (phase + dPhase) % 1));
+  const vMinus = Math.max(1, sampleTable(tables.lvVolumeMl, (phase - dPhase + 1) % 1));
+  return (
+    (heart.lv.rMax * (Math.cbrt(vPlus / edv) - Math.cbrt(vMinus / edv))) /
+    (2 * dPhase * Math.max(0.1, tables.rrS))
+  );
+}
+
+/** Instantaneous isovolumic contraction/relaxation annular reshaping transient (cm/s). */
+function lvIsoTransientCmps(heart: HeartModel, tables: BeatTables, phase: number): number {
+  const t = phase * tables.rrS;
+  const tm = tables.timings;
+  const ivcDur = Math.max(0.025, tm.ejectionStartS);
+  if (t > 0.004 && t < tm.ejectionStartS - 0.002) {
+    const u = (t - 0.004) / Math.max(0.015, ivcDur - 0.006);
+    const amp = Math.min(2.6, 0.24 * heart.physiology.ePrimeSeptalCmps);
+    return amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+  }
+  if (t > tm.ejectionEndS + 0.004 && t < tm.mitralOpenS - 0.004) {
+    const ivrDur = tm.mitralOpenS - tm.ejectionEndS - 0.008;
+    if (ivrDur > 0.018) {
+      const u = (t - (tm.ejectionEndS + 0.004)) / ivrDur;
+      const amp = Math.min(2.0, 0.18 * heart.physiology.ePrimeSeptalCmps);
+      return -amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+    }
+  }
+  return 0;
+}
+
 /**
- * Tissue (myocardial) velocity for TDI (m/s, heart frame) at heart-frame point (x, y, z): the longitudinal annular motion of
- * the shared displacement table, preserving true basal annular velocity across the fibrous-basal cuff before tapering linearly
- * toward the fixed apex, scaled by septal/lateral wall and enriched with subtle physiologic IVC/IVR biphasic reshaping spikes.
+ * Tissue (myocardial) velocity for TDI and Color wall clutter (m/s, heart frame) at heart-frame
+ * point (x, y, z): combines longitudinal annular excursion (preserving basal annular cuff velocity
+ * before tapering toward the apex, with IVC/IVR transients) and LV radial systolic contraction /
+ * diastolic expansion derived from `tables.lvVolumeMl` and modulated by regional `heart.segAmp`.
  */
 export function sampleTissueVelocity(
   heart: HeartModel,
@@ -329,25 +405,362 @@ export function sampleTissueVelocity(
   const wall =
     1 + (heart.physiology.ePrimeLateralCmps / heart.physiology.ePrimeSeptalCmps - 1) * lateralness;
 
-  // Subtle physiologic biphasic isovolumic contraction (IVC) and relaxation (IVR) annular
-  // reshaping transients: tightly windowed inside the isovolumic intervals so s'/e'/a' peaks are untouched.
-  const t = phase * tables.rrS;
-  const tm = tables.timings;
-  let isoCmps = 0;
-  const ivcDur = Math.max(0.025, tm.ejectionStartS);
-  if (t > 0.004 && t < tm.ejectionStartS - 0.002) {
-    const u = (t - 0.004) / Math.max(0.015, ivcDur - 0.006);
-    const amp = Math.min(2.6, 0.24 * heart.physiology.ePrimeSeptalCmps);
-    isoCmps = amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
-  } else if (t > tm.ejectionEndS + 0.004 && t < tm.mitralOpenS - 0.004) {
-    const ivrDur = tm.mitralOpenS - tm.ejectionEndS - 0.008;
-    if (ivrDur > 0.018) {
-      const u = (t - (tm.ejectionEndS + 0.004)) / ivrDur;
-      const amp = Math.min(2.0, 0.18 * heart.physiology.ePrimeSeptalCmps);
-      isoCmps = -amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+  const isoCmps = lvIsoTransientCmps(heart, tables, phase);
+  const vz = ((mapse * longVel + isoCmps) * (1 - level) * wall) / 100; // cm/s → m/s, +z = toward the apex (systole)
+
+  // LV radial contraction / relaxation velocity projected onto (x, y) / rhoLv and modulated by regional segAmp.
+  // Tapers smoothly to 0 at the fibrous mitral annulus (levelFrac <= 0) so basal TDI annular velocities remain exact.
+  let vx = 0;
+  let vy = 0;
+  const rhoLv = Math.hypot(x, y);
+  if (z > annulusZ - 0.3 && z < heart.lv.lengthCm + 1.2 && rhoLv > 0.2 && rhoLv < heart.lv.rMax * 2.5) {
+    const levelFrac = Math.min(1, Math.max(0, (z - annulusZ) / Math.max(1, heart.lv.lengthCm - annulusZ)));
+    const radialEnv = smoothstep(0, 0.18, levelFrac) * (1 - 0.55 * levelFrac * levelFrac);
+    if (radialEnv > 1e-4) {
+      const segAmp = heart.segAmp[ahaSegment(Math.atan2(y, x), levelFrac)] ?? 1;
+      if (segAmp > 1e-4) {
+        const vRadMps = (lvRadialRateCmps(heart, tables, phase) * radialEnv * segAmp) / 100;
+        vx = (x / rhoLv) * vRadMps;
+        vy = (y / rhoLv) * vRadMps;
+      }
+    }
+  }
+  return { vx, vy, vz };
+}
+
+/** Precomputed per-frame myocardial and valve-leaflet velocity rates for zero-allocation Color clutter sampling. */
+export interface ClutterContext {
+  annulusZ: number;
+  lvLongVelCmps: number;
+  lvIsoCmps: number;
+  lvRadialRateCmps: number;
+  wallRatioDelta: number;
+  rvAnnulusZ: number;
+  rvApexZ: number;
+  rvLongVelCmps: number;
+  rvShortRate: number;
+  vMvMps: number;
+  vAvMps: number;
+  vTvMps: number;
+  vPvMps: number;
+  anyLeafletActive: boolean;
+  mvCx: number;
+  mvCy: number;
+  mvCz: number;
+  mvR: number;
+  avCx: number;
+  avCy: number;
+  avCz: number;
+  avAx: number;
+  avAy: number;
+  avAz: number;
+  avR: number;
+  tvCx: number;
+  tvCy: number;
+  tvCz: number;
+  tvR: number;
+  pvCx: number;
+  pvCy: number;
+  pvCz: number;
+  pvAx: number;
+  pvAy: number;
+  pvAz: number;
+  pvR: number;
+  raRz: number;
+}
+
+/**
+ * Precompute frame-constant myocardial and valve opening/closing rates once per Color Doppler update
+ * so sampling `vWall` over myocardial/valve ROI texels incurs zero heap allocations and minimal math.
+ */
+export function prepareClutterContext(
+  heart: HeartModel,
+  tables: BeatTables,
+  hp: HeartPose,
+  phase: number,
+  flowPeaks?: FlowPeaks,
+): ClutterContext {
+  const A = heartAnchors(heart);
+  const dPhase = 0.004;
+  const inv2Dt = 1 / (2 * dPhase * Math.max(0.1, tables.rrS));
+  const sPlus = cycleStateAt(tables, (phase + dPhase) % 1, flowPeaks);
+  const sMinus = cycleStateAt(tables, (phase - dPhase + 1) % 1, flowPeaks);
+  const rvShortRate =
+    (tvShortening(sPlus.contraction, A.rvRadialScale) -
+      tvShortening(sMinus.contraction, A.rvRadialScale)) *
+    inv2Dt;
+  const vMvMps = clampLeafletSpeed((sPlus.mvOpen - sMinus.mvOpen) * inv2Dt);
+  const vAvMps = clampLeafletSpeed((sPlus.avOpen - sMinus.avOpen) * inv2Dt);
+  const vTvMps = clampLeafletSpeed((sPlus.tvOpen - sMinus.tvOpen) * inv2Dt);
+  const vPvMps = clampLeafletSpeed((sPlus.pvOpen - sMinus.pvOpen) * inv2Dt);
+  const mapse = heart.physiology.mapseCm;
+  const tapse = heart.physiology.tapseCm;
+  return {
+    annulusZ: mapse * sampleTable(tables.longitudinal, phase),
+    lvLongVelCmps: mapse * sampleTable(tables.longitudinalVelocity, phase),
+    lvIsoCmps: lvIsoTransientCmps(heart, tables, phase),
+    lvRadialRateCmps: lvRadialRateCmps(heart, tables, phase),
+    wallRatioDelta: heart.physiology.ePrimeLateralCmps / heart.physiology.ePrimeSeptalCmps - 1,
+    rvAnnulusZ: A.tvCenter.z + tapse * sampleTable(tables.rvLongitudinal, phase),
+    rvApexZ: A.rvApexFrac * heart.lv.lengthCm,
+    rvLongVelCmps: tapse * sampleTable(tables.rvLongitudinalVelocity, phase),
+    rvShortRate,
+    vMvMps,
+    vAvMps,
+    vTvMps,
+    vPvMps,
+    anyLeafletActive:
+      Math.abs(vMvMps) > 0.005 ||
+      Math.abs(vAvMps) > 0.005 ||
+      Math.abs(vTvMps) > 0.005 ||
+      Math.abs(vPvMps) > 0.005,
+    mvCx: A.mvCenter.x,
+    mvCy: A.mvCenter.y,
+    mvCz: hp.zAnn,
+    mvR: A.mvR,
+    avCx: A.avCenter.x,
+    avCy: A.avCenter.y,
+    avCz: A.avCenter.z + hp.zAnn * ROOT_EXCURSION,
+    avAx: A.avAxis.x,
+    avAy: A.avAxis.y,
+    avAz: A.avAxis.z,
+    avR: A.avR,
+    tvCx: A.tvCenter.x,
+    tvCy: A.tvCenter.y,
+    tvCz: A.tvCenter.z + hp.tvZ,
+    tvR: A.tvR,
+    pvCx: A.rvotB.x,
+    pvCy: A.rvotB.y,
+    pvCz: A.rvotB.z,
+    pvAx: A.paDir.x,
+    pvAy: A.paDir.y,
+    pvAz: A.paDir.z,
+    pvR: A.pvR,
+    raRz: A.raR.z,
+  };
+}
+
+function leafletVelocityFromCtx(
+  ctx: ClutterContext,
+  x: number,
+  y: number,
+  z: number,
+  out: { vx: number; vy: number; vz: number },
+): void {
+  out.vx = 0;
+  out.vy = 0;
+  out.vz = 0;
+  if (!ctx.anyLeafletActive) return;
+
+  let bestD = LEAFLET_REACH_CM;
+  let speed = 0;
+  let ax = 0;
+  let ay = 0;
+  let az = 0;
+
+  if (Math.abs(ctx.vMvMps) > 0.005) {
+    const d = valveCylinderDistance(x, y, z, ctx.mvCx, ctx.mvCy, ctx.mvCz, 0, 0, 1, ctx.mvR);
+    if (d < bestD) {
+      bestD = d;
+      speed = ctx.vMvMps;
+      ax = 0;
+      ay = 0;
+      az = 1;
+    }
+  }
+  if (Math.abs(ctx.vAvMps) > 0.005) {
+    const d = valveCylinderDistance(
+      x,
+      y,
+      z,
+      ctx.avCx,
+      ctx.avCy,
+      ctx.avCz,
+      ctx.avAx,
+      ctx.avAy,
+      ctx.avAz,
+      ctx.avR,
+    );
+    if (d < bestD) {
+      bestD = d;
+      speed = ctx.vAvMps;
+      ax = ctx.avAx;
+      ay = ctx.avAy;
+      az = ctx.avAz;
+    }
+  }
+  if (Math.abs(ctx.vTvMps) > 0.005) {
+    const d = valveCylinderDistance(x, y, z, ctx.tvCx, ctx.tvCy, ctx.tvCz, 0, 0, 1, ctx.tvR);
+    if (d < bestD) {
+      bestD = d;
+      speed = ctx.vTvMps;
+      ax = 0;
+      ay = 0;
+      az = 1;
+    }
+  }
+  if (Math.abs(ctx.vPvMps) > 0.005) {
+    const d = valveCylinderDistance(
+      x,
+      y,
+      z,
+      ctx.pvCx,
+      ctx.pvCy,
+      ctx.pvCz,
+      ctx.pvAx,
+      ctx.pvAy,
+      ctx.pvAz,
+      ctx.pvR,
+    );
+    if (d < bestD) {
+      bestD = d;
+      speed = ctx.vPvMps;
+      ax = ctx.pvAx;
+      ay = ctx.pvAy;
+      az = ctx.pvAz;
     }
   }
 
-  const vz = ((mapse * longVel + isoCmps) * (1 - level) * wall) / 100; // cm/s → m/s, +z = toward the apex (systole)
-  return { vx: 0, vy: 0, vz };
+  if (speed !== 0) {
+    const w = Math.exp(-((bestD / (LEAFLET_REACH_CM * 0.65)) ** 2));
+    const v = speed * w;
+    out.vx = ax * v;
+    out.vy = ay * v;
+    out.vz = az * v;
+  }
+}
+
+/**
+ * Valve leaflet opening/closing snap velocity (m/s, heart frame) at point (x, y, z), driven by
+ * the finite-difference time derivatives of `mvOpen`, `avOpen`, `tvOpen`, and `pvOpen`.
+ */
+export function sampleLeafletVelocity(
+  heart: HeartModel,
+  tables: BeatTables,
+  hp: HeartPose,
+  phase: number,
+  x: number,
+  y: number,
+  z: number,
+  flowPeaks?: FlowPeaks,
+): { vx: number; vy: number; vz: number } {
+  const ctx = prepareClutterContext(heart, tables, hp, phase, flowPeaks);
+  const out = { vx: 0, vy: 0, vz: 0 };
+  leafletVelocityFromCtx(ctx, x, y, z, out);
+  return out;
+}
+
+const CLUTTER_VEC_TMP = { vx: 0, vy: 0, vz: 0 };
+
+/**
+ * Fast zero-allocation axial tissue/valve clutter velocity (+ toward transducer, m/s) for a polar
+ * Color Doppler ROI sample, given a precomputed per-frame `ClutterContext`.
+ */
+export function sampleClutterAxialVelocity(
+  ctx: ClutterContext,
+  heart: HeartModel,
+  x: number,
+  y: number,
+  z: number,
+  tissue: number,
+  structure: number,
+  dhx: number,
+  dhy: number,
+  dhz: number,
+): number {
+  if (tissue === Tissue.Valve) {
+    leafletVelocityFromCtx(ctx, x, y, z, CLUTTER_VEC_TMP);
+    return -(
+      CLUTTER_VEC_TMP.vx * dhx +
+      CLUTTER_VEC_TMP.vy * dhy +
+      CLUTTER_VEC_TMP.vz * dhz
+    );
+  }
+  if (tissue !== Tissue.Myocardium) return 0;
+
+  let vx = 0;
+  let vy = 0;
+  let vz = 0;
+
+  if (structure === Structure.RaWall) {
+    const free = Math.min(1, Math.max(0, (ctx.tvCx + 0.5 * ctx.tvR - x) / ctx.tvR));
+    if (free > 0) {
+      const above = Math.min(
+        1,
+        Math.max(0, (ctx.rvAnnulusZ - RA_VESTIBULE_CM - z) / (2 * ctx.raRz - RA_VESTIBULE_CM)),
+      );
+      const vRing = (ctx.rvLongVelCmps * (1 - (1 - RA_ROOF_DESCENT_SHARE) * above)) / 100;
+      let vSeptal = 0;
+      if (free < 1) {
+        const level = Math.min(
+          1,
+          Math.max(
+            0,
+            (z - ctx.annulusZ - BASAL_ANNULAR_CUFF_CM) /
+              Math.max(1, heart.lv.lengthCm - ctx.annulusZ - BASAL_ANNULAR_CUFF_CM),
+          ),
+        );
+        const dxMv = x - ctx.mvCx;
+        const dyMv = y - ctx.mvCy;
+        const rho = Math.hypot(dxMv, dyMv);
+        const lat = rho > 1e-6 ? 0.5 * (1 + dxMv / rho) : 0.5;
+        vSeptal = ((ctx.lvLongVelCmps + ctx.lvIsoCmps) * (1 - level) * (1 + ctx.wallRatioDelta * lat)) / 100;
+      }
+      vz = free * vRing + (1 - free) * vSeptal;
+      return -(vz * dhz);
+    }
+  }
+
+  if (RV_TISSUE.has(structure)) {
+    const rvLevel = Math.min(
+      1,
+      Math.max(
+        0,
+        (z - ctx.rvAnnulusZ - BASAL_ANNULAR_CUFF_CM) /
+          Math.max(1, ctx.rvApexZ - ctx.rvAnnulusZ - BASAL_ANNULAR_CUFF_CM),
+      ),
+    );
+    const lateral = Math.min(1, Math.max(0, (ctx.tvCx + ctx.tvR - x) / (2 * ctx.tvR)));
+    vx = (2 * ctx.tvR * ctx.rvShortRate * lateral * (1 - rvLevel)) / 100;
+    vz = (ctx.rvLongVelCmps * (1 - rvLevel)) / 100;
+    return -(vx * dhx + vz * dhz);
+  }
+
+  const level = Math.min(
+    1,
+    Math.max(
+      0,
+      (z - ctx.annulusZ - BASAL_ANNULAR_CUFF_CM) /
+        Math.max(1, heart.lv.lengthCm - ctx.annulusZ - BASAL_ANNULAR_CUFF_CM),
+    ),
+  );
+  const dxMv = x - ctx.mvCx;
+  const dyMv = y - ctx.mvCy;
+  const rho = Math.hypot(dxMv, dyMv);
+  const lat = rho > 1e-6 ? 0.5 * (1 + dxMv / rho) : 0.5;
+  const wall = 1 + ctx.wallRatioDelta * lat;
+  vz = ((ctx.lvLongVelCmps + ctx.lvIsoCmps) * (1 - level) * wall) / 100;
+
+  const rhoLv = Math.hypot(x, y);
+  if (
+    z > ctx.annulusZ - 0.3 &&
+    z < heart.lv.lengthCm + 1.2 &&
+    rhoLv > 0.2 &&
+    rhoLv < heart.lv.rMax * 2.5
+  ) {
+    const levelFrac = Math.min(
+      1,
+      Math.max(0, (z - ctx.annulusZ) / Math.max(1, heart.lv.lengthCm - ctx.annulusZ)),
+    );
+    const radialEnv = smoothstep(0, 0.18, levelFrac) * (1 - 0.55 * levelFrac * levelFrac);
+    if (radialEnv > 1e-4) {
+      const segAmp = heart.segAmp[ahaSegment(Math.atan2(y, x), levelFrac)] ?? 1;
+      if (segAmp > 1e-4) {
+        const vRadMps = (ctx.lvRadialRateCmps * radialEnv * segAmp) / 100;
+        vx = (x / rhoLv) * vRadMps;
+        vy = (y / rhoLv) * vRadMps;
+      }
+    }
+  }
+  return -(vx * dhx + vy * dhy + vz * dhz);
 }

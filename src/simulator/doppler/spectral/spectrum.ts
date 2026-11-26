@@ -24,6 +24,8 @@ export interface SpectralSettings {
   invert: boolean;
   audioOn: boolean;
   volume: number;
+  /** Postprocess background floor rejection threshold in [0, 0.5] (display-only; never alters envelope/auto-trace). */
+  reject?: number;
 }
 
 export const DEFAULT_SPECTRAL: SpectralSettings = {
@@ -36,6 +38,7 @@ export const DEFAULT_SPECTRAL: SpectralSettings = {
   invert: false,
   audioOn: false,
   volume: 0.5,
+  reject: 0,
 };
 
 /** The spectral modes, each with its own velocity settings (decision 230). */
@@ -336,6 +339,9 @@ const DISPLAY_RANGE_DB = 42;
 const WHITE_DB = 5;
 /** Receiver noise power relative to a normalised peak of 1 (dB): a clean dark floor with sparse clinical snow. */
 const NOISE_DB = -38;
+/** Fixed quadrature I/Q channel isolation (dB) producing a realistic overgain mirror ghost (display-only). */
+export const MIRROR_ISOLATION_DB = -40;
+export const MIRROR_ISOLATION_POWER = Math.pow(10, MIRROR_ISOLATION_DB / 10);
 
 /** Bin-direction lattice of the speckle: for every display bin, its five nearest lattice nodes and their Gaussian weights. */
 const SPECKLE_NODE_OFFSET = 2;
@@ -438,6 +444,7 @@ export function displaySpectrum(
   clickDirection = 0,
 ): void {
   const { vMin, vMax } = spectralRange(s);
+  const span = vMax - vMin;
   let max = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, expected[b] ?? 0);
   const snr = acousticSnrScale(max);
@@ -451,7 +458,7 @@ export function displaySpectrum(
   if (addFlowSpeckle) estimateSpeckleColumn(tCells, seed, 17, speckleFlow);
   estimateSpeckleColumn(tCells, seed, 29, speckleNoise);
   for (let b = 0; b < SPECTRAL_BINS; b++) {
-    const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin);
+    const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
     let clickLevel = 0;
     if (click > 0) {
       const wf = clutterFilterPowerResponse(v, s.wallFilterMps);
@@ -470,8 +477,22 @@ export function displaySpectrum(
       }
     }
     const flow = (expected[b] ?? 0) * norm;
+    let mirrorPower = 0;
+    if (max > 0 && Math.abs(v) >= s.wallFilterMps && span > 0) {
+      const bMirror = Math.round(((vMax + v) / span) * SPECTRAL_BINS - 0.5);
+      if (bMirror >= 0 && bMirror < SPECTRAL_BINS && bMirror !== b) {
+        const oppFlow = (expected[bMirror] ?? 0) * norm;
+        if (oppFlow > 0) {
+          mirrorPower =
+            oppFlow * MIRROR_ISOLATION_POWER * (addFlowSpeckle ? speckleFlow[bMirror]! : 1);
+        }
+      }
+    }
     const power =
-      flow * (addFlowSpeckle ? speckleFlow[b]! : 1) + noise * speckleNoise[b]! + clickLevel;
+      flow * (addFlowSpeckle ? speckleFlow[b]! : 1) +
+      mirrorPower +
+      noise * speckleNoise[b]! +
+      clickLevel;
     const db = 10 * Math.log10(Math.max(1e-12, power)) + s.gainDb;
     out[b] = Math.min(1, Math.max(0, 1 + (db - WHITE_DB) / DISPLAY_RANGE_DB));
   }

@@ -18,6 +18,7 @@ import type { EcgRing } from './ecgRing';
 import type { ExperimentalLoaders } from './experimentalLoaders';
 import type { QualityTier, SimInput, SimOutput, StripInfo } from './protocol';
 import type { StripCtx, StripEngine } from './stripEngine';
+import { resolveFrozenColorSettings } from './acquisitionKeys';
 
 export interface CompositeTiming {
   renderFrameMs: number;
@@ -106,7 +107,10 @@ export class FrameCompositor {
     const W = Math.max(64, inp.display.width);
     const H = Math.max(64, inp.display.height);
     const modality = frozen ? (cf?.acquisition.modality ?? inp.modality) : inp.modality;
-    const colorSettings = frozen ? (cf?.acquisition.color ?? inp.color) : inp.color;
+    const colorSettings =
+      frozen && cf?.acquisition.color
+        ? resolveFrozenColorSettings(cf.acquisition.color, inp.color)
+        : inp.color;
     const isStrip = isStripModality(modality);
     const sectorH = isStrip ? Math.round(H * 0.42) : H;
     const display = cf ? cf.display : ctx.display;
@@ -186,7 +190,7 @@ export class FrameCompositor {
       kind: null,
     };
     if (isStrip && (!cf || cf.acquisition.stripAcquisitionId === ctx.strips.historyId))
-      strip = ctx.strips.drawStrip(rgba, W, H, sectorH, tintMap);
+      strip = ctx.strips.drawStrip(rgba, W, H, sectorH, tintMap, inp.color, inp.spectral);
 
     const view = cf ? cf.analysis : ctx.lastAnalysis;
     const c = ctx.clockCurrent;

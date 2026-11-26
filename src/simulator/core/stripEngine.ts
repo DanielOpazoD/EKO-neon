@@ -48,6 +48,7 @@ import { autoTraceSpectralEnvelope, STRIP_MM_WIDTH } from './strip/autoTrace';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
 import { drawSweepMarker, paintMmodeStripColumn, renderSpectralStripRgba } from './strip/stripPainter';
 import { StripTimeGrid } from './stripTimeGrid';
+import { resolveFrozenColorSettings, stripAcquisitionKey } from './acquisitionKeys';
 
 /** Core services the strip engine reads per call (the core rebuilds it; mutable state lives on the engine). */
 export interface StripCtx {
@@ -248,7 +249,7 @@ export class StripEngine {
     ctx: StripCtx,
   ): void {
     const inp = ctx.input;
-    const key = `${inp.modality}|${inp.spectral.sweepSpeedMmPerS}|${inp.settings.depthCm}|${inp.settings.frequencyMHz}|${inp.cursorThetaRad}|${inp.gateDepthCm}|${inp.spectral.scaleMps}|${inp.spectral.baselineShiftMps}|${inp.spectral.invert ? 1 : 0}|${inp.spectral.wallFilterMps}|${inp.spectral.gainDb}|${inp.spectral.gateLengthCm}|${inp.color.scaleMps}|${inp.color.baselineShiftMps}|${inp.color.invert ? 1 : 0}|${inp.color.wallFilterMps}|${inp.color.gainDb}|${inp.color.showVariance ? 1 : 0}`;
+    const key = stripAcquisitionKey(inp);
     if (key !== this.acquisitionKey || !this.acquired) {
       this.reset();
       this.acquisitionKey = key;
@@ -585,6 +586,9 @@ export class StripEngine {
     this.stripPhase[col] = phase;
     this.stripSpan[col] = Math.min(65535, src.span);
     if (this.stripRgba && this.rowMap) {
+      const displayColor = this.stripCmm
+        ? resolveFrozenColorSettings(effColor, inp.color)
+        : effColor;
       paintMmodeStripColumn(
         col,
         this.stripRgba,
@@ -594,7 +598,7 @@ export class StripEngine {
         S,
         this.lastTintMap,
         this.stripCmm,
-        effColor,
+        displayColor,
         this.stripCmmVar,
         this.stripCmmPow,
       );
@@ -645,6 +649,8 @@ export class StripEngine {
     H: number,
     sectorH: number,
     tintMap?: TintMapId,
+    liveColor?: ColorSettings,
+    liveSpectral?: SpectralSettings,
   ): StripInfo {
     const acquired = this.acquired;
     this.displayCols = W;
@@ -660,12 +666,17 @@ export class StripEngine {
     const kind = this.stripKind;
     const head = Math.floor(((this.stripHead % Math.max(1, cols)) / Math.max(1, cols)) * W);
     if (kind === 'm-mode' && this.stripMmode && acquired && h > 0) {
-      const layout = `${cols}x${h}|${this.mmodeSamples}|${tintMap ?? 'gray'}`;
+      const effColor = this.effectiveColor(acquired);
+      const displayColor =
+        this.stripCmm && liveColor ? resolveFrozenColorSettings(effColor, liveColor) : effColor;
+      const cmmLayout = this.stripCmm
+        ? `|${displayColor.palette ?? 'vivid'}|${displayColor.showVariance ? 1 : 0}|${displayColor.baselineShiftMps}`
+        : '';
+      const layout = `${cols}x${h}|${this.mmodeSamples}|${tintMap ?? 'gray'}${cmmLayout}`;
       if (this.stripRgbaKey !== layout || !this.stripRgba) {
         this.stripRgba = new Uint8ClampedArray(cols * h * 4);
         this.rowMap = buildRowMap(h, this.mmodeSamples);
         this.stripRgbaKey = layout;
-        const effColor = this.effectiveColor(acquired);
         for (let c = 0; c < cols; c++) {
           paintMmodeStripColumn(
             c,
@@ -676,7 +687,7 @@ export class StripEngine {
             this.mmodeSamples,
             tintMap,
             this.stripCmm,
-            effColor,
+            displayColor,
             this.stripCmmVar,
             this.stripCmmPow,
           );
@@ -710,6 +721,7 @@ export class StripEngine {
     }
     if (kind === 'spectral' && this.stripDisplay && acquired) {
       const effectiveSpectral = this.effectiveSpectral(acquired);
+      const reject = liveSpectral?.reject ?? effectiveSpectral.reject ?? 0;
       const { vMin, vMax } = renderSpectralStripRgba(
         rgba,
         W,
@@ -721,6 +733,7 @@ export class StripEngine {
         effectiveSpectral,
         tintMap,
         this.stripHead % Math.max(1, cols),
+        reject,
       );
       drawSweepMarker(rgba, W, y0, h, head);
       const pulsedTiming = acquired.aliasing

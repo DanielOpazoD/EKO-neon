@@ -58,6 +58,7 @@ import {
 } from '@/simulator/renderer/types';
 import { analyzeView, type ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 import { constrainAcquisition } from './acquisitionInput';
+import { artifactOverridesKey, patientKey } from './acquisitionKeys';
 import { buildChainedBeatTables, computePhaseMarks } from './beatChaining';
 import { BeatHistory } from './beatHistory';
 import { CineBuffer, type CineFrame } from './cineBuffer';
@@ -157,6 +158,7 @@ export class SimulatorCore {
   private stationaryFrames = 0;
   private frameBudgetMs = 25;
   private disposed = false;
+  private artifactKey = 'none';
 
   constructor(caseDef: CaseDefinition, input: SimInput, options: SimulatorCoreOptions = {}) {
     this.caseDef = caseDef;
@@ -169,7 +171,8 @@ export class SimulatorCore {
     this.thorax = models.thorax;
     this.heart = models.heart;
     this.tables = models.tables;
-    this.patientKey = JSON.stringify(input.patient);
+    this.patientKey = patientKey(input.patient);
+    this.artifactKey = artifactOverridesKey(input.artifactOverrides);
     this.nominalTables = this.tables;
     this.clock = new CardiacClock(caseDef.rhythm, caseDef.seed);
     this.truth = computeGroundTruth(caseDef, this.tables);
@@ -278,7 +281,7 @@ export class SimulatorCore {
   }
 
   setInput(input: SimInput): void {
-    const key = JSON.stringify(input.patient);
+    const key = patientKey(input.patient);
     if (key !== this.patientKey) {
       const models = buildCaseModels(this.caseDef, input.patient);
       this.thorax = models.thorax;
@@ -303,8 +306,11 @@ export class SimulatorCore {
     }
     if ((input.imageFormation ?? 'lattice') !== (this.input.imageFormation ?? 'lattice'))
       this.atlas.invalidate();
-    if (JSON.stringify(input.artifactOverrides) !== JSON.stringify(this.input.artifactOverrides))
+    const nextArtifactKey = artifactOverridesKey(input.artifactOverrides);
+    if (nextArtifactKey !== this.artifactKey) {
+      this.artifactKey = nextArtifactKey;
       this.applyArtifactOverrides(input.artifactOverrides);
+    }
     if (!input.frozen && input.modality !== this.acquisitionModality) {
       this.strips.reset();
       this.colorDriver.resetHistory();

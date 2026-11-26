@@ -1,13 +1,20 @@
 import { markerLabel, structureLabel, type ReviewMarker } from '@/app/review';
 import { imageSegmentsOn, useSegmentOrientation, type SimStore } from '@/app/store';
+import { classifyDopplerAngle } from '@/education/technique';
+import { resolveFrozenColorSettings } from '@/simulator/core/acquisitionKeys';
 import type { SimOutput } from '@/simulator/core/protocol';
 import { reprojectGeometry } from '@/simulator/measurements/geometry';
-import { hasGate, isStripModality, MODALITIES } from '@/simulator/renderer/modality';
-import { colorMap } from '@/simulator/renderer/postprocess/colorMap';
+import {
+  hasGate,
+  isSpectralModality,
+  isStripModality,
+  MODALITIES,
+} from '@/simulator/renderer/modality';
 import { tgcAtDepth } from '@/simulator/renderer/postprocess/consolePipeline';
 import { polarToPixel, type SectorMapping } from '@/simulator/renderer/scanConvert';
 import { canvasFont } from '../canvasFonts';
 import { ecgLayoutOf, ecgTracePoints, ecgX } from '../ecgTrace';
+import { drawColorBar } from './colorBarOverlay';
 import { drawPickedRegion, drawSegmentLayer, drawStructureOutline } from './rasterLayers';
 
 /** Where an image marker sits on the current display: strip markers keep their pixel, sector markers reproject. */
@@ -84,12 +91,14 @@ export function drawOverlay(
   const { ui, activeTool, measurements, reviewMarkers } = st;
   const {
     modality,
-    color,
+    color: acqColor,
     settings,
     cursorThetaRad: cursorTheta,
     gateDepthCm: gateDepth,
     spectral,
   } = hud.frozen && hud.acquisition ? hud.acquisition : st;
+  const color =
+    hud.frozen && hud.acquisition ? resolveFrozenColorSettings(acqColor, st.color) : acqColor;
   const dpr = window.devicePixelRatio || 1;
   const W = hud.width,
     H = hud.height;
@@ -171,74 +180,7 @@ export function drawOverlay(
         'rgba(102, 224, 160, 0.88)',
       );
     }
-    // Physical Color Doppler bar rendered directly from colorMap (reflects baseline shift, invert & variance)
-    const scale = Math.max(0.01, color.scaleMps);
-    const baseline = color.baselineShiftMps;
-    const vTop = baseline + scale;
-    const vBot = baseline - scale;
-    const bw = color.showVariance ? 12 : 9;
-    const velW = color.showVariance ? 8 : 9;
-    const bx = (inward ? rightX - 30 : W - 18) - bw;
-    const bh =
-      modality === 'cmm' ? Math.min(92, Math.max(58, sectorH - 180)) : 104;
-    const by =
-      modality === 'cmm'
-        ? Math.max(m.apexY + 26, Math.min(sectorH - bh - 18, Math.max(154, sectorH - bh - 26)))
-        : Math.max(m.apexY + 42, 128);
-    const rgb: [number, number, number] = [0, 0, 0];
-    for (let py = 0; py < bh; py++) {
-      const frac = (py + 0.5) / bh;
-      const v = vTop - frac * 2 * scale;
-      if (Math.abs(v) < 0.025 * scale) {
-        ctx.fillStyle = '#05070a';
-        ctx.fillRect(bx, by + py, bw, 1);
-      } else {
-        colorMap(v, scale, 0, false, rgb, baseline);
-        ctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(rgb[1])},${Math.round(rgb[2])})`;
-        ctx.fillRect(bx, by + py, velW, 1);
-        if (color.showVariance) {
-          colorMap(v, scale, 0.85, true, rgb, baseline);
-          ctx.fillStyle = `rgb(${Math.round(rgb[0])},${Math.round(rgb[1])},${Math.round(rgb[2])})`;
-          ctx.fillRect(bx + velW, by + py, bw - velW, 1);
-        }
-      }
-    }
-    ctx.strokeStyle = 'rgba(185, 195, 208, 0.35)';
-    ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
-    const zeroFrac = Math.max(0, Math.min(1, vTop / (2 * scale)));
-    const yZero = by + zeroFrac * bh;
-    ctx.strokeStyle = '#d7e0ea';
-    ctx.beginPath();
-    ctx.moveTo(bx - 3, yZero);
-    ctx.lineTo(bx + bw + 2, yZero);
-    ctx.stroke();
-
-    const fmtVel = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
-    const prevBase = ctx.textBaseline;
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#cfd8e4';
-    ctx.font = canvasFont(10, 'mono');
-    ctx.textAlign = 'right';
-    ctx.fillText(fmtVel(vTop), bx - 6, by + 5);
-    ctx.fillText(fmtVel(vBot), bx - 6, by + bh - 5);
-    if (Math.abs(baseline) >= 0.03 && yZero > by + 32 && yZero < by + bh - 32) {
-      ctx.fillStyle = '#9aa8ba';
-      ctx.fillText('0', bx - 6, yZero);
-    }
-    ctx.fillStyle = '#7f8a9a';
-    ctx.font = canvasFont(9.5);
-    ctx.fillText(color.invert ? 'desde' : 'hacia', bx - 6, by + 20);
-    ctx.fillText(color.invert ? 'hacia' : 'desde', bx - 6, by + bh - 20);
-    ctx.fillText('m/s', bx + bw, by + bh + 12);
-    if (color.showVariance) {
-      ctx.fillStyle = '#7ce0a8';
-      ctx.font = canvasFont(8.5, 'mono');
-      ctx.textAlign = 'center';
-      ctx.fillText('V', bx + velW + (bw - velW) / 2, by - 7);
-    }
-    ctx.textBaseline = prevBase;
-    ctx.textAlign = 'left';
-    ctx.font = canvasFont(11);
+    drawColorBar(ctx, modality, color, m, W, sectorH, rightX, inward);
   }
   if (isStripModality(modality)) {
     const p0 = polarToPixel(m, 0.3, cursorTheta);
@@ -265,6 +207,19 @@ export function drawOverlay(
         ctx.stroke();
       }
       ctx.lineWidth = 1;
+    }
+    if (
+      isSpectralModality(modality) &&
+      hud.gate &&
+      hud.gate.flowPresent &&
+      hud.gate.flowAngleDeg !== null &&
+      Number.isFinite(hud.gate.flowAngleDeg)
+    ) {
+      const angleDeg = Math.round(hud.gate.flowAngleDeg);
+      const quality = classifyDopplerAngle(hud.gate.flowAngleDeg);
+      const anchorDepth = hasGate(modality) ? gateDepth : m.depthCm * 0.52;
+      const anchor = polarToPixel(m, anchorDepth, cursorTheta);
+      drawAngleBadge(ctx, angleDeg, quality, anchor.x, anchor.y, W, m.apexY, sectorH, cursorTheta);
     }
     const strip = hud.strip;
     if (strip.kind === 'spectral') {
@@ -745,4 +700,51 @@ function drawValueChip(
   ctx.textBaseline = 'middle';
   ctx.fillText(text, left + 6, top + h / 2 + 0.5);
   ctx.font = font;
+}
+
+/** Compact color-coded beam–flow angle badge (θ XX°) beside the PW/TDI gate or CW cursor ray. */
+function drawAngleBadge(
+  ctx: CanvasRenderingContext2D,
+  angleDeg: number,
+  quality: 'ok' | 'warn' | 'invalid',
+  anchorX: number,
+  anchorY: number,
+  W: number,
+  apexY: number,
+  sectorH: number,
+  cursorTheta: number,
+): void {
+  const font = ctx.font;
+  const textAlign = ctx.textAlign;
+  const text = `θ ${angleDeg}°`;
+  ctx.font = canvasFont(10.5, 'mono');
+  const textW = ctx.measureText(text).width;
+  const padX = 6;
+  const w = Math.ceil(textW + padX * 2);
+  const h = 17;
+  // Place on the opposite side of the cursor away from the sector center when tilted, otherwise to the right.
+  const placeLeft = cursorTheta > 0.25 && anchorX - 14 - w >= 6;
+  const rawLeft = placeLeft ? anchorX - 14 - w : anchorX + 14;
+  const left = Math.max(6, Math.min(W - w - 6, rawLeft));
+  const top = Math.max(apexY + 8, Math.min(sectorH - h - 6, Math.round(anchorY - h / 2)));
+  const fg = quality === 'ok' ? '#57d38c' : quality === 'warn' ? '#fbbf24' : '#f87171';
+  const border =
+    quality === 'ok'
+      ? 'rgba(87, 211, 140, 0.42)'
+      : quality === 'warn'
+        ? 'rgba(251, 191, 36, 0.45)'
+        : 'rgba(248, 113, 113, 0.48)';
+  ctx.fillStyle = 'rgba(8, 12, 18, 0.78)';
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(left, top, w, h, 4);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = fg;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, left + padX, top + h / 2 + 0.5);
+  ctx.font = font;
+  ctx.textAlign = textAlign;
 }

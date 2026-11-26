@@ -3,10 +3,21 @@ import { aliasVelocity } from '@/clinical/formulas';
 import { Tissue } from '@/simulator/anatomy/tissue';
 import type { PolarFrame } from '@/simulator/renderer/types';
 import type { ScanLut } from '@/simulator/renderer/scanConvert';
-import { COLOR_BLEND, colorMap } from '@/simulator/renderer/postprocess/colorMap';
 import {
+  COLOR_BLEND,
+  COLOR_PALETTE_DEFAULT,
+  colorMap,
+  type ColorPaletteId,
+} from '@/simulator/renderer/postprocess/colorMap';
+import {
+  CLUTTER_BLOOD_RATIO_POW,
+  CLUTTER_JITTER_RAD,
+  CLUTTER_SIGMA_V_MPS,
   COLOR_PACKET,
+  COLOR_TURBULENT_WIDTH_K,
   colorScratch,
+  colorSpectralWidthMps,
+  KASAI_QUAD_BASIS,
   kasaiEstimate,
   NOISE_COHERENCE,
   NOISE_POWER_GATE,
@@ -22,7 +33,17 @@ import {
   type TemporalStepOutput,
 } from './spatiotemporalFilter';
 
-export { COLOR_PACKET, DEFAULT_COLOR_SMOOTHING, type ColorEstimate };
+export {
+  CLUTTER_BLOOD_RATIO_POW,
+  CLUTTER_JITTER_RAD,
+  CLUTTER_SIGMA_V_MPS,
+  COLOR_PACKET,
+  COLOR_TURBULENT_WIDTH_K,
+  colorSpectralWidthMps,
+  DEFAULT_COLOR_SMOOTHING,
+  KASAI_QUAD_BASIS,
+  type ColorEstimate,
+};
 
 export interface ColorSettings {
   boxThetaMinRad: number;
@@ -38,6 +59,8 @@ export interface ColorSettings {
   smoothing: number;
   showVariance: boolean;
   invert: boolean;
+  /** Clinical Color Doppler LUT palette (presentation-only; never invalidates Kasai acquisition). */
+  palette?: ColorPaletteId;
 }
 
 export const DEFAULT_COLOR: ColorSettings = {
@@ -53,6 +76,7 @@ export const DEFAULT_COLOR: ColorSettings = {
   smoothing: DEFAULT_COLOR_SMOOTHING,
   showVariance: true,
   invert: false,
+  palette: COLOR_PALETTE_DEFAULT,
 };
 
 /** Acquisition the colour field was formed with: the expected tissue attenuation depends on it. */
@@ -138,14 +162,20 @@ export function computeColorField(
     idx: number,
     li: number,
     si: number,
-    out: { v: number; disp: number; present: number },
+    out: { v: number; disp: number; present: number; vPerp?: number; vWall?: number },
   ) => void,
   out: ColorField,
   acquisition: ColorAcquisition,
   estimate?: ColorEstimate,
 ): { colorLines: number } {
   const { lines, samples, sectorRad, depthCm } = frame.spec;
-  const tmp = { v: 0, disp: 0, present: 0 };
+  const tmp: { v: number; disp: number; present: number; vPerp?: number; vWall?: number } = {
+    v: 0,
+    disp: 0,
+    present: 0,
+    vPerp: 0,
+    vWall: 0,
+  };
   const half = sectorRad / 2;
   const liMin = Math.max(0, Math.floor(((s.boxThetaMinRad + half) / sectorRad) * lines));
   const liMax = Math.min(lines - 1, Math.ceil(((s.boxThetaMaxRad + half) / sectorRad) * lines));
@@ -182,12 +212,13 @@ export function computeColorField(
   const bloomSamples = Math.max(0, Math.round((s.gainDb - 2) * 0.6)); // dilation radius grows with gain
   const nL = Math.max(0, liMax - liMin + 1);
   const nS = Math.max(0, siMax - siMin + 1);
-  // pass 1: what reaches the receiver at each sample of the box — moving blood (or, with blooming, a sample beside it)
-  // over the shadow threshold: its axial velocity, the dispersion of its spectrum and its transmission
+  // pass 1: what reaches the receiver at each sample of the box — moving blood (class 1.0) or moving
+  // myocardial/valve tissue clutter (class 0.5) over the shadow threshold
   const cellV = colorScratch('cellV', nL * nS).fill(NaN);
-  const cellDisp = colorScratch('cellDisp', nL * nS).fill(0);
+  const cellSigmaV = colorScratch('cellSigmaV', nL * nS).fill(0);
   const cellRel = colorScratch('cellRel', nL * nS).fill(0);
   const bloodMask = colorScratch('bloodMask', nL * nS).fill(0);
+  const cellClass = colorScratch('cellClass', nL * nS).fill(0);
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {
       const idx = li * samples + si;
@@ -206,22 +237,39 @@ export function computeColorField(
           if (li < lines - 1 && frame.tissue[idx + samples] === Tissue.Blood) isBlood = true;
         }
       }
-      if (!isBlood) continue;
+      const isClutterTissue = tissue === Tissue.Myocardium || tissue === Tissue.Valve;
+      if (!isBlood && !isClutterTissue) continue;
+      tmp.v = 0;
+      tmp.disp = 0;
+      tmp.present = 0;
+      tmp.vPerp = 0;
+      tmp.vWall = 0;
       axialVelocity(idx, li, si, tmp);
-      if (!tmp.present) continue;
       const g = (li - liMin) * nS + (si - siMin);
-      cellV[g] = s.invert ? -tmp.v : tmp.v;
-      cellDisp[g] = tmp.disp;
-      cellRel[g] = Math.min(1, relTrans);
-      bloodMask[g] = 1;
+      if (isBlood && tmp.present) {
+        const vSigned = s.invert ? -tmp.v : tmp.v;
+        cellV[g] = vSigned;
+        cellSigmaV[g] = colorSpectralWidthMps(vSigned, tmp.disp, tmp.vPerp ?? 0, r);
+        cellRel[g] = Math.min(1, relTrans);
+        bloodMask[g] = 1;
+        cellClass[g] = 1;
+      } else if (isClutterTissue && Math.abs(tmp.vWall ?? 0) > 1e-4) {
+        const vWall = tmp.vWall ?? 0;
+        const vSigned = s.invert ? -vWall : vWall;
+        cellV[g] = vSigned;
+        cellSigmaV[g] = CLUTTER_SIGMA_V_MPS;
+        cellRel[g] = Math.min(1, relTrans) * CLUTTER_BLOOD_RATIO_POW;
+        bloodMask[g] = 0;
+        cellClass[g] = 0.5;
+      }
     }
   }
-  // the estimate of this update (decision 300): a packet of echoes per sample, wall-filtered and autocorrelated
+  // the estimate of this update (decision 300): a packet of echoes per sample, 3-basis Legendre wall-filtered and autocorrelated
   const kasai =
     estimate && nL > 0 && nS > 0
       ? kasaiEstimate(
           cellV,
-          cellDisp,
+          cellSigmaV,
           cellRel,
           liMin,
           siMin,
@@ -230,6 +278,7 @@ export function computeColorField(
           s.scaleMps,
           s.wallFilterMps,
           estimate,
+          cellClass,
         )
       : null;
 
@@ -254,9 +303,11 @@ export function computeColorField(
   for (let li = liMin; li <= liMax; li++) {
     for (let si = siMin; si <= siMax; si++) {
       const g = (li - liMin) * nS + (si - siMin);
+      const cls = cellClass[g]!;
+      if (cls < 0.25) continue;
       const vTrue = cellV[g]!;
-      const isBloodValid = !Number.isNaN(vTrue);
-      if (!isBloodValid) continue;
+      if (Number.isNaN(vTrue)) continue;
+      const isClutter = cls < 0.75;
 
       const idx = li * samples + si;
       let hasCurr = false;
@@ -285,14 +336,19 @@ export function computeColorField(
             gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), s.wallFilterMps),
           );
           vEstimate = vTrue;
-          variance = Math.min(1, cellDisp[g]! * 1.6);
+          const effDisp = Math.min(
+            1,
+            cellSigmaV[g]! / Math.max(0.08, COLOR_TURBULENT_WIDTH_K * Math.abs(vTrue)),
+          );
+          variance = Math.min(1, effDisp * 1.6);
           hasCurr = power >= COLOR_THRESHOLD;
         }
       }
 
-      const pv = histVel ? (histVel[idx] ?? NaN) : NaN;
-      const pp = histPow ? (histPow[idx] ?? 0) : 0;
-      const hasPrev = !Number.isNaN(pv) && pp > 0;
+      // Tissue/valve clutter skips temporal persistence & hysteresis decay (no smear trails on moving walls)
+      const pv = !isClutter && histVel ? (histVel[idx] ?? NaN) : NaN;
+      const pp = !isClutter && histPow ? (histPow[idx] ?? 0) : 0;
+      const hasPrev = !isClutter && !Number.isNaN(pv) && pp > 0;
       if (!hasCurr && !hasPrev) continue;
 
       tIn.isBloodValid = true;
@@ -314,7 +370,7 @@ export function computeColorField(
     }
   }
 
-  // Pass 3 (CPU mirror of GPU Pass D3): coherence- & variance-adaptive circular spatial filter
+  // Pass 3 (CPU mirror of GPU Pass D3): class-isolated coherence- & variance-adaptive circular spatial filter
   applyColorSpatialFilter({
     samples,
     liMin,
@@ -325,6 +381,8 @@ export function computeColorField(
     baselineShiftMps: s.baselineShiftMps,
     smoothing,
     bloodMask,
+    cellClass,
+    gainDb: s.gainDb,
     srcVel: out.rawVel,
     srcVar: out.rawVariance!,
     srcPow: out.rawPower!,
@@ -332,6 +390,21 @@ export function computeColorField(
     dstVar: out.variance,
     dstPow: out.power,
   });
+
+  // Clear clutter samples from pre-spatial temporal history (mirroring GPU Pass D2 outHist = vec4(0.0) on clutter)
+  for (let li = liMin; li <= liMax; li++) {
+    const row = li * samples;
+    const gRow = (li - liMin) * nS;
+    for (let si = siMin; si <= siMax; si++) {
+      const cls = cellClass[gRow + (si - siMin)]!;
+      if (cls > 0.25 && cls < 0.75) {
+        const idx = row + si;
+        out.rawVel[idx] = NaN;
+        out.rawVariance![idx] = 0;
+        out.rawPower![idx] = 0;
+      }
+    }
+  }
 
   return { colorLines: Math.max(0, liMax - liMin + 1) };
 }
@@ -368,6 +441,11 @@ export function overlayColorField(
     const conf = colorPowerConfidence(power[idx] ?? 1, COLOR_THRESHOLD);
     return ST_POW_ALPHA_MIN + (1 - ST_POW_ALPHA_MIN) * conf;
   };
+  const breakthroughAt = (idx: number): number => {
+    if (!power) return 0;
+    const pw = power[idx] ?? 0;
+    return pw > 1 ? Math.min(1, pw - 1) : 0;
+  };
   for (let p = 0, o = 0; p < n; p++, o += 4) {
     const i0 = lut.idx[p] ?? -1;
     if (i0 < 0) continue;
@@ -398,6 +476,7 @@ export function overlayColorField(
     let im = 0;
     let varAcc = 0;
     let powAcc = 0;
+    let btAcc = 0;
     let wSum = 0;
     if (v00 === v00) {
       const ph = (v00 - baseline) * kPhi;
@@ -405,6 +484,7 @@ export function overlayColorField(
       im += w00 * Math.sin(ph);
       varAcc += w00 * (variance[i0] ?? 0);
       powAcc += w00 * powAlphaAt(i0);
+      btAcc += w00 * breakthroughAt(i0);
       wSum += w00;
     }
     if (v10 === v10) {
@@ -413,6 +493,7 @@ export function overlayColorField(
       im += w10 * Math.sin(ph);
       varAcc += w10 * (variance[i0 + dl] ?? 0);
       powAcc += w10 * powAlphaAt(i0 + dl);
+      btAcc += w10 * breakthroughAt(i0 + dl);
       wSum += w10;
     }
     if (v01 === v01) {
@@ -421,6 +502,7 @@ export function overlayColorField(
       im += w01 * Math.sin(ph);
       varAcc += w01 * (variance[i0 + ds] ?? 0);
       powAcc += w01 * powAlphaAt(i0 + ds);
+      btAcc += w01 * breakthroughAt(i0 + ds);
       wSum += w01;
     }
     if (v11 === v11) {
@@ -429,6 +511,7 @@ export function overlayColorField(
       im += w11 * Math.sin(ph);
       varAcc += w11 * (variance[i0 + dl + ds] ?? 0);
       powAcc += w11 * powAlphaAt(i0 + dl + ds);
+      btAcc += w11 * breakthroughAt(i0 + dl + ds);
       wSum += w11;
     }
     if (wSum <= 0.18) continue;
@@ -436,7 +519,8 @@ export function overlayColorField(
     const v = baseline + invPiScale * Math.atan2(im, re);
     const vari = varAcc / wSum;
     const powAlpha = powAcc / wSum;
-    colorMap(v, scale, vari, c.showVariance, rgb, baseline);
+    const breakthrough = btAcc / wSum;
+    colorMap(v, scale, vari, c.showVariance, rgb, baseline, c.palette);
 
     const edgeT = Math.min(1, Math.max(0, (wSum - 0.18) / 0.54));
     const edgeAlpha = edgeT * edgeT * (3 - 2 * edgeT);
@@ -444,13 +528,15 @@ export function overlayColorField(
     const g0 = rgba[o + 1] ?? 0;
     const b0 = rgba[o + 2] ?? 0;
     const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
-    // Clinical tissue write priority: full color over dark blood pool, smoothly dropping to 0 on bright endocardium/valves
+    // Clinical tissue write priority: full color over dark blood pool, smoothly dropping to 0 on bright
+    // endocardium/valves, relaxed only when real clutter flash or extreme overgain carries breakthrough > 0.
     const tpU = Math.min(1, Math.max(0, (lum - 98) / 74));
     const tissuePrio = 1 - tpU * tpU * (3 - 2 * tpU);
+    const effTwp = tissuePrio + (1 - tissuePrio) * breakthrough;
     // Gentle low-velocity opacity feathering so near-baseline flow dissolves organically into dark chamber blood
     const velU = Math.min(1, Math.max(0, (Math.abs(v) / scale - 0.05) / 0.17));
     const velAlpha = 0.62 + 0.38 * velU * velU * (3 - 2 * velU);
-    const blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * tissuePrio;
+    const blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * effTwp;
     const inv = 1 - blend;
     rgba[o] = Math.round(rgb[0] * blend + r0 * inv);
     rgba[o + 1] = Math.round(rgb[1] * blend + g0 * inv);

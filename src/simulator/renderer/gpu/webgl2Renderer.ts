@@ -2,6 +2,7 @@ import type { BeamFrame } from '@/simulator/probe/pose';
 import { COMPOUND_LOOKS } from '../acoustic/acoustics';
 import { buildPsfKernels, psfKey, sideLobeLevelDb } from '../acoustic/psf';
 import type { ConsoleState } from '../postprocess/consolePipeline';
+import { colorPaletteIndex } from '../postprocess/colorMap';
 import { tintMapIndex } from '../postprocess/tintMap';
 import type { ScanLut } from '../scanConvert';
 import { TRANS_DECODE } from '../transmissionCode';
@@ -775,6 +776,7 @@ export class Webgl2Renderer implements RendererBackend {
       const c = color.settings;
       gl.uniform4f(u.uBox, c.boxRMinCm, c.boxRMaxCm, c.boxThetaMinRad, c.boxThetaMaxRad);
       gl.uniform3f(u.uColorMap, c.scaleMps, c.showVariance ? 1 : 0, c.baselineShiftMps ?? 0);
+      gl.uniform1i(u.uColorPalette, colorPaletteIndex(c.palette));
     }
     this.bindAt(2, t.texPacked);
     this.bindAt(3, this.uploads.lutTex);

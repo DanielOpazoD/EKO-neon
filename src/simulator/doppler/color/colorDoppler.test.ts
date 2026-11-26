@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allocColorField,
+  colorSpectralWidthMps,
   computeColorField,
   DEFAULT_COLOR,
   DOPPLER_SHADOW_TRANSMISSION,
@@ -14,6 +15,8 @@ import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   buildFlowParams,
   sampleFlow,
+  sampleLeafletVelocity,
+  sampleTissueVelocity,
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
 import { allocPolarFrame, type PolarFrameSpec } from '@/simulator/renderer/types';
@@ -600,5 +603,506 @@ test('eccentric MR splits LA regurgitant jet and LV PISA cleanly along the anato
   assert.ok(
     leftLvDisp <= 0.15,
     `LV PISA side must stay laminar (not evaluated as turbulent LA jet), got dispersion=${leftLvDisp.toFixed(2)}`,
+  );
+});
+
+test('overlayColorField circularly re-wraps stored velocities on frozen baseline shift and applies selected palette', () => {
+  const lut: ScanLut = {
+    key: 'frozen-baseline-test',
+    lines: 2,
+    samples: 2,
+    idx: new Int32Array([0, 0]),
+    inPix: new Int32Array([0, 1]),
+    inIdx: new Int32Array([0, 0]),
+    inWl: new Uint16Array([0, 0]),
+    inWs: new Uint16Array([0, 0]),
+    inDl: new Uint8Array([0, 0]),
+    inDs: new Uint8Array([0, 0]),
+    wl: new Float32Array([0, 0]),
+    ws: new Float32Array([0, 0]),
+    li: new Int16Array([0, 0]),
+    si: new Int16Array([0, 0]),
+    rCm: new Float32Array([6, 6]),
+    theta: new Float32Array([0, 0]),
+  };
+
+  // Stored at scale = 0.68, acqBaseline = 0:
+  // True velocity +0.86 m/s wrapped modulo 2*0.68 = 1.36 m/s to -0.50 m/s (blue when baseline=0).
+  const storedVel = new Float32Array([-0.5, -0.5, -0.5, -0.5]);
+  const storedVar = new Float32Array(4);
+  const storedPow = new Float32Array([1, 1, 1, 1]);
+
+  // At baseline = 0, stored -0.50 renders blue (away)
+  const rgbaAtZero = new Uint8ClampedArray([16, 16, 16, 255, 16, 16, 16, 255]);
+  overlayColorField(
+    rgbaAtZero,
+    lut,
+    storedVel,
+    storedVar,
+    { ...FULL_BOX, scaleMps: 0.68, baselineShiftMps: 0, palette: 'vivid' },
+    storedPow,
+  );
+  assert.ok(
+    rgbaAtZero[2]! > rgbaAtZero[0]! + 120,
+    `expected aliased blue at baseline=0, got rgb=(${rgbaAtZero[0]},${rgbaAtZero[1]},${rgbaAtZero[2]})`,
+  );
+
+  // Shifting frozen baseline to +0.30 (range [-0.38, +0.98]) unwraps -0.50 -> +0.86 m/s (bright toward red/yellow!)
+  const rgbaShiftedVivid = new Uint8ClampedArray([16, 16, 16, 255, 16, 16, 16, 255]);
+  overlayColorField(
+    rgbaShiftedVivid,
+    lut,
+    storedVel,
+    storedVar,
+    { ...FULL_BOX, scaleMps: 0.68, baselineShiftMps: 0.3, palette: 'vivid' },
+    storedPow,
+  );
+  assert.ok(
+    rgbaShiftedVivid[0]! > rgbaShiftedVivid[2]! + 120 && rgbaShiftedVivid[1]! > 100,
+    `expected unwrapped bright red-yellow (+0.86 m/s) at baseline=+0.30, got rgb=(${rgbaShiftedVivid[0]},${rgbaShiftedVivid[1]},${rgbaShiftedVivid[2]})`,
+  );
+
+  // Switching frozen palette to ice-fire lifts blue quiet channel toward white-gold at +0.86 m/s
+  const rgbaShiftedIceFire = new Uint8ClampedArray([16, 16, 16, 255, 16, 16, 16, 255]);
+  overlayColorField(
+    rgbaShiftedIceFire,
+    lut,
+    storedVel,
+    storedVar,
+    { ...FULL_BOX, scaleMps: 0.68, baselineShiftMps: 0.3, palette: 'ice-fire' },
+    storedPow,
+  );
+  assert.ok(
+    rgbaShiftedIceFire[2]! > rgbaShiftedVivid[2]! + 40,
+    `ice-fire palette should lift high-speed warm tip blue channel: vivid=${rgbaShiftedVivid[2]} ice-fire=${rgbaShiftedIceFire[2]}`,
+  );
+});
+
+test('Color Doppler 90° black-band regression and transverse aperture geometric broadening (v_perp)', () => {
+  // 1. 90° black-band regression: horizontal flow 0.80 m/s crossing sector center at θ = 90°
+  const lines = 64;
+  const samples = 40;
+  const frame = makeBloodFrame(lines, samples, 16);
+  const box: ColorSettings = {
+    ...DEFAULT_COLOR,
+    boxThetaMinRad: -0.6,
+    boxThetaMaxRad: 0.6,
+    boxRMinCm: 4,
+    boxRMaxCm: 12,
+    scaleMps: 0.68,
+    baselineShiftMps: 0,
+    wallFilterMps: 0.06,
+    gainDb: 0,
+    persistence: 0,
+    smoothing: 0,
+  };
+  const outBand = allocColorField(lines * samples);
+  const vTotal = 0.8;
+  computeColorField(
+    frame,
+    box,
+    null,
+    (_idx, li, _si, res) => {
+      // Beam angle relative to vertical axis: theta=0 is perpendicular (90°) to horizontal vessel
+      const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
+      res.v = vTotal * Math.sin(theta);
+      res.vPerp = Math.abs(vTotal * Math.cos(theta));
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    outBand,
+    ACQ,
+    { realization: 7, seed: 202 },
+  );
+
+  let perpTotal = 0;
+  let perpFilled = 0;
+  let lobeTotal = 0;
+  let lobeFilled = 0;
+  for (let li = 0; li < lines; li++) {
+    const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
+    const degFromPerp = Math.abs((theta * 180) / Math.PI);
+    for (let si = 12; si < 28; si++) {
+      const colored = Number.isFinite(outBand.vel[li * samples + si]);
+      if (degFromPerp <= 2.0) {
+        perpTotal++;
+        if (colored) perpFilled++;
+      } else if (degFromPerp >= 20.0 && degFromPerp <= 30.0) {
+        lobeTotal++;
+        if (colored) lobeFilled++;
+      }
+    }
+  }
+  assert.ok(perpTotal > 0 && lobeTotal > 0);
+  const perpFillPct = (perpFilled / perpTotal) * 100;
+  const lobeFillPct = (lobeFilled / lobeTotal) * 100;
+  assert.ok(
+    perpFillPct <= 5,
+    `Expected 90° black band (|θ-90°| ≤ 2°) to stay ≤ 5% filled, got ${perpFillPct.toFixed(1)}%`,
+  );
+  assert.ok(
+    lobeFillPct >= 70,
+    `Expected off-90° lobes (20°–30° off perpendicular) to fill strongly, got ${lobeFillPct.toFixed(1)}%`,
+  );
+
+  // 2. Transverse aperture broadening via absolute sigmaVMps: >3× width at θ=80° and elevated Kasai variance
+  const sigma0 = colorSpectralWidthMps(0.14, 0.04, 0, 8);
+  const sigma80 = colorSpectralWidthMps(0.14, 0.04, 0.79, 8);
+  assert.ok(
+    sigma80 > sigma0 * 3,
+    `Expected sigmaVMps at θ=80° (${sigma80.toFixed(4)}) > 3× axial-only (${sigma0.toFixed(4)})`,
+  );
+
+  const frame2 = makeBloodFrame(20, 40, 16);
+  const n2 = 20 * 40;
+  const kasaiCfg: ColorSettings = {
+    ...DEFAULT_COLOR,
+    boxThetaMinRad: -0.5,
+    boxThetaMaxRad: 0.5,
+    boxRMinCm: 5,
+    boxRMaxCm: 9,
+    scaleMps: 0.68,
+    wallFilterMps: 0.04,
+    gainDb: 6,
+    persistence: 0,
+    smoothing: 0,
+  };
+  const meanVar = (f: ReturnType<typeof allocColorField>) => {
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < f.vel.length; i++) {
+      if (Number.isFinite(f.vel[i])) {
+        sum += f.variance[i]!;
+        count++;
+      }
+    }
+    return count > 0 ? sum / count : 0;
+  };
+
+  // Near-90° transverse jet (v_axial = 0.14, v_perp = 1.6 m/s at r = 5..9 cm) elevates Kasai variance measurably
+  const noPerp = allocColorField(n2);
+  const withPerp = allocColorField(n2);
+  computeColorField(
+    frame2,
+    kasaiCfg,
+    null,
+    (_idx, _li, _si, res) => {
+      res.v = 0.14;
+      res.vPerp = 0;
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    noPerp,
+    ACQ,
+    { realization: 4, seed: 55 },
+  );
+  computeColorField(
+    frame2,
+    kasaiCfg,
+    null,
+    (_idx, _li, _si, res) => {
+      res.v = 0.14;
+      res.vPerp = 1.6;
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    withPerp,
+    ACQ,
+    { realization: 4, seed: 55 },
+  );
+  const vNoPerp = meanVar(noPerp);
+  const vWithPerp = meanVar(withPerp);
+  assert.ok(
+    vWithPerp >= vNoPerp + 0.05,
+    `Expected transverse v_perp to raise Kasai variance by >= 0.05 (noPerp=${vNoPerp.toFixed(3)}, withPerp=${vWithPerp.toFixed(3)})`,
+  );
+
+  // Pure axial laminar flow (θ = 0°, v_perp = 0) stays completely unaffected (exact zero delta)
+  const axialDefault = allocColorField(n2);
+  const axialZeroPerp = allocColorField(n2);
+  computeColorField(
+    frame2,
+    kasaiCfg,
+    null,
+    (_idx, _li, _si, res) => {
+      res.v = 0.45;
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    axialDefault,
+    ACQ,
+    { realization: 4, seed: 55 },
+  );
+  computeColorField(
+    frame2,
+    kasaiCfg,
+    null,
+    (_idx, _li, _si, res) => {
+      res.v = 0.45;
+      res.vPerp = 0;
+      res.disp = 0.04;
+      res.present = 1;
+    },
+    axialZeroPerp,
+    ACQ,
+    { realization: 4, seed: 55 },
+  );
+  assert.ok(
+    Math.abs(meanVar(axialDefault) - meanVar(axialZeroPerp)) < 1e-6,
+    'Pure axial laminar flow (v_perp = 0) must remain unchanged',
+  );
+});
+
+test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthrough, blood isolation, and zero pinhole fills on myocardium', () => {
+  const lines = 20;
+  const samples = 36;
+  const frame = makeBloodFrame(lines, samples, 16);
+  // Split grid: top half (li < 10) = Blood (+0.38 m/s), bottom half (li >= 10) = Myocardium (vWall = -0.08 m/s)
+  for (let li = 10; li < lines; li++) {
+    for (let si = 0; si < samples; si++) {
+      frame.tissue[li * samples + si] = Tissue.Myocardium;
+    }
+  }
+
+  const baseCfg: ColorSettings = {
+    ...DEFAULT_COLOR,
+    boxThetaMinRad: -0.55,
+    boxThetaMaxRad: 0.55,
+    boxRMinCm: 3,
+    boxRMaxCm: 13,
+    scaleMps: 0.68,
+    baselineShiftMps: 0,
+    gainDb: 0,
+    persistence: 0.5,
+    smoothing: 0.45,
+  };
+
+  const countRegion = (field: ReturnType<typeof allocColorField>, li0: number, li1: number) => {
+    let colored = 0;
+    let total = 0;
+    let sumVel = 0;
+    let maxPow = 0;
+    for (let li = li0; li < li1; li++) {
+      for (let si = 10; si < 26; si++) {
+        total++;
+        const v = field.vel[li * samples + si]!;
+        if (Number.isFinite(v)) {
+          colored++;
+          sumVel += v;
+          maxPow = Math.max(maxPow, field.power[li * samples + si]!);
+        }
+      }
+    }
+    return {
+      frac: total > 0 ? colored / total : 0,
+      meanVel: colored > 0 ? sumVel / colored : NaN,
+      maxPow,
+    };
+  };
+
+  // 1. Default wall filter (6 cm/s): myocardial 8 cm/s wall motion stays clean (< 5% flash)
+  const outWf6 = allocColorField(lines * samples);
+  computeColorField(
+    frame,
+    { ...baseCfg, wallFilterMps: 0.06 },
+    null,
+    (_idx, li, _si, res) => {
+      if (li < 10) {
+        res.v = 0.38;
+        res.disp = 0.03;
+        res.present = 1;
+      } else {
+        res.vWall = -0.08;
+      }
+    },
+    outWf6,
+    ACQ,
+    { realization: 3, seed: 88 },
+  );
+  const myoWf6 = countRegion(outWf6, 12, 18);
+  const bloodWf6 = countRegion(outWf6, 3, 9);
+  assert.ok(
+    myoWf6.frac < 0.05,
+    `Expected < 5% myocardial clutter flash at default WF=6 cm/s, got ${(myoWf6.frac * 100).toFixed(1)}%`,
+  );
+  assert.ok(
+    bloodWf6.frac > 0.85 && Math.abs(bloodWf6.meanVel - 0.38) < 0.04,
+    `Expected clean blood fill near +0.38 m/s at WF=6 cm/s, got frac=${bloodWf6.frac.toFixed(2)} v=${bloodWf6.meanVel.toFixed(3)}`,
+  );
+
+  // 2. Low wall filter (2 cm/s): moving myocardium produces real wall flash with breakthrough power > 1.0
+  //    while adjacent blood velocity stays uncontaminated and rawVel/rawPower clutter history stays cleared
+  const outWf2 = allocColorField(lines * samples);
+  computeColorField(
+    frame,
+    { ...baseCfg, wallFilterMps: 0.02 },
+    null,
+    (_idx, li, _si, res) => {
+      if (li < 10) {
+        res.v = 0.38;
+        res.disp = 0.03;
+        res.present = 1;
+      } else {
+        res.vWall = -0.08;
+      }
+    },
+    outWf2,
+    ACQ,
+    { realization: 3, seed: 88 },
+  );
+  const myoWf2 = countRegion(outWf2, 12, 18);
+  const bloodBoundaryWf2 = countRegion(outWf2, 8, 10);
+  const bloodBoundaryWf6 = countRegion(outWf6, 8, 10);
+  assert.ok(
+    myoWf2.frac >= 0.6,
+    `Expected >= 60% myocardial clutter flash at WF=2 cm/s, got ${(myoWf2.frac * 100).toFixed(1)}%`,
+  );
+  assert.ok(
+    myoWf2.maxPow > 1.05,
+    `Expected surviving myocardial flash to encode breakthrough power > 1.05, got ${myoWf2.maxPow.toFixed(3)}`,
+  );
+  assert.ok(
+    Math.abs(bloodBoundaryWf2.meanVel - bloodBoundaryWf6.meanVel) < 0.02,
+    `Adjacent blood velocity must not be biased by myocardial flash: wf6=${bloodBoundaryWf6.meanVel.toFixed(3)} wf2=${bloodBoundaryWf2.meanVel.toFixed(3)}`,
+  );
+  // Clutter temporal history must be cleared so moving myocardium never leaves stale ghost trails
+  let clutterHistCount = 0;
+  for (let li = 12; li < 18; li++) {
+    for (let si = 10; si < 26; si++) {
+      if ((outWf2.rawPower?.[li * samples + si] ?? 0) > 0) clutterHistCount++;
+    }
+  }
+  assert.equal(clutterHistCount, 0, 'Clutter samples must never persist into rawPower temporal history');
+
+  // 3. Breakthrough power > 1.0 visibly paints over bright myocardium (lum = 190) in overlayColorField,
+  //    while normal blood power = 1.0 stays suppressed on lum = 190
+  const lut: ScanLut = {
+    key: 'bt-test',
+    lines: 2,
+    samples: 2,
+    idx: new Int32Array([0, 0]),
+    inPix: new Int32Array([0, 1]),
+    inIdx: new Int32Array([0, 0]),
+    inWl: new Uint16Array([0, 0]),
+    inWs: new Uint16Array([0, 0]),
+    inDl: new Uint8Array([0, 0]),
+    inDs: new Uint8Array([0, 0]),
+    wl: new Float32Array([0, 0]),
+    ws: new Float32Array([0, 0]),
+    li: new Int16Array([0, 0]),
+    si: new Int16Array([0, 0]),
+    rCm: new Float32Array([6, 6]),
+    theta: new Float32Array([0, 0]),
+  };
+  const rgbaFlash = new Uint8ClampedArray([190, 190, 190, 255, 190, 190, 190, 255]);
+  overlayColorField(
+    rgbaFlash,
+    lut,
+    new Float32Array([-0.25, -0.25, -0.25, -0.25]),
+    new Float32Array(4),
+    baseCfg,
+    new Float32Array([1.85, 1.85, 1.85, 1.85]),
+  );
+  assert.ok(
+    rgbaFlash[2]! > rgbaFlash[0]! + 35,
+    `Expected breakthrough flash (power=1.85) to paint visible blue over bright myocardium (lum=190), got rgb=(${rgbaFlash[0]},${rgbaFlash[1]},${rgbaFlash[2]})`,
+  );
+
+  // 4. Spatial pinhole closure must never bleed blood color into an isolated Tissue.Myocardium sample
+  const pinholeFrame = makeBloodFrame(16, 32, 16);
+  const pIdx = 8 * 32 + 16;
+  pinholeFrame.tissue[pIdx] = Tissue.Myocardium;
+  const outPinhole = allocColorField(16 * 32);
+  computeColorField(
+    pinholeFrame,
+    { ...baseCfg, wallFilterMps: 0.06, smoothing: 0.8 },
+    null,
+    (idx, _li, _si, res) => {
+      if (idx === pIdx) {
+        res.vWall = 0; // stationary myocardium surrounded by 8 colored blood neighbors
+      } else {
+        res.v = 0.42;
+        res.disp = 0.03;
+        res.present = 1;
+      }
+    },
+    outPinhole,
+    ACQ,
+    { realization: 1, seed: 19 },
+  );
+  assert.ok(
+    Number.isNaN(outPinhole.vel[pIdx]),
+    'D3/CPU pinhole closure must never fill a stationary Tissue.Myocardium sample surrounded by blood',
+  );
+});
+
+test('LV radial wall velocity and valve leaflet snap velocity follow cardiac physiology and regional segAmp', () => {
+  const normal = loadCaseById('normal-excellent-window');
+  const { heart, tables, thorax } = buildCaseModels(normal, REST_PATIENT);
+  const flow = buildFlowParams(normal, heart, tables, thorax);
+
+  // Mid-ejection systole: LV volume is shrinking rapidly -> inward radial velocity on mid-LV anterior/septal wall
+  const { ejectionStartS, ejectionEndS } = tables.timings;
+  const sysPhase = (ejectionStartS + 0.45 * (ejectionEndS - ejectionStartS)) / tables.rrS;
+  const hpSys = computeHeartPose(heart, cycleStateAt(tables, sysPhase, flow.flowPeaks));
+  const midZ = hpSys.zAnn + 0.45 * (heart.lv.lengthCm - hpSys.zAnn);
+  const midR = heart.lv.rMax * 0.95;
+
+  const vMidNorm = sampleTissueVelocity(heart, tables, sysPhase, midR, 0, midZ);
+  assert.ok(
+    vMidNorm.vx < -0.015,
+    `Expected inward systolic LV radial velocity (vx < -0.015 m/s) at mid-LV lateral wall, got vx=${vMidNorm.vx.toFixed(4)}`,
+  );
+
+  // Akinetic segment (segAmp = 0) zeros radial velocity cleanly while preserving basal longitudinal TDI behavior
+  const akineticHeart = { ...heart, segAmp: heart.segAmp.map(() => 0) };
+  const vMidAkinetic = sampleTissueVelocity(
+    akineticHeart,
+    tables,
+    sysPhase,
+    midR,
+    0,
+    midZ,
+  );
+  assert.ok(
+    Math.abs(vMidAkinetic.vx) < 1e-6 && Math.abs(vMidAkinetic.vy) < 1e-6,
+    `Akinetic LV segment (segAmp=0) must have zero radial velocity, got (${vMidAkinetic.vx}, ${vMidAkinetic.vy})`,
+  );
+
+  // Valve leaflet snap velocity peaks briefly around mitral opening/closing and is near zero in mid-systole
+  let peakMvSnap = 0;
+  for (let i = 0; i < 200; i++) {
+    const p = i / 200;
+    const hp = computeHeartPose(heart, cycleStateAt(tables, p, flow.flowPeaks));
+    const vLeaf = sampleLeafletVelocity(
+      heart,
+      tables,
+      hp,
+      p,
+      flow.mvCenter.x,
+      flow.mvCenter.y,
+      hp.zAnn + 0.5,
+      flow.flowPeaks,
+    );
+    peakMvSnap = Math.max(peakMvSnap, Math.hypot(vLeaf.vx, vLeaf.vy, vLeaf.vz));
+  }
+  const vMidSysLeaf = sampleLeafletVelocity(
+    heart,
+    tables,
+    hpSys,
+    sysPhase,
+    flow.mvCenter.x,
+    flow.mvCenter.y,
+    hpSys.zAnn + 0.5,
+    flow.flowPeaks,
+  );
+  const midSysLeafSpeed = Math.hypot(vMidSysLeaf.vx, vMidSysLeaf.vy, vMidSysLeaf.vz);
+  assert.ok(
+    peakMvSnap >= 0.08 && peakMvSnap <= 0.25,
+    `Expected mitral leaflet snap velocity in [0.08, 0.25] m/s during opening/closing, got ${peakMvSnap.toFixed(3)}`,
+  );
+  assert.ok(
+    midSysLeafSpeed < 0.02,
+    `Expected closed mitral leaflet in mid-systole to stay quiescent (< 0.02 m/s), got ${midSysLeafSpeed.toFixed(4)}`,
   );
 });

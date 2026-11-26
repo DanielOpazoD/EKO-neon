@@ -3,6 +3,7 @@ import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
 import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { buildCaseModels, type CaseModels } from '@/simulator/anatomy/caseModels';
+import { patientKey } from '@/simulator/core/acquisitionKeys';
 
 export type { CaseModels } from '@/simulator/anatomy/caseModels';
 
@@ -13,7 +14,7 @@ export type { CaseModels } from '@/simulator/anatomy/caseModels';
 const cache = new Map<string, CaseModels>();
 
 export function getCaseModels(caseId: string, patient: PatientState): CaseModels {
-  const key = `${caseId}|${JSON.stringify(patient)}`;
+  const key = `${caseId}|${patientKey(patient)}`;
   let m = cache.get(key);
   if (m) return m;
   m = buildCaseModels(loadCaseById(caseId), patient);

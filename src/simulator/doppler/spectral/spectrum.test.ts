@@ -6,11 +6,15 @@ import {
   columnsPerSecond,
   displaySpectrum,
   isClickColumn,
+  MIRROR_ISOLATION_DB,
+  MIRROR_ISOLATION_POWER,
+  presentSpectralColumn,
   SPECTRAL_BINS,
   spectralDefaultsFor,
   spectralRange,
   type VelocitySample,
 } from './spectrum';
+import { autoTraceSpectralEnvelope } from '@/simulator/core/strip/autoTrace';
 
 test('spectralRange and spectralDefaultsFor reflect each modality window', () => {
   const pw = spectralDefaultsFor('pw');
@@ -143,4 +147,92 @@ test('displaySpectrum is deterministic and monotonically brighter with higher ga
   }
   assert.ok(strictlyHigher > 10, 'higher gain should visibly brighten unsaturated spectral bins');
   assert.equal(columnsPerSecond(50, 200, 100), 100);
+});
+
+test('quadrature mirror (-40 dB) stays invisible at 0 dB gain, surfaces at +12 dB gain, and never alters envelope or auto-trace', () => {
+  assert.equal(MIRROR_ISOLATION_DB, -40);
+  assert.ok(Math.abs(MIRROR_ISOLATION_POWER - 1e-4) < 1e-9);
+
+  const s0 = { ...spectralDefaultsFor('pw'), gainDb: 0, scaleMps: 1.0, baselineShiftMps: 0 };
+  const s12 = { ...s0, gainDb: 12 };
+  const expected = new Float32Array(SPECTRAL_BINS);
+  accumulateSpectrum([{ v: 0.6, weight: 1, dispersion: 0.04 }], s0, true, expected);
+
+  // Locate primary peak bin (+0.6 m/s) and its exact mirror bin (-0.6 m/s) plus a quiet control bin (-0.85 m/s)
+  const { vMin, vMax } = spectralRange(s0);
+  const span = vMax - vMin;
+  const binOf = (v: number) => Math.round(((vMax - v) / span) * SPECTRAL_BINS - 0.5);
+  const primaryBin = binOf(0.6);
+  const mirrorBin = binOf(-0.6);
+  const quietBin = binOf(-0.85);
+
+  // Average over 40 independent column seeds so random Rayleigh speckle cancels cleanly
+  let sumMirror0 = 0;
+  let sumQuiet0 = 0;
+  let sumMirror12 = 0;
+  let sumQuiet12 = 0;
+  const col0 = new Float32Array(SPECTRAL_BINS);
+  const col12 = new Float32Array(SPECTRAL_BINS);
+  for (let c = 0; c < 40; c++) {
+    displaySpectrum(expected, s0, c, 0, 0.25, col0, 2.5, 1.0);
+    displaySpectrum(expected, s12, c, 0, 0.25, col12, 2.5, 1.0);
+    sumMirror0 += col0[mirrorBin]!;
+    sumQuiet0 += col0[quietBin]!;
+    sumMirror12 += col12[mirrorBin]!;
+    sumQuiet12 += col12[quietBin]!;
+  }
+  const meanMirror0 = sumMirror0 / 40;
+  const meanQuiet0 = sumQuiet0 / 40;
+  const meanMirror12 = sumMirror12 / 40;
+  const meanQuiet12 = sumQuiet12 / 40;
+
+  assert.ok(
+    meanMirror0 < 0.06,
+    `At 0 dB gain, -40 dB mirror should stay near the black floor (<15/255), got ${(meanMirror0 * 255).toFixed(1)}/255`,
+  );
+  const mirror12Byte = meanMirror12 * 255;
+  assert.ok(
+    mirror12Byte >= 45 && mirror12Byte <= 95,
+    `At +12 dB gain, -40 dB mirror should emerge clearly in [45, 95]/255, got ${mirror12Byte.toFixed(1)}/255`,
+  );
+  assert.ok(
+    meanMirror12 > meanQuiet12 + 0.04 && meanMirror12 > meanMirror0 * 4,
+    `At +12 dB gain, mirror bin (${meanMirror12.toFixed(3)}) must clearly emerge above thermal noise (${meanQuiet12.toFixed(3)}) and 0 dB level (${meanMirror0.toFixed(3)})`,
+  );
+
+  // Envelope buffer `out` returned by presentSpectralColumn must remain strictly free of mirror energy
+  const envWithDisp = new Float32Array(expected);
+  const envNoDisp = new Float32Array(expected);
+  const dispOut = new Float32Array(SPECTRAL_BINS);
+  presentSpectralColumn(envWithDisp, s12, 7, 42, 2.5, 1.0, 0, dispOut, 0.25);
+  presentSpectralColumn(envNoDisp, s12, 7, 42, 2.5, 1.0, 0, undefined, 0.25);
+  assert.deepEqual(
+    envWithDisp,
+    envNoDisp,
+    'presentSpectralColumn display mirror pass must never mutate the envelope buffer',
+  );
+  assert.ok(envWithDisp[primaryBin]! > 0.7, 'primary positive jet must be bright in envelope buffer');
+  assert.ok(
+    envWithDisp[mirrorBin]! < 0.2,
+    `envelope buffer must stay at noise floor at mirror bin, got ${envWithDisp[mirrorBin]}`,
+  );
+
+  // Auto-trace reads the envelope buffer, so tracing a strip built from `envWithDisp` tracks +0.6 m/s with zero mirror bias
+  const cols = 60;
+  const strip = new Float32Array(cols * SPECTRAL_BINS);
+  for (let c = 10; c <= 45; c++) {
+    for (let b = 0; b < SPECTRAL_BINS; b++) strip[c * SPECTRAL_BINS + b] = envWithDisp[b]!;
+  }
+  const traced = autoTraceSpectralEnvelope(strip, cols, cols, s12, 10, 45, true);
+  assert.equal(traced.kind, 'autoTrace');
+  assert.ok(
+    traced.velocitiesMps.length >= 20,
+    'auto-trace should recover the positive envelope cleanly',
+  );
+  const meanV =
+    traced.velocitiesMps.reduce((acc, v) => acc + v, 0) / traced.velocitiesMps.length;
+  assert.ok(
+    meanV > 0.5 && meanV < 0.85,
+    `auto-trace should follow true +0.6 m/s positive flow, got meanV=${meanV.toFixed(3)} m/s`,
+  );
 });

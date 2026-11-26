@@ -7,11 +7,17 @@ import {
   DOPPLER_SHADOW_TRANSMISSION,
 } from '@/simulator/doppler/color/colorDoppler';
 import {
+  CLUTTER_BLOOD_RATIO_POW,
+  CLUTTER_JITTER_RAD,
+  CLUTTER_SIGMA_V_MPS,
   COLOR_PACKET,
+  COLOR_TURBULENT_WIDTH_K,
   NOISE_COHERENCE,
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
+  WF_MEAN_SPAN,
+  WF_QUAD_START,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { ATTEN_NP_PER_DB, SOFT_TISSUE_ATTEN_DB } from '../acoustic/acoustics';
 import { buildScanLut, computeSectorMapping } from '../scanConvert';
@@ -249,6 +255,13 @@ test('computeDopplerBoxBounds computes exact inclusive polar scissor rect and co
 test('GLSL deferred Doppler shaders synchronize all physical constants with TypeScript modules', () => {
   const defs = dopplerDefinesGlsl();
   assert.ok(defs.includes(`#define T_BLOOD ${Tissue.Blood}`));
+  assert.ok(defs.includes(`#define T_MYOCARDIUM ${Tissue.Myocardium}`));
+  assert.ok(defs.includes(`#define T_VALVE ${Tissue.Valve}`));
+  assert.ok(defs.includes(`#define CLUTTER_BLOOD_RATIO_POW ${CLUTTER_BLOOD_RATIO_POW}`));
+  assert.ok(defs.includes(`#define CLUTTER_SIGMA_V_MPS ${CLUTTER_SIGMA_V_MPS}`));
+  assert.ok(defs.includes(`#define CLUTTER_JITTER_RAD ${CLUTTER_JITTER_RAD}`));
+  assert.ok(defs.includes(`#define WF_MEAN_SPAN ${WF_MEAN_SPAN}`));
+  assert.ok(defs.includes(`#define WF_QUAD_START ${WF_QUAD_START}`));
   assert.ok(defs.includes(`#define DOPPLER_SHADOW_TRANSMISSION ${DOPPLER_SHADOW_TRANSMISSION}`));
   assert.ok(defs.includes(`#define COLOR_THRESHOLD ${COLOR_THRESHOLD}`));
   assert.ok(defs.includes(`#define COLOR_PACKET ${COLOR_PACKET}`));
@@ -261,14 +274,26 @@ test('GLSL deferred Doppler shaders synchronize all physical constants with Type
   assert.ok(defs.includes(`#define ST_HYSTERESIS_RATIO ${ST_HYSTERESIS_RATIO}`));
   assert.ok(defs.includes(`#define ST_SPATIAL_LAMINAR_MIX ${ST_SPATIAL_LAMINAR_MIX}`));
   assert.ok(defs.includes(`#define ST_SPATIAL_TURB_MIX ${ST_SPATIAL_TURB_MIX}`));
+  assert.ok(defs.includes(`#define COLOR_TURBULENT_WIDTH_K ${COLOR_TURBULENT_WIDTH_K}`));
   assert.ok(defs.includes('const float KASAI_LIN_BASIS[COLOR_PACKET]'));
+  assert.ok(defs.includes('const float KASAI_QUAD_BASIS[COLOR_PACKET]'));
 
   assert.ok(GLSL_DOPPLER_AUTOCORR_FRAG.startsWith('#version 300 es'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.startsWith('#version 300 es'));
   assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.startsWith('#version 300 es'));
+  assert.ok(
+    GLSL_DOPPLER_AUTOCORR_FRAG.includes('float turbulent = (PI * sigmaV) / scale * INV_SQRT2;'),
+    'Pass D1 must compute Kasai turbulent jitter directly from absolute sigmaVMps',
+  );
+  assert.ok(
+    GLSL_DOPPLER_SHADE_FRAG.includes('COLOR_TURBULENT_WIDTH_K * abs(vTrue)'),
+    'Pass D2 expected mode must convert absolute sigmaVMps using COLOR_TURBULENT_WIDTH_K',
+  );
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 0) out vec4 outShade;'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 1) out vec4 outHist;'));
   assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.includes('layout(location = 0) out vec4 outDisplay;'));
+  assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.includes('uniform float uGainDb;'));
+  assert.ok(GLSL_DOPPLER_SPATIAL_FRAG.includes('centerClass >= 0.75'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('safeAtan2'));
 });
 

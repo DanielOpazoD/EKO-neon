@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { COLOR_BLEND, COLOR_MAP, colorMap, colorMapDefinesGlsl } from './colorMap';
+import {
+  COLOR_BLEND,
+  COLOR_MAP,
+  COLOR_PALETTE_IDS,
+  COLOR_PALETTES,
+  colorMap,
+  colorMapDefinesGlsl,
+  colorMapGlsl,
+  colorPaletteIndex,
+} from './colorMap';
 
 test('colorMap follows BART polarity (red toward, blue away), brightens with speed, and shifts green on variance', () => {
   const posSlow: [number, number, number] = [0, 0, 0];
@@ -59,4 +68,64 @@ test('colorMap maps asymmetric baseline-shifted ranges cleanly and keeps laminar
   assert.ok(peakNeg[2] >= 250 && peakNeg[1] >= 220, `expected bright cyan-blue at -0.35, got ${peakNeg}`);
   // Laminar low variance (< VARIANCE_MIN) adds zero green shift
   assert.deepEqual(lamLowVar, lamNoVar, 'low laminar variance must remain pure BART without green tint');
+});
+
+test('all 4 clinical palettes preserve BART polarity, are visually distinct, and generate matching GLSL branches', () => {
+  const glsl = colorMapGlsl();
+  const seenPos = new Set<string>();
+  const seenVar = new Set<string>();
+
+  for (let i = 0; i < COLOR_PALETTE_IDS.length; i++) {
+    const id = COLOR_PALETTE_IDS[i]!;
+    assert.equal(colorPaletteIndex(id), i);
+    assert.ok(COLOR_PALETTES[id], `missing palette params for ${id}`);
+    assert.ok(glsl.includes(`paletteId == ${i}`), `colorMapGlsl missing branch for palette ${id}`);
+
+    const pos: [number, number, number] = [0, 0, 0];
+    const neg: [number, number, number] = [0, 0, 0];
+    const peakPos: [number, number, number] = [0, 0, 0];
+    const turb: [number, number, number] = [0, 0, 0];
+    colorMap(0.35, 0.68, 0, false, pos, 0, id);
+    colorMap(-0.35, 0.68, 0, false, neg, 0, id);
+    colorMap(0.68, 0.68, 0, false, peakPos, 0, id);
+    colorMap(0.35, 0.68, 0.45, true, turb, 0, id);
+
+    assert.ok(pos[0] > pos[2], `palette ${id} toward flow must be red-dominant`);
+    assert.ok(neg[2] > neg[0], `palette ${id} away flow must be blue-dominant`);
+    assert.ok(turb[1] > pos[1], `palette ${id} must lift green channel on turbulent variance`);
+
+    seenPos.add(pos.map((x) => Math.round(x)).join(','));
+    seenVar.add(turb.map((x) => Math.round(x)).join(','));
+  }
+
+  assert.equal(seenPos.size, 4, 'all 4 palettes must produce distinct mid-velocity colors');
+  assert.equal(seenVar.size, 4, 'all 4 palettes must produce distinct variance colors');
+
+  // Verify specific clinical signatures:
+  // - classic has a darker baseline than vivid
+  const vividLow: [number, number, number] = [0, 0, 0];
+  const classicLow: [number, number, number] = [0, 0, 0];
+  colorMap(0.05, 0.68, 0, false, vividLow, 0, 'vivid');
+  colorMap(0.05, 0.68, 0, false, classicLow, 0, 'classic');
+  assert.ok(classicLow[0] < vividLow[0], 'classic palette must have a darker low-velocity baseline');
+
+  // - variance palette activates green mosaic earlier (at variance=0.24) than vivid (min 0.28)
+  const vividEarlyVar: [number, number, number] = [0, 0, 0];
+  const vividNoVar: [number, number, number] = [0, 0, 0];
+  const varEarlyVar: [number, number, number] = [0, 0, 0];
+  const varNoVar: [number, number, number] = [0, 0, 0];
+  colorMap(0.3, 0.68, 0.24, true, vividEarlyVar, 0, 'vivid');
+  colorMap(0.3, 0.68, 0, true, vividNoVar, 0, 'vivid');
+  colorMap(0.3, 0.68, 0.24, true, varEarlyVar, 0, 'variance');
+  colorMap(0.3, 0.68, 0, true, varNoVar, 0, 'variance');
+  assert.deepEqual(vividEarlyVar, vividNoVar);
+  assert.ok(varEarlyVar[1] > varNoVar[1] + 20, 'variance palette must highlight moderate turbulence earlier');
+
+  // - ice-fire lifts quiet channel at Nyquist toward white-gold / ice-white
+  const iceFirePeakPos: [number, number, number] = [0, 0, 0];
+  const iceFirePeakNeg: [number, number, number] = [0, 0, 0];
+  colorMap(0.68, 0.68, 0, false, iceFirePeakPos, 0, 'ice-fire');
+  colorMap(-0.68, 0.68, 0, false, iceFirePeakNeg, 0, 'ice-fire');
+  assert.ok(iceFirePeakPos[2] > 150, `ice-fire peak toward should reach warm white-gold, got ${iceFirePeakPos}`);
+  assert.ok(iceFirePeakNeg[0] > 150, `ice-fire peak away should reach bright ice-white, got ${iceFirePeakNeg}`);
 });

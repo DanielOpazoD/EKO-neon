@@ -226,6 +226,7 @@ export interface ColorPresentSettings {
   baselineShiftMps?: number;
   showVariance: boolean;
   invert: boolean;
+  palette?: import('./postprocess/colorMap').ColorPaletteId;
 }
 
 export interface RendererBackend {

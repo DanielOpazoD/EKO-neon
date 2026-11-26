@@ -39,6 +39,7 @@ export const PRESENT_UNIFORMS = [
   'uTintMap',
   'uBox',
   'uColorMap',
+  'uColorPalette',
 ] as const;
 
 export type Locations<T extends readonly string[]> = Record<T[number], WebGLUniformLocation | null>;
