@@ -147,7 +147,41 @@ const APICAL_PRESSURE = 0.6;
 /** Share of the ventricle lung and ribs may hide in the four- and two-chamber views before the probe leaves the axis (decisions 83, 215). */
 const APICAL_LUNG_TOLERANCE = 0.1;
 
-const apicalSkinCache = new WeakMap<HeartModel, Map<string, ApicalWindow>>();
+/**
+ * The canonical solutions (the apical and subcostal windows, the suprasternal plane and each view's beam), memoised per
+ * heart and thorax object. `buildCaseModels` builds both once per patient state and nothing changes them afterwards, so
+ * their identity is the whole key: a pair holds at most one solution per view and window, and they go with it. The keys
+ * were strings of some thorax fields, the lung border among them, in maps that lived as long as the heart: fed the
+ * thorax of each frame in free breathing, every view analysis solved its window again (A4C 29 ms on average against
+ * 0.35 ms in expiration, suprasternal 30 against 0.25) and 12 s at the A4C preset left 433 solutions in them.
+ */
+const canonicalSolutions = new WeakMap<HeartModel, WeakMap<ThoraxModel, Map<string, unknown>>>();
+let canonicalSolves = 0;
+
+function canonicalSolution<T>(
+  heart: HeartModel,
+  thorax: ThoraxModel,
+  key: string,
+  solve: () => T,
+): T {
+  let byThorax = canonicalSolutions.get(heart);
+  if (!byThorax) canonicalSolutions.set(heart, (byThorax = new WeakMap()));
+  let solutions = byThorax.get(thorax);
+  if (!solutions) byThorax.set(thorax, (solutions = new Map()));
+  if (solutions.has(key)) return solutions.get(key) as T;
+  const solved = solve();
+  canonicalSolves++;
+  solutions.set(key, solved);
+  return solved;
+}
+
+/**
+ * How many canonical solutions this process has computed: one per view and window for each patient state, as long as
+ * the callers pass the models `buildCaseModels` made and not a thorax rebuilt for every frame (tests watch it).
+ */
+export function canonicalSolveCount(): number {
+  return canonicalSolves;
+}
 
 /** The apical window: where the probe sits, and whether its planes turn about the long axis (decision 215). */
 export interface ApicalWindow {
@@ -322,14 +356,9 @@ function apicalExit(thorax: ThoraxModel, apex: Vec3, out: Vec3): { u: number; v:
  * on-axis point hides at most 5 % more: in the normal case the probe line now runs 1.5° from the axis instead of 15°.
  */
 export function apicalSkinPoint(heart: HeartModel, thorax: ThoraxModel): ApicalWindow {
-  let cache = apicalSkinCache.get(heart);
-  if (!cache) {
-    cache = new Map();
-    apicalSkinCache.set(heart, cache);
-  }
-  const key = `${thorax.lungShiftCm}|${thorax.chestWall}|${thorax.aw}|${thorax.bDepth}|${thorax.ribSpacing}|${thorax.ribRadius}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
+  return canonicalSolution(heart, thorax, 'apical-window', () => solveApicalSkinPoint(heart, thorax));
+}
+function solveApicalSkinPoint(heart: HeartModel, thorax: ThoraxModel): ApicalWindow {
   const { apex, dir } = apicalAxis(heart);
   const a4c = getViewTarget('a4c');
   const a2c = getViewTarget('a2c');
@@ -392,12 +421,9 @@ export function apicalSkinPoint(heart: HeartModel, thorax: ThoraxModel): ApicalW
   }
 
   // each placement judged with its own planes: turned about the axis, or aimed at the views' targets (decision 139)
-  const chosen: ApicalWindow =
-    onAxis && hiddenOnAxis(onAxis) <= hiddenOld(off) + 0.05
-      ? { ...onAxis, onAxis: true }
-      : { u: off.u, v: off.v, onAxis: false };
-  cache.set(key, chosen);
-  return chosen;
+  return onAxis && hiddenOnAxis(onAxis) <= hiddenOld(off) + 0.05
+    ? { ...onAxis, onAxis: true }
+    : { u: off.u, v: off.v, onAxis: false };
 }
 
 /**
@@ -418,10 +444,6 @@ const REQUIRED_LANDMARK_WEIGHT = 1.35;
 const COSTAL_MARGIN_V = -8.5;
 
 type Plane = { target: Vec3; right: Vec3; down: Vec3; normal: Vec3 };
-const subcostalCache = new WeakMap<
-  HeartModel,
-  Map<string, { u: number; v: number; plane: Plane }>
->();
 
 /**
  * The subcostal four-chamber view (decision 167). The four-chamber plane of the heart is close to transverse (its normal
@@ -439,14 +461,14 @@ export function subcostalFourChamber(
   heart: HeartModel,
   thorax: ThoraxModel,
 ): { u: number; v: number; plane: Plane } {
-  let cache = subcostalCache.get(heart);
-  if (!cache) {
-    cache = new Map();
-    subcostalCache.set(heart, cache);
-  }
-  const key = `${thorax.lungShiftCm}|${thorax.chestWall}|${thorax.aw}|${thorax.bDepth}|${thorax.heartOffset.x},${thorax.heartOffset.y},${thorax.heartOffset.z}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
+  return canonicalSolution(heart, thorax, 'subcostal-4c', () =>
+    solveSubcostalFourChamber(heart, thorax),
+  );
+}
+function solveSubcostalFourChamber(
+  heart: HeartModel,
+  thorax: ThoraxModel,
+): { u: number; v: number; plane: Plane } {
   const view = getViewTarget('subcostal-4c');
   const fourChamber = canonicalPlane(getViewTarget('a4c'), heart);
   const onPlane = skinPointOnPlane(thorax, fourChamber, view.skin, 3.0);
@@ -499,9 +521,7 @@ export function subcostalFourChamber(
   const down = normalize(sub(target, w));
   const r = cross(down, normal);
   const right = dot(r, heartDirToTorso(heart.frame, view.planeRight)) < 0 ? scale(r, -1) : r;
-  const out = { u, v, plane: { target, right, down, normal: normalize(cross(right, down)) } };
-  cache.set(key, out);
-  return out;
+  return { u, v, plane: { target, right, down, normal: normalize(cross(right, down)) } };
 }
 
 /** The acquired plane passes through the real notch and is fitted to the arch: its centre line, the proximal descending
@@ -510,22 +530,10 @@ export function subcostalFourChamber(
  * manubrium/lung classifiers. BSE adult minimum dataset (Robinson et al. 2020, DOI 10.1530/ERP-20-0026): SSN arch and
  * descending aorta.
  */
-const suprasternalCache = new WeakMap<
-  HeartModel,
-  WeakMap<ThoraxModel, ReturnType<typeof solveSuprasternalPlane>>
->();
 export function suprasternalPlane(heart: HeartModel, thorax: ThoraxModel) {
-  let cache = suprasternalCache.get(heart);
-  if (!cache) {
-    cache = new WeakMap();
-    suprasternalCache.set(heart, cache);
-  }
-  let result = cache.get(thorax);
-  if (!result) {
-    result = solveSuprasternalPlane(heart, thorax);
-    cache.set(thorax, result);
-  }
-  return result;
+  return canonicalSolution(heart, thorax, 'suprasternal', () =>
+    solveSuprasternalPlane(heart, thorax),
+  );
 }
 function solveSuprasternalPlane(heart: HeartModel, thorax: ThoraxModel) {
   const landmarks = heartLandmarks(heart);
@@ -705,21 +713,11 @@ export function canonicalControl(
   return controlAimingAt(thorax, skin.u, skin.v, plane.target, plane.right, 0.6);
 }
 
-/** Canonical beam frame per (heart, view), cached: the pose a sonographer would reach for this anatomy. */
-const canonicalBeamCache = new WeakMap<HeartModel, Map<string, BeamFrame>>();
+/** Canonical beam frame per (heart, thorax, view), cached: the pose a sonographer would reach for this anatomy. */
 export function canonicalBeam(view: ViewTarget, heart: HeartModel, thorax: ThoraxModel): BeamFrame {
-  let m = canonicalBeamCache.get(heart);
-  if (!m) {
-    m = new Map();
-    canonicalBeamCache.set(heart, m);
-  }
-  const key = `${view.id}|${thorax.lungShiftCm}|${thorax.heartOffset.x},${thorax.heartOffset.y},${thorax.heartOffset.z}`;
-  let b = m.get(key);
-  if (!b) {
-    b = beamFrameFromPose(poseFromControl(thorax, canonicalControl(view, heart, thorax)));
-    m.set(key, b);
-  }
-  return b;
+  return canonicalSolution(heart, thorax, `beam|${view.id}`, () =>
+    beamFrameFromPose(poseFromControl(thorax, canonicalControl(view, heart, thorax))),
+  );
 }
 
 /**
