@@ -333,12 +333,15 @@ float laRootHold(float rootT, float rootOuter, float lateralCm) {
   return ((1.0 - q * q * (3.0 - 2.0 * q)) * a * a * (3.0 - 2.0 * a) * b * b * (3.0 - 2.0 * b) * sx * sx * (3.0 - 2.0 * sx));
 }
 // src/simulator/anatomy/classify/pericardium.ts: parietalSdf
-float parietalSdf(float eff, float dFull, float behind, float footprint, float colDist) {
+float parietalSdf(float eff, float dFull, float dEpi, float behind, float footprint, float colDist) {
   float thin = min(eff, OBLIQUE_SINUS_EFFUSION_CM);
   float tb = min(1.0, max(0.0, behind / OBLIQUE_SINUS_BEHIND));
   float tf = min(1.0, max(0.0, (footprint - OBLIQUE_SINUS_FOOTPRINT_FROM) / (OBLIQUE_SINUS_FOOTPRINT_TO - OBLIQUE_SINUS_FOOTPRINT_FROM)));
   float w = tb * tb * (3.0 - 2.0 * tb) * (1.0 - tf * tf * (3.0 - 2.0 * tf));
-  return smax(dFull + (eff - thin) * w, 2.0 * PERICARDIUM_CM - colDist, PARIETAL_COLUMN_BLEND_CM);
+  float col = 2.0 * PERICARDIUM_CM - colDist;
+  float full = smax(dFull, col, PARIETAL_COLUMN_BLEND_CM);
+  float thinned = smax(dFull + (eff - thin) * w, col, PARIETAL_COLUMN_BLEND_CM);
+  return max(full, min(thinned, dEpi - PERICARDIUM_CM - thin));
 }
 // src/simulator/anatomy/classify/pericardium.ts: posteriorColumnDistance
 float posteriorColumnDistance(float x, float y, float z, float ux, float uy, float uz, float ax, float ay, float az, float sx, float sy, float sz) {
