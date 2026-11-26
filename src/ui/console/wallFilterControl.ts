@@ -30,3 +30,15 @@ export function wallFilterControl(
     limited: requestMps > 0 && wallFilterText(cutMps) !== wallFilterText(requestMps),
   };
 }
+
+/**
+ * The request a slider position sets. At an end of the range the scale allows, a request already past that end is kept:
+ * the slider cannot show it, and setting the end itself would lower the request for good, so that back at 0.68 m/s the
+ * filter cut at 11.2 cm/s (the bound at 0.35) and the myocardium flashed, the trap the store no longer sets.
+ */
+export function wallFilterRequestFor(valueMps: number, requestMps: number, scaleMps: number): number {
+  const c = wallFilterControl(requestMps, scaleMps);
+  if (valueMps >= c.max - c.step / 2 && requestMps > c.max) return requestMps;
+  if (valueMps <= c.min + c.step / 2 && requestMps > 0 && requestMps < c.min) return requestMps;
+  return valueMps;
+}

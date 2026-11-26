@@ -22,7 +22,7 @@ import { useShallow } from 'zustand/shallow';
 import { Section, Segmented, Slider, Toggle } from '../controls';
 import { IconDoppler } from '../icons';
 import { useTip } from './useTip';
-import { wallFilterControl, wallFilterText } from './wallFilterControl';
+import { wallFilterControl, wallFilterRequestFor, wallFilterText } from './wallFilterControl';
 
 /** The colour wall filter's slider (`wallFilterControl`): it shows the cutoff that filters and sets the request. */
 function WallFilterSlider(props: {
@@ -41,7 +41,7 @@ function WallFilterSlider(props: {
         max={c.max}
         step={c.step}
         format={wallFilterText}
-        onChange={props.onChange}
+        onChange={(v) => props.onChange(wallFilterRequestFor(v, props.requestMps, props.scaleMps))}
         title={props.title}
       />
       {c.limited && (

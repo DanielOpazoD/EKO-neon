@@ -42,7 +42,7 @@ describe("the HUD's GPU notice", () => {
       const port = `GPU perdida (intento ${k} de 5)`;
       assert.deepEqual(gpuNotice({ gpu: LOST, tier: 'medium', gpuLive: port }), { text: TRACED, tip: tipOver(port) });
     }
-    const gaveUp = 'Sin GPU tras 5 intentos; recarga el caso';
+    const gaveUp = 'Sin GPU tras 5 intentos; recarga la página';
     assert.deepEqual(gpuNotice({ gpu: LOST, tier: 'medium', gpuLive: gaveUp }), { text: TRACED, tip: tipOver(gaveUp) });
   });
 

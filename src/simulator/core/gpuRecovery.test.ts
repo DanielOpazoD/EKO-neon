@@ -115,7 +115,7 @@ describe('GpuRecovery', () => {
       if (gpu.calls.length > before) attempts.push(clock.t);
     }
     assert.deepEqual(attempts, [1000, 3000, 7000, 15000, 31000]);
-    assert.equal(recovery.status, 'Sin GPU tras 5 intentos; recarga el caso');
+    assert.equal(recovery.status, 'Sin GPU tras 5 intentos; recarga la página');
     disposedLost(canvas, 'the lost renderer is disposed on giving up');
     // and for good: an hour later, or a restoration (given back at once), builds nothing
     assert.equal(canvas.restore(), true);
@@ -145,7 +145,7 @@ describe('GpuRecovery', () => {
       clock.t += 100; // lost again 100 ms later
     }
     assert.deepEqual(rebuiltAt, [0, 2100, 6200, 14300, 30400], 'at once, then spaced by the backoff');
-    assert.equal(recovery.status, 'Sin GPU tras 5 intentos; recarga el caso');
+    assert.equal(recovery.status, 'Sin GPU tras 5 intentos; recarga la página');
     assert.equal(gpu.calls.length, 1 + 5, 'five rebuilds, not one per restoration');
   });
 
@@ -251,7 +251,7 @@ describe('SimulatorCore after a lost WebGL context', () => {
     }
     assert.equal(gpu.calls.filter((c) => c === 'new').length, 1 + 5);
     assert.equal(out.stats['gpu'], GPU_LOST);
-    assert.equal(out.stats['gpuLive'], 'Sin GPU tras 5 intentos; recarga el caso');
+    assert.equal(out.stats['gpuLive'], 'Sin GPU tras 5 intentos; recarga la página');
     assert.equal(out.stats['console'], 'cpu');
     disposedLost(gpu.canvases[0]!, 'the lost renderer was disposed');
     core.dispose();
@@ -558,7 +558,7 @@ describe("the HUD's GPU notice over the frame shown, as the port moves on", () =
     }
     assert.deepEqual(
       seen.map((n) => n?.text),
-      [1, 2, 3, 4, 5].map((k) => `GPU perdida (intento ${k} de 5)`).concat('Sin GPU tras 5 intentos; recarga el caso'),
+      [1, 2, 3, 4, 5].map((k) => `GPU perdida (intento ${k} de 5)`).concat('Sin GPU tras 5 intentos; recarga la página'),
     );
     core.dispose();
   });
@@ -608,7 +608,7 @@ describe("the HUD's GPU notice over the frame shown, as the port moves on", () =
       tips,
       [2, 3, 4, 5]
         .map((k) => tipOver(`GPU perdida (intento ${k} de 5)`))
-        .concat(tipOver('Sin GPU tras 5 intentos; recarga el caso')),
+        .concat(tipOver('Sin GPU tras 5 intentos; recarga la página')),
     );
     core.dispose();
   });

@@ -115,8 +115,9 @@ export const PARIETAL_COLUMN_BLEND_CM = 1;
  * phase, from phase 0.875 to 0.375), 0.51-0.59 cm in four of the other hearts the app's postures and breathing build,
  * and supine in inspiration the left atrium's wall, its cavity and the fat up to 0.91 cm (2.6-3.9 mL in every phase), a
  * ray from the atrium crossing the face twice with a centimetre of fluid beyond the heart between the crossings. Now no
- * heart tissue lies against or past the face over the sinus, and the film is 0.30 cm or more (0.35 supine in
- * inspiration). The real layer is reflected onto the atrium around the pulmonary veins and moves with it there: the face
+ * heart tissue lies against or past the face over the sinus, and the film is 0.30 in units of the epicardial distance:
+ * that distance grows 1.5-2 times faster than the true one behind the atrium, so the film measures 0.16-0.30 cm (final
+ * review of batch 3; a film set in true distance would divide by a local bound of its gradient). The real layer is reflected onto the atrium around the pulmonary veins and moves with it there: the face
  * takes 0.1-2.2 mL of the space past the thinned sac into the sac in each phase, up to 0.92 cm beyond it (5.8-8.1 mL, up
  * to 1.30 cm, supine in inspiration), over 1.1-1.9 % of the directions from the sac's centre (3.1 % supine in
  * inspiration). Resting it on the heart before holding it off the column would let the column's blend pull it back: the

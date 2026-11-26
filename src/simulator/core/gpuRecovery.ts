@@ -108,12 +108,12 @@ export class GpuRecovery {
    * frozen frame the GPU formed and for the end of the tip over one the CPU tracer formed, live or frozen, so it keeps to
    * one line of the badge (42 characters: 320 px of 12 px mono). The driver's message of the last failed attempt
    * («WebGL2 unavailable», a software GL's name of up to 60 characters) is left out: what the learner can do about any of
-   * them is the same, reload the case.
+   * them is the same: reload the page (the same case does not rebuild the core, and the exam locks the case selector).
    */
   get status(): string | null {
     const n = GPU_RETRY_DELAYS_MS.length;
     if (this.state === 'waiting') return `GPU perdida (intento ${this.attempts + 1} de ${n})`;
-    if (this.state === 'failed') return `Sin GPU tras ${n} intentos; recarga el caso`;
+    if (this.state === 'failed') return `Sin GPU tras ${n} intentos; recarga la página`;
     return null;
   }
 

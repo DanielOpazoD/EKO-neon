@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
 import { colorWallFilterRangeMps } from '@/simulator/doppler/color/kasaiEstimator';
-import { wallFilterControl, wallFilterText } from './wallFilterControl';
+import { wallFilterControl, wallFilterRequestFor, wallFilterText } from './wallFilterControl';
 
 test('the wall filter slider spans exactly what 8 pulses allow, in ~1 mm/s steps, and holds the cutoff that filters', () => {
   for (const scale of [0.15, 0.2, 0.35, 0.5, 0.62, 0.68, 1.0, 1.2]) {
@@ -39,4 +39,19 @@ test('the wall filter notice tells a limit the console shows, to its 0.1 cm/s', 
   const seen = wallFilterControl(DEFAULT_COLOR.wallFilterMps, 0.621);
   assert.equal(wallFilterText(seen.cutMps), '19.9 cm/s');
   assert.equal(seen.limited, true);
+});
+
+test('the slider left at an end the scale imposes keeps a request past it: back at 0.68 m/s the filter is 20 cm/s again', () => {
+  const at035 = wallFilterControl(0.2, 0.35);
+  // the learner drags the slider to its top at 0.35 m/s, where it already shows the 11.2 cm/s bound
+  assert.equal(wallFilterRequestFor(at035.max, 0.2, 0.35), 0.2);
+  assert.ok(Math.abs(wallFilterControl(wallFilterRequestFor(at035.max, 0.2, 0.35), 0.68).cutMps - 0.2) < 1e-12);
+  // a position inside the range sets itself, and so does the end when the request was not past it
+  const inside = at035.min + 10 * at035.step;
+  assert.equal(wallFilterRequestFor(inside, 0.2, 0.35), inside);
+  assert.equal(wallFilterRequestFor(at035.max, 0.08, 0.35), at035.max);
+  // the same at the bottom: a request under the lowest cutoff survives the slider left there
+  const at1 = wallFilterControl(0.05, 1);
+  assert.equal(wallFilterRequestFor(at1.min, 0.05, 1), 0.05);
+  assert.equal(wallFilterRequestFor(at1.min, 0.2, 1), at1.min);
 });
