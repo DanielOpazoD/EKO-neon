@@ -1,7 +1,7 @@
 import type { AnatomyConfig, PhysiologyConfig } from '@/cases/schema';
 import { Structure, Tissue, type TissueSample } from './tissue';
 import { lvCavityRadius, lvRadialOffsetFactor } from './lvShape';
-import { noiseLattice } from '@/core/noise';
+import { sceneLattice } from '@/core/noise';
 import type { Vec3 } from '@/core/vec3';
 import { add, scale, v3 } from '@/core/vec3';
 import {
@@ -98,7 +98,8 @@ export function createHeartModel(
     frame: buildHeartFrame(anatomy, offset),
     boundRadius: lv.lengthCm * 0.5 + 8.5,
     boundCenter: v3(-1.2, 0.2, lv.lengthCm * 0.5 - 1.5),
-    wallNoise: noiseLattice(seed ^ 0x5157),
+    // the scene's lattice 3, which the GPU reads as lat(p, 3) (core/noise.ts NOISE_LATTICE_SEED_XOR)
+    wallNoise: sceneLattice(seed, 3),
     regionalMeanFrac: regionalMeanFraction(segAmp, lv.shape),
     ivcCollapse: Math.min(0.95, Math.max(0, ivcCollapse)),
     columnShiftCm,
