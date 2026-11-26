@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DEFAULT_COLOR } from './colorDoppler';
 import {
   CLUTTER_BLOOD_RATIO_POW,
   CLUTTER_SIGMA_V_MPS,
   colorSpectralWidthMps,
+  colorWallFilterCutoffMps,
+  colorWallFilterRangeMps,
+  COLOR_PACKET,
+  KASAI_LIN_BASIS,
+  KASAI_QUAD_BASIS,
   kasaiEstimate,
+  wallFilterShares,
+  WF_MAX_NYQUIST,
+  WF_MIN_NYQUIST,
 } from './kasaiEstimator';
 
 function fillGrid(n: number, v: number, disp: number, rel = 1, vPerp = 0, depthCm = 8) {
@@ -171,11 +180,13 @@ test('kasaiEstimate responds to absolute sigmaVMps from transverse geometric bro
   );
 });
 
-test('kasaiEstimate 3-basis Legendre filter rejects slow myocardial clutter at WF=6 cm/s while passing wall flash at WF=2 cm/s and valve snaps', () => {
+test('kasaiEstimate 3-basis Legendre filter rejects slow myocardial clutter at the default WF while passing wall flash at a low WF and valve snaps', () => {
   const nL = 10;
   const nS = 10;
   const n = nL * nS;
   const scale = 0.68;
+  // the default cutoff, 20 cm/s at 0.68 m/s: the same filter as the uncalibrated "6 cm/s" these checks were written for
+  const wfDefault = DEFAULT_COLOR.wallFilterMps;
   const clutterCls = new Float32Array(n).fill(0.5);
   const bloodCls = new Float32Array(n).fill(1.0);
 
@@ -200,15 +211,15 @@ test('kasaiEstimate 3-basis Legendre filter rejects slow myocardial clutter at W
     );
   };
 
-  // Stationary myocardium (0 cm/s), cutoff-speed wall (6 cm/s), and peak systolic wall (8 cm/s) at default WF=6 cm/s stay below COLOR_THRESHOLD (0.25)
-  const pStatic = runClutter(0.0, 0.06);
-  const pWall6Wf6 = runClutter(0.06, 0.06);
-  const pWall8Wf6 = runClutter(0.08, 0.06);
+  // Stationary myocardium (0 cm/s), slow wall (6 cm/s), and peak systolic wall (8 cm/s) at the default WF stay below COLOR_THRESHOLD (0.25)
+  const pStatic = runClutter(0.0, wfDefault);
+  const pWall6Wf6 = runClutter(0.06, wfDefault);
+  const pWall8Wf6 = runClutter(0.08, wfDefault);
   assert.ok(pStatic < 0.05, `stationary tissue clutter should stay suppressed (< 0.05), got ${pStatic.toFixed(4)}`);
-  assert.ok(pWall6Wf6 < 0.1, `6 cm/s wall motion at WF=6 cm/s should be strongly rejected (< 0.10), got ${pWall6Wf6.toFixed(4)}`);
+  assert.ok(pWall6Wf6 < 0.1, `6 cm/s wall motion at the default WF should be strongly rejected (< 0.10), got ${pWall6Wf6.toFixed(4)}`);
   assert.ok(
     pWall8Wf6 < 0.22,
-    `8 cm/s wall motion at WF=6 cm/s should stay below COLOR_THRESHOLD (< 0.22), got ${pWall8Wf6.toFixed(4)}`,
+    `8 cm/s wall motion at the default WF should stay below COLOR_THRESHOLD (< 0.22), got ${pWall8Wf6.toFixed(4)}`,
   );
 
   // Lowering wall filter to 2 cm/s lets 6 cm/s moving myocardium break through strongly
@@ -218,11 +229,11 @@ test('kasaiEstimate 3-basis Legendre filter rejects slow myocardial clutter at W
     `6 cm/s wall motion at WF=2 cm/s should produce strong clutter flash (> 1.0), got ${pWall6Wf2.toFixed(4)}`,
   );
 
-  // Fast valve leaflet snap (20 cm/s) breaks through even at default WF=6 cm/s
-  const pSnap20Wf6 = runClutter(0.2, 0.06);
+  // Fast valve leaflet snap (20 cm/s) breaks through even at the default WF
+  const pSnap20Wf6 = runClutter(0.2, wfDefault);
   assert.ok(
     pSnap20Wf6 > 1.5,
-    `20 cm/s valve snap at WF=6 cm/s should break through (> 1.5), got ${pSnap20Wf6.toFixed(4)}`,
+    `20 cm/s valve snap at the default WF should break through (> 1.5), got ${pSnap20Wf6.toFixed(4)}`,
   );
 
   // Laminar blood at 0.30 m/s stays accurate under the 3-basis Legendre filter
@@ -236,7 +247,7 @@ test('kasaiEstimate 3-basis Legendre filter rejects slow myocardial clutter at W
     nL,
     nS,
     scale,
-    0.06,
+    wfDefault,
     { realization: 4, seed: 314 },
     bloodCls,
   );
@@ -321,4 +332,124 @@ test('kasaiEstimate isolates 3x3 resolution-cell averaging strictly by Doppler c
     maxDiff < 1e-5,
     `adjacent tissue clutter must not bias blood 3x3 resolution-cell velocity, maxDiff=${maxDiff}`,
   );
+});
+
+/** Power a unit tone at `cutFrac`·Nyquist keeps through the packet regression with these shares (projections, not formulas). */
+function toneThroughFilter(cutFrac: number, shares: { mean: number; trend: number; quad: number }): number {
+  const N = COLOR_PACKET;
+  const w = Math.PI * cutFrac;
+  const xr = Array.from({ length: N }, (_, p) => Math.cos(w * p));
+  const xi = Array.from({ length: N }, (_, p) => Math.sin(w * p));
+  const bases: Array<[ArrayLike<number>, number]> = [
+    [Array.from({ length: N }, () => 1 / Math.sqrt(N)), shares.mean],
+    [KASAI_LIN_BASIS, shares.trend],
+    [KASAI_QUAD_BASIS, shares.quad],
+  ];
+  for (const [b, s] of bases) {
+    let cr = 0;
+    let ci = 0;
+    for (let p = 0; p < N; p++) {
+      cr += xr[p]! * b[p]!;
+      ci += xi[p]! * b[p]!;
+    }
+    for (let p = 0; p < N; p++) {
+      xr[p]! -= s * cr * b[p]!;
+      xi[p]! -= s * ci * b[p]!;
+    }
+  }
+  let pow = 0;
+  for (let p = 0; p < N; p++) pow += xr[p]! ** 2 + xi[p]! ** 2;
+  return pow / N;
+}
+
+test('wallFilterShares puts the regression filter at −3 dB exactly on the cutoff, which 8 pulses bound to 0.11–0.32 Nyquist', () => {
+  // the bounds: the mean removal and the mean + trend + quadratic removal, each at −3 dB on its own cutoff
+  assert.ok(Math.abs(toneThroughFilter(WF_MIN_NYQUIST, { mean: 1, trend: 0, quad: 0 }) - 0.5) < 1e-9);
+  assert.ok(Math.abs(toneThroughFilter(WF_MAX_NYQUIST, { mean: 1, trend: 1, quad: 1 }) - 0.5) < 1e-9);
+  assert.ok(Math.abs(WF_MIN_NYQUIST - 0.1115) < 5e-4, `mean-removal cutoff ${WF_MIN_NYQUIST}`);
+  assert.ok(Math.abs(WF_MAX_NYQUIST - 0.3209) < 5e-4, `quadratic-regression cutoff ${WF_MAX_NYQUIST}`);
+
+  for (const scale of [0.3, 0.68, 1.0]) {
+    const { min, max } = colorWallFilterRangeMps(scale);
+    for (let i = 0; i <= 10; i++) {
+      const wf = min + ((max - min) * i) / 10;
+      const shares = wallFilterShares(wf, scale);
+      const atCut = toneThroughFilter(wf / scale, shares);
+      assert.ok(
+        Math.abs(atCut - 0.5) < 1e-6,
+        `scale ${scale} WF ${wf.toFixed(4)}: tone at the cutoff keeps ${atCut.toFixed(6)} of its power, not one half`,
+      );
+      // a high-pass around the cutoff: less below it, more above it
+      assert.ok(toneThroughFilter((0.8 * wf) / scale, shares) < 0.5);
+      assert.ok(toneThroughFilter((1.25 * wf) / scale, shares) > 0.5);
+    }
+  }
+
+  // what the packet cannot do is bounded, not faked: 0 is off, below 0.11 Nyquist the mean removal, above 0.32 all three
+  assert.equal(colorWallFilterCutoffMps(0, 0.68), 0);
+  assert.deepEqual(wallFilterShares(0, 0.68), { mean: 0, trend: 0, quad: 0 });
+  assert.ok(Math.abs(colorWallFilterCutoffMps(0.02, 0.68) - WF_MIN_NYQUIST * 0.68) < 1e-12);
+  assert.deepEqual(wallFilterShares(0.02, 0.68), { mean: 1, trend: 0, quad: 0 });
+  assert.ok(Math.abs(colorWallFilterCutoffMps(0.3, 0.4) - WF_MAX_NYQUIST * 0.4) < 1e-12);
+  assert.deepEqual(wallFilterShares(0.3, 0.4), { mean: 1, trend: 1, quad: 1 });
+  assert.equal(colorWallFilterCutoffMps(DEFAULT_COLOR.wallFilterMps, DEFAULT_COLOR.scaleMps), 0.2);
+});
+
+/** Kasai power and mean velocity of uniform laminar flow at `v` over a 16×16 box and four updates. */
+function laminarKasai(v: number, scale: number, wf: number): { power: number; velocity: number } {
+  const nL = 16;
+  const nS = 16;
+  const n = nL * nS;
+  const { cellV, cellSigmaV, cellRel } = fillGrid(n, v, 0.02, 1.0);
+  let power = 0;
+  let velocity = 0;
+  for (let r = 0; r < 4; r++) {
+    const res = kasaiEstimate(cellV, cellSigmaV, cellRel, 10, 30, nL, nS, scale, wf, {
+      realization: r + 1,
+      seed: 2718,
+    });
+    power += meanOf(res.power);
+    velocity += meanOf(res.velocity);
+  }
+  return { power: power / 4, velocity: velocity / 4 };
+}
+
+// cutoffs inside what the packet allows at each scale, low and high in that range, and the default
+const WF_CASES: Array<[number, number]> = [
+  [0.3, 0.05],
+  [0.4, 0.06],
+  [0.68, 0.1],
+  [0.68, DEFAULT_COLOR.wallFilterMps],
+  [1.0, 0.1],
+  [1.0, 0.2],
+];
+
+test('Kasai colour power is −3 dB ± 2 dB at the wall filter cutoff it is set to, at several scales', () => {
+  // it was −8.6 dB at the default "6 cm/s", whose −3 dB fell at 0.19–0.20 m/s
+  for (const [scale, wf] of WF_CASES) {
+    const dB = (v: number) =>
+      10 * Math.log10(laminarKasai(v, scale, wf).power / laminarKasai(v, scale, 0).power);
+    const atCut = dB(wf);
+    assert.ok(
+      atCut > -5 && atCut < -1,
+      `scale ${scale} m/s, WF ${wf} m/s: power at v = WF is ${atCut.toFixed(1)} dB, expected −3 ± 2 dB`,
+    );
+    assert.ok(dB(0.5 * wf) < -4.5, `scale ${scale} WF ${wf}: half the cutoff must be stopped`);
+    assert.ok(dB(2 * wf) > -1.5, `scale ${scale} WF ${wf}: twice the cutoff must pass`);
+  }
+});
+
+test('Kasai colour reads laminar flow within 20 % from twice the wall filter cutoff up, at several scales', () => {
+  // it read 0.20 m/s as 0.335 at WF 0.10 and 0.68 m/s, and 0.12 as 0.194 at WF 0.06 and 0.40 m/s
+  for (const [scale, wf] of WF_CASES) {
+    for (const m of [2, 3]) {
+      const v = m * wf;
+      if (v > 0.9 * scale) continue;
+      const read = laminarKasai(v, scale, wf).velocity;
+      assert.ok(
+        Math.abs(read - v) < 0.2 * v,
+        `scale ${scale} m/s, WF ${wf} m/s: ${v.toFixed(3)} m/s read as ${read.toFixed(3)} (${(((read - v) / v) * 100).toFixed(0)} %)`,
+      );
+    }
+  }
 });

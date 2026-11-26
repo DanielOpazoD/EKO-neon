@@ -46,22 +46,22 @@ check(img.idsAgreement >= 0.995, `idsAgreement ${img.idsAgreement} < 0.995`);
 check(Math.max(...img.displayMaxDiff) <= 2, `displayMaxDiff ${img.displayMaxDiff} > 2`);
 check(img.presentFracOver1 <= 0.005, `presentFracOver1 ${img.presentFracOver1} > 0.005`);
 
-// 3. Deferred Color Doppler (PLAX normal: deterministic + Kasai 3-basis Legendre WF=6 vs WF=2)
+// 3. Deferred Color Doppler (PLAX normal: deterministic + Kasai 3-basis Legendre, default wall filter vs the packet's lowest)
 check(!dop.error, `compareDeferredDoppler(plax) error: ${dop.error}`);
 check(dop.detValidAgreement >= 0.99, `plax detValidAgreement ${dop.detValidAgreement} < 0.99`);
 check(dop.detVelMaxDiff <= 0.015, `plax detVelMaxDiff ${dop.detVelMaxDiff} > 0.015`);
 check(dop.detVarMaxDiff <= 0.02, `plax detVarMaxDiff ${dop.detVarMaxDiff} > 0.02`);
 check(dop.detPresentFracOver1 <= 0.005, `plax detPresentFracOver1 ${dop.detPresentFracOver1} > 0.005`);
-check(Math.abs(dop.kasaiWf6.cpuBloodFill - dop.kasaiWf6.gpuBloodFill) <= 0.08, `plax wf6 blood fill drift cpu=${dop.kasaiWf6.cpuBloodFill.toFixed(3)} gpu=${dop.kasaiWf6.gpuBloodFill.toFixed(3)}`);
-check(dop.kasaiWf6.gpuClutterFill <= 0.06, `plax wf6 GPU clutter not suppressed: ${dop.kasaiWf6.gpuClutterFill.toFixed(3)}`);
-check(dop.kasaiWf2.gpuClutterFill >= dop.kasaiWf6.gpuClutterFill, `plax wf2 GPU clutter (${dop.kasaiWf2.gpuClutterFill.toFixed(3)}) < wf6 (${dop.kasaiWf6.gpuClutterFill.toFixed(3)})`);
+check(Math.abs(dop.kasaiWf.cpuBloodFill - dop.kasaiWf.gpuBloodFill) <= 0.08, `plax default-WF blood fill drift cpu=${dop.kasaiWf.cpuBloodFill.toFixed(3)} gpu=${dop.kasaiWf.gpuBloodFill.toFixed(3)}`);
+check(dop.kasaiWf.gpuClutterFill <= 0.06, `plax default-WF GPU clutter not suppressed: ${dop.kasaiWf.gpuClutterFill.toFixed(3)}`);
+check(dop.kasaiMinWf.gpuClutterFill >= dop.kasaiWf.gpuClutterFill, `plax min-WF GPU clutter (${dop.kasaiMinWf.gpuClutterFill.toFixed(3)}) < default-WF (${dop.kasaiWf.gpuClutterFill.toFixed(3)})`);
 
 // 4. Deferred Color Doppler (A4C severe MR with overgain +6 dB & baseline shift +0.20 m/s)
 check(!dopMr.error, `compareDeferredDoppler(a4c-mr) error: ${dopMr.error}`);
 check(dopMr.detValidAgreement >= 0.99, `a4c-mr detValidAgreement ${dopMr.detValidAgreement} < 0.99`);
 check(dopMr.detVelMaxDiff <= 0.02, `a4c-mr detVelMaxDiff ${dopMr.detVelMaxDiff} > 0.02`);
 check(dopMr.detPresentFracOver1 <= 0.005, `a4c-mr detPresentFracOver1 ${dopMr.detPresentFracOver1} > 0.005`);
-check(Math.abs(dopMr.kasaiWf6.cpuBloodFill - dopMr.kasaiWf6.gpuBloodFill) <= 0.08, `a4c-mr wf6 blood fill drift cpu=${dopMr.kasaiWf6.cpuBloodFill.toFixed(3)} gpu=${dopMr.kasaiWf6.gpuBloodFill.toFixed(3)}`);
+check(Math.abs(dopMr.kasaiWf.cpuBloodFill - dopMr.kasaiWf.gpuBloodFill) <= 0.08, `a4c-mr default-WF blood fill drift cpu=${dopMr.kasaiWf.cpuBloodFill.toFixed(3)} gpu=${dopMr.kasaiWf.gpuBloodFill.toFixed(3)}`);
 
 // 5. Zero browser console errors
 check(consoleErr.includes("Errors: 0"), `Browser console reported errors:\n${consoleErr}`);
