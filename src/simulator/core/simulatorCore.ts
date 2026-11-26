@@ -121,6 +121,16 @@ export class SimulatorCore {
   private artifacts: ArtifactSettings = NO_ARTIFACTS;
   private caseArtifacts: ArtifactLevels = this.artifactLevels;
   private input: SimInput;
+  /** Counts `setInput` calls: the client sends an input only when one of its fields changed. */
+  private inputVersion = 0;
+  /**
+   * What the frozen frame on screen was composed from (selected frame, input, strip history), '' when none is. While it
+   * holds, a frozen tick has nothing new to show: every 80 ms tick composed and transferred the whole frame again while
+   * the learner measured on it, 12.5 times a second (5 ms and 3.4 MB a time at 1024×820 in 2D; under 1 µs now).
+   */
+  private frozenShown = '';
+  /** Frames acquired while the main thread still had two to draw, and so not composed (`stats.dropped`). */
+  private framesNotPresented = 0;
   private acquisitionModality: SimInput['modality'];
   private displayedFrame: CineFrame | undefined;
   private frame: PolarFrame | null = null;
@@ -360,6 +370,7 @@ export class SimulatorCore {
       this.acquisitionModality = input.modality;
     }
     this.input = constrainAcquisition(input);
+    this.inputVersion++;
   }
 
   recycle(buffer: ArrayBuffer): void {
@@ -379,13 +390,22 @@ export class SimulatorCore {
     return this.disposed;
   }
 
-  /** Advance simulation by dt seconds. Returns an output when a new composite frame is ready. */
-  step(dtS: number): SimOutput | null {
+  /** Frames acquired but not composed because the main thread had not drawn the ones in flight. */
+  get droppedFrames(): number {
+    return this.framesNotPresented;
+  }
+
+  /**
+   * Advance simulation by dt seconds. Returns an output when a new composite frame is ready. `present` false: the main
+   * thread has yet to draw the frames in flight, so the acquisition goes on (clock, strips, cine) but nothing is composed
+   * — the worker composed such frames, bitmap and all, and then dropped them.
+   */
+  step(dtS: number, present = true): SimOutput | null {
     if (this.disposed) return null;
     const tStepStart = performance.now();
     const inp = this.input;
     const dt = Math.min(0.1, Math.max(0, dtS));
-    if (inp.frozen) return this.frozenOutput();
+    if (inp.frozen) return present ? this.frozenOutput() : null;
     this.strips.resetStepTiming();
     this.lastColorStepMs = 0;
     const tier = resolveQualityTier(
@@ -493,6 +513,10 @@ export class SimulatorCore {
       if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
     }
     if (!produced && !isStrip && !dopplerReshaded) return null;
+    if (!present) {
+      this.framesNotPresented++;
+      return null;
+    }
     const t1 = performance.now();
     const acquired = this.cine.newest;
     const out = this.composite(acquired?.beam ?? beam, acquired?.spec ?? spec, false, acquired);
@@ -846,6 +870,10 @@ export class SimulatorCore {
   private frozenOutput(): SimOutput | null {
     const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
+    // frozen, neither the clock, the ECG nor the sweep moves: the composite changes only with the frame selected, the
+    // input (cine offset, presentation, display size, maps asked for…) or the strip history (an asset load resets it)
+    const key = `${cf.frameId}|${this.inputVersion}|${this.strips.historyId}`;
+    if (key === this.frozenShown) return null;
     // a frame acquired on the GPU deferred path keeps no colour field (zero readback): form it on its first frozen display
     if (cf.acquisition.modality === 'color' && !cf.colorVel && cf.colorTissue && cf.colorTransCode) {
       // the field the GPU was presenting belongs to the newest frame, and nothing re-shades it while frozen: freeze that
@@ -857,7 +885,9 @@ export class SimulatorCore {
         this.colorDriver.readbackDeferredGpu(cf, this.gpu);
       if (!asSeen) this.colorDriver.reconstructCineColor(cf, this.caseDef.seed);
     }
-    return this.composite(cf.beam, cf.spec, true, cf);
+    const out = this.composite(cf.beam, cf.spec, true, cf);
+    this.frozenShown = out ? key : '';
+    return out;
   }
 
   private composite(

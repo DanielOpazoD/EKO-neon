@@ -18,7 +18,6 @@ let input: SimInput | null = null;
 let lastTick = 0;
 let outstanding = 0;
 let lastPostMs = 0;
-let dropped = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 /** Absolute time (ms) the next tick is due, and how late the current one fired (diagnostics). */
 let nextDue = 0;
@@ -39,7 +38,7 @@ export const STRIP_TICK_HZ = 30;
 /**
  * Interval to the next tick (ms): the cadence the core forms frames at, within 12–50 ms, and at least STRIP_TICK_HZ with a
  * strip. In the spectral modes the 2D keeps a quarter of its frame rate (decision 212), and pacing at that cadence moved
- * the sweep and the ECG in 50 ms jumps. Frozen, 80 ms.
+ * the sweep and the ECG in 50 ms jumps. Frozen, 80 ms: such a tick sends a frame only if the one shown changed.
  */
 export function tickIntervalMs(
   cadenceHz: number,
@@ -77,25 +76,22 @@ function tick(): void {
   lastTick = now;
   try {
     const t0 = performance.now();
-    const out = core.step(dt);
+    // two frames still to draw: the main thread is behind, so the core simulates on without composing a frame to drop
+    const out = core.step(dt, outstanding < 2);
     const stepMs = performance.now() - t0;
     tickFailures = 0;
-    if (out && outstanding < 2) {
+    if (out) {
       out.stats = {
         ...out.stats,
         stepMs: Number(stepMs.toFixed(1)),
         postMs: Number(lastPostMs.toFixed(2)),
         lateMs: Number(lateMs.toFixed(1)),
-        dropped,
+        dropped: core.droppedFrames,
       };
       outstanding++;
       const tp = performance.now();
       post({ type: 'frame', output: out }, frameTransferList(out));
       lastPostMs = performance.now() - tp;
-    } else if (out) {
-      out.bitmap?.close(); // main thread is behind: drop the frame, keep simulating
-      core.recycle(out.rgba);
-      dropped++;
     }
     // pace at the cadence the core forms frames at (at least STRIP_TICK_HZ with a strip) against an absolute schedule: a
     // timer that fires late shortens the next wait instead of lowering the frame rate (worker timers ran ~5 ms late under
