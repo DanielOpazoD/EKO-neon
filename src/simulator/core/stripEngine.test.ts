@@ -11,10 +11,17 @@ import {
   mmodePulsesPerColumn,
 } from './mmodeStrip';
 import { SimulatorCore } from './simulatorCore';
+import type { StripCtx } from './stripEngine';
 import { loadCaseById } from '@/cases';
-import { DEFAULT_ACQUISITION } from '@/simulator/renderer/types';
+import { Tissue } from '@/simulator/anatomy/tissue';
+import { DEFAULT_ACQUISITION, type Scene } from '@/simulator/renderer/types';
 import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
-import { DEFAULT_SPECTRAL, SPECTRAL_BINS } from '@/simulator/doppler/spectral/spectrum';
+import {
+  DEFAULT_SPECTRAL,
+  envelopeThreshold,
+  SPECTRAL_BINS,
+  spectralDefaultsFor,
+} from '@/simulator/doppler/spectral/spectrum';
 import { aliasVelocity } from '@/clinical/formulas';
 import { constrainAcquisition } from './acquisitionInput';
 import {
@@ -403,6 +410,136 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
       );
     } finally {
       core.dispose();
+    }
+  });
+});
+
+describe('Spectral strips in free breathing', () => {
+  const breathing = {
+    position: 'left-lateral',
+    respiration: 'free-breathing',
+    headElevationDeg: 0,
+  } as const;
+
+  it('acquires each column in the thorax the 2D images at that instant', () => {
+    const caseDef = loadCaseById('normal-excellent-window');
+    const inp = baseInput({
+      modality: 'pw',
+      patient: breathing,
+      gateDepthCm: 9.42,
+      cursorThetaRad: (3.7 * Math.PI) / 180,
+    });
+    const core = new SimulatorCore(caseDef, inp);
+    try {
+      const probe = controlThroughCrux(
+        getViewTarget('a4c'),
+        core.models.heart,
+        core.models.thorax,
+        null,
+      );
+      core.setInput({ ...inp, probe });
+      const internals = core as unknown as {
+        stripCtx(): StripCtx;
+        scene(phase: number): Scene;
+        timeS: number;
+      };
+      let lo = Infinity;
+      let hi = -Infinity;
+      // 0.9 s into the first inspiration (1.6 s long): the lung border slides 0.69 cm meanwhile
+      for (let i = 0; i < 9; i++) {
+        core.step(0.1);
+        const t = internals.timeS;
+        const spectral = internals.stripCtx().moment(t).scene.thorax;
+        const image = internals.scene(core.currentPhase).thorax;
+        assert.deepEqual(
+          [spectral.lungShiftCm, spectral.diaphragmRiseCm],
+          [image.lungShiftCm, image.diaphragmRiseCm],
+          `lung border and diaphragm of the spectral column and of the 2D at ${t.toFixed(3)} s`,
+        );
+        lo = Math.min(lo, spectral.lungShiftCm);
+        hi = Math.max(hi, spectral.lungShiftCm);
+      }
+      assert.ok(hi - lo > 0.5, `the lung border should slide with the breath, moved ${(hi - lo).toFixed(2)} cm`);
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it('loses the window to the lung in inspiration in the spectrum as in the 2D (PW and CW)', () => {
+    const caseDef = loadCaseById('normal-excellent-window');
+    const gateCm = 7;
+    for (const modality of ['pw', 'cw'] as const) {
+      const inp = baseInput({
+        modality,
+        patient: breathing,
+        spectral: spectralDefaultsFor(modality),
+        gateDepthCm: gateCm,
+      });
+      const core = new SimulatorCore(caseDef, inp);
+      try {
+        // The apical window slid 1.5 cm laterally: its ray clears the lingula in expiration and meets it under the chest
+        // wall from about half-way into inspiration (0.85 s into the breath), in the 2D along the cursor as in Doppler.
+        const a4c = controlThroughCrux(
+          getViewTarget('a4c'),
+          core.models.heart,
+          core.models.thorax,
+          null,
+        );
+        core.setInput({ ...inp, probe: { ...a4c, u: a4c.u + 1.5 } });
+        // whether each 2D frame shows lung at the gate on both lines either side of the cursor (θ = 0); null if they differ
+        const frames: Array<{ t: number; lung: boolean | null }> = [];
+        let frameId = -1;
+        for (let i = 0; i < 19; i++) {
+          const out = core.step(0.1);
+          const f = core.lastFrame;
+          if (!out || !f || out.frameId === frameId) continue;
+          frameId = out.frameId;
+          const { lines, samples, depthCm } = f.spec;
+          const si = Math.floor((gateCm / depthCm) * samples);
+          const [a, b] = [Math.floor((lines - 1) / 2), Math.ceil((lines - 1) / 2)].map(
+            (li) => f.tissue[li * samples + si] === Tissue.Lung,
+          );
+          frames.push({ t: out.timeS, lung: a === b ? a! : null });
+        }
+        const strip = core.spectralStrip;
+        assert.ok(strip.data && strip.head < strip.cols, 'the 1.9 s strip should not have wrapped');
+        // a column takes the 2D's verdict only inside a stretch where the two frames on each side of it agree
+        const verdictAt = (t: number): boolean | null => {
+          const k = frames.findIndex((f) => f.t > t);
+          if (k < 2 || k + 2 > frames.length) return null;
+          const near = frames.slice(k - 2, k + 2).map((f) => f.lung);
+          return near.every((s) => s === near[0]) ? near[0]! : null;
+        };
+        // a column has a spectrum when a bin clears the envelope threshold, 1.5× the brightest bin the noise alone draws
+        const noiseFloor = envelopeThreshold(0, inp.spectral);
+        const behindLung: boolean[] = [];
+        const open: boolean[] = [];
+        for (let c = 0; c < strip.head; c++) {
+          let peak = 0;
+          for (let k = 0; k < SPECTRAL_BINS; k++)
+            peak = Math.max(peak, strip.data[c * SPECTRAL_BINS + k]!);
+          const lung = verdictAt(strip.sampleTimeS[c]!);
+          if (lung === true) behindLung.push(peak > noiseFloor);
+          else if (lung === false) open.push(peak > noiseFloor);
+        }
+        assert.ok(
+          behindLung.length > 30 && open.length > 30,
+          `${modality}: the 2D should keep the window early in the breath and lose it later (${open.length} open, ${behindLung.length} behind lung)`,
+        );
+        const heard = open.filter(Boolean).length;
+        assert.ok(
+          heard > 0.2 * open.length,
+          `${modality}: only ${heard} of ${open.length} columns had a spectrum through the open window`,
+        );
+        const leaked = behindLung.filter(Boolean).length;
+        assert.equal(
+          leaked,
+          0,
+          `${modality}: ${leaked} of ${behindLung.length} columns kept a spectrum while the 2D showed lung over the gate`,
+        );
+      } finally {
+        core.dispose();
+      }
     }
   });
 });

@@ -285,18 +285,16 @@ export class SimulatorCore {
           );
           this.poseCacheBins[phaseBin] = heartPose;
         }
+        // The column's own instant, as the 2D would see it then. With the beat's static thorax the spectrum kept the
+        // end-expiratory window all breath long (PW at 1.62 s: lung border −1.60 cm and diaphragm 0 against the 2D's
+        // −0.45 and −0.50), so a lung that shadowed the 2D and M-mode in inspiration left the spectrum intact.
         return {
           phase: beat.phase,
           beatIndex: beat.beatIndex,
           tablesVersion: bc.tablesVersion,
           tables: bc.tables,
           flow: bc.flow,
-          scene: {
-            heart: bc.heart,
-            thorax: bc.thorax,
-            heartPose,
-            physics: this.physics(),
-          },
+          scene: this.sceneAt(bc.heart, heartPose, bc.thorax, timeS),
         };
       },
       scene: (ph) => this.scene(ph),
@@ -530,28 +528,49 @@ export class SimulatorCore {
     });
   }
 
-  private thoraxAtTime(timeS = this.timeS): ThoraxModel {
-    if (this.input.patient.respiration !== 'free-breathing') return this.thorax;
+  /**
+   * The thorax at `timeS`: in free breathing the lung border slides medially by up to 1.15 cm and the diaphragm descends
+   * 0.5 cm with the depth of inspiration; otherwise `base`, the patient's static thorax. `base` is the thorax of the beat
+   * the instant belongs to, since the strips acquire up to a step back.
+   */
+  private thoraxAtTime(timeS: number, base = this.thorax): ThoraxModel {
+    if (this.input.patient.respiration !== 'free-breathing') return base;
     const d = respiratoryDepth(timeS);
     return {
-      ...this.thorax,
-      lungShiftCm: this.thorax.lungShiftCm + 1.15 * d,
-      diaphragmRiseCm: this.thorax.diaphragmRiseCm - 0.5 * d,
+      ...base,
+      lungShiftCm: base.lungShiftCm + 1.15 * d,
+      diaphragmRiseCm: base.diaphragmRiseCm - 0.5 * d,
     };
   }
 
+  /** The scene of the frames now: the current beat's heart at `phase`. */
   private scene(phase: number): Scene {
     const state = cycleStateAt(this.tables, phase, this.flow.flowPeaks);
-    const heartPose = computeHeartPose(this.heart, state);
+    return this.sceneAt(this.heart, computeHeartPose(this.heart, state), this.thorax, this.timeS);
+  }
+
+  /**
+   * The scene a beat's heart in `heartPose` is acquired in at `timeS`: the one recipe of the 2D, colour and M-mode frames
+   * (`scene`) and of every spectral column (`moment`), so the thorax breathes and the experimental anatomy and image
+   * formation apply alike in all of them.
+   */
+  private sceneAt(
+    heart: HeartModel,
+    heartPose: HeartPose,
+    thorax: ThoraxModel,
+    timeS: number,
+  ): Scene {
     const rodero = this.experimental.roderoHeart(this.input.anatomy, this.heart, this.tables);
     const cole = this.experimental.coleImage(this.input.imageFormation);
     return {
-      heart: this.heart,
+      heart,
       heartPose,
-      thorax: this.thoraxAtTime(),
+      thorax: this.thoraxAtTime(timeS, thorax),
       physics: this.physics(),
       ...(cole ? { imageFormation: cole.COLE_FORMATION, scatterGpu: cole.COLE_GPU } : {}),
-      ...(rodero
+      // The volume heart is bound to the current heart: a column of the beat before a change of patient (at most a step
+      // back) samples that beat's analytic heart, as the frames do while the volume loads, instead of rebinding it.
+      ...(rodero && rodero.heart === heart
         ? {
             heartClassifier: rodero.vh.classifier({
               apparatus: heartPose,

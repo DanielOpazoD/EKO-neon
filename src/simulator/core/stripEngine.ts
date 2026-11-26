@@ -54,7 +54,7 @@ import {
 import type { GateInfo, SimInput, SimRequest, SimResponse, StripInfo } from './protocol';
 import { autoTraceSpectralEnvelope, STRIP_MM_WIDTH } from './strip/autoTrace';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
-import { relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
+import { PATH_STEP_CM, relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
 import {
   buildSpectralRowMap,
   drawSweepMarker,
@@ -65,6 +65,15 @@ import {
 } from './strip/stripPainter';
 import { StripTimeGrid } from './stripTimeGrid';
 import { resolveFrozenColorSettings, stripAcquisitionKey } from './acquisitionKeys';
+
+/**
+ * How finely the per-bin propagation caches tell breathing thoraxes apart (cm): half the step the central ray is marched
+ * in, so a cached ray misplaces the lung border or the diaphragm by less than the march itself resolves. Keyed to
+ * 0.01 mm, the breathing lung changed the key on 90% of the columns (320 columns/s) and the caches served 6% of the PW
+ * rays and 4% of the CW spectra; at half a step 53% and 31%, as with the static thorax (56% and 32%: free breathing
+ * renews the beat tables, and with them the caches, every beat).
+ */
+const BREATHING_KEY_CM = PATH_STEP_CM / 2;
 
 /** Core services the strip engine reads per call (the core rebuilds it; mutable state lives on the engine). */
 export interface StripCtx {
@@ -391,8 +400,8 @@ export class StripEngine {
         beam.contact.toFixed(4),
         sc.physics.frequencyMHz,
         (sc.physics.windowAttenuation ?? 0).toFixed(4),
-        sc.thorax.lungShiftCm.toFixed(3),
-        sc.thorax.diaphragmRiseCm.toFixed(3),
+        Math.round(sc.thorax.lungShiftCm / BREATHING_KEY_CM),
+        Math.round(sc.thorax.diaphragmRiseCm / BREATHING_KEY_CM),
         ctx.modelVersion,
         moment.tablesVersion,
       ].join('|');
