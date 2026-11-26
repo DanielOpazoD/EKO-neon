@@ -331,10 +331,12 @@ float sdTorusZ(vec3 p, vec3 c, float R, float r) {
   float dz = p.z - c.z;
   return sqrt(q * q + dz * dz) - r;
 }
+// src/simulator/anatomy/sdf.ts: smin
 float smin(float a, float b, float k) {
   float h = max(k - abs(a - b), 0.0) / k;
   return min(a, b) - h * h * k * 0.25;
 }
+// src/simulator/anatomy/sdf.ts: smax
 float smax(float a, float b, float k) { return -smin(-a, -b, k); }
 ${GLSL_GENERATED}
 `;
