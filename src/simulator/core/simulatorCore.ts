@@ -464,9 +464,11 @@ export class SimulatorCore {
         {
           frame: this.frame,
           scene: sceneUse,
-          heart: this.heart,
-          flow: this.flow,
-          tables: this.tables,
+          // the acquired frame's own beat: a step that crosses a beat boundary without forming a frame has already
+          // swapped the live tables and flow for the next beat's
+          heart: sceneUse.heart,
+          flow: acquiredPrev?.flow ?? this.flow,
+          tables: acquiredPrev?.tables ?? this.tables,
           beam: beamUse,
           spec: specUse,
           phase: phaseUse,
@@ -719,6 +721,8 @@ export class SimulatorCore {
         sessionEpoch: this.sessionEpoch,
       },
       scene,
+      tables: this.tables,
+      flow: this.flow,
       gate: isStripModality(inp.modality)
         ? this.strips.gateInfo(beam, spec, phase, this.frame.structure, this.stripCtx())
         : null,
@@ -815,8 +819,16 @@ export class SimulatorCore {
   private frozenOutput(): SimOutput | null {
     const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
+    // a frame acquired on the GPU deferred path keeps no colour field (zero readback): form it on its first frozen display
     if (cf.acquisition.modality === 'color' && !cf.colorVel && cf.colorTissue && cf.colorTransCode) {
-      this.colorDriver.reconstructCineColor(cf, this.heart, this.flow, this.tables, this.caseDef.seed);
+      // the field the GPU was presenting belongs to the newest frame, and nothing re-shades it while frozen: freeze that
+      // frame as it was seen; re-estimate any other from its own beat
+      const asSeen =
+        cf === this.cine.newest &&
+        this.dopplerOnGpu &&
+        this.gpu !== null &&
+        this.colorDriver.readbackDeferredGpu(cf, this.gpu);
+      if (!asSeen) this.colorDriver.reconstructCineColor(cf, this.caseDef.seed);
     }
     return this.composite(cf.beam, cf.spec, true, cf);
   }

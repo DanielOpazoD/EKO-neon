@@ -53,7 +53,8 @@ export interface ColorUpdateContext {
 /**
  * Owns the double-buffered Color Doppler polar field (CPU path) and the sparse ROI-box raw flow
  * sampler for the independent GPU deferred Doppler shading pipeline, including packet cadence
- * (every other B-mode frame), acquisition invalidation keys, and lazy frozen-cine reconstruction.
+ * (every other B-mode frame), acquisition invalidation keys, the freeze of the GPU field on screen, and lazy
+ * frozen-cine reconstruction from each frame's own beat.
  */
 export class ColorFieldDriver {
   /** The two colour field buffers: each update writes the one that does not hold `prev` (decision 56). */
@@ -324,18 +325,43 @@ export class ColorFieldDriver {
   }
 
   /**
-   * Lazily reconstruct CPU Color Doppler buffers for a frozen cine frame that was captured on the
-   * zero-readback GPU deferred path, caching the result directly on the CineFrame.
+   * Freeze the newest GPU-deferred frame as it was seen: read back the shaded ROI box the present pass was blending over
+   * it (one box-only readPixels per freeze, off the live path), instead of re-estimating it on the CPU with another noise
+   * realization, no persistence and the CPU estimator. Re-estimated, the samples that gain or lose colour amount to two
+   * thirds of the coloured samples shown (af-diastolic A4C, measured on the CPU path, where the cine keeps the field shown).
+   * False, leaving the frame untouched, when the resident field was shaded for another acquisition than the frame's (a
+   * settings re-shade after it) or cannot be read.
    */
-  reconstructCineColor(
-    cf: CineFrame,
-    heart: HeartModel,
-    flow: FlowFieldParams,
-    tables: BeatTables,
-    seed: number,
-  ): void {
+  readbackDeferredGpu(cf: CineFrame, gpu: Webgl2Renderer): boolean {
+    const a = cf.acquisition;
+    const c = a.color;
+    const physics = cf.scene.physics;
+    const shadedForFrame =
+      this.gpuSettingsKey === ColorFieldDriver.settingsKey(c) &&
+      this.gpuGeometryKey ===
+        colorGeometryKey(a.probe, c, physics.frequencyMHz, physics.harmonics, a.modelVersion, cf.spec);
+    if (!shadedForFrame) return false;
+    const n = cf.spec.lines * cf.spec.samples;
+    const vel = new Float32Array(n);
+    const variance = new Float32Array(n);
+    const power = new Float32Array(n);
+    if (!gpu.readbackDopplerBox(cf.spec, c.scaleMps, c.baselineShiftMps, vel, variance, power))
+      return false;
+    cf.colorVel = vel;
+    cf.colorVar = variance;
+    cf.colorPower = power;
+    return true;
+  }
+
+  /**
+   * Lazily reconstruct CPU Color Doppler buffers for a frozen cine frame that was captured on the
+   * zero-readback GPU deferred path, caching the result directly on the CineFrame. The flow is sampled from the frame's
+   * own beat (`cf.tables`, `cf.flow`, `cf.scene.heart`), never the live one.
+   */
+  reconstructCineColor(cf: CineFrame, seed: number): void {
     if (cf.colorVel || !cf.colorTissue || !cf.colorTransCode) return;
-    const { spec, beam, scene, phase } = cf;
+    const { spec, beam, scene, phase, flow, tables } = cf;
+    const heart = scene.heart;
     const n = spec.lines * spec.samples;
     if (this.cineTransScratch.length !== n) this.cineTransScratch = new Float32Array(n);
     const trans = this.cineTransScratch;

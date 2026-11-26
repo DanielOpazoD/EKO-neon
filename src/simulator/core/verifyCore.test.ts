@@ -347,6 +347,8 @@ describe('EchoTwin TTE core physiology and clinical cases', () => {
         colorTimeS: null,
       },
       scene: {} as CineFrame['scene'],
+      tables: {} as CineFrame['tables'],
+      flow: {} as CineFrame['flow'],
       gate: null,
       spectrumColumn: null,
       spectralRange: { vMin: -1.5, vMax: 1.5 },
