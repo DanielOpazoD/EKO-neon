@@ -1,4 +1,4 @@
-import { modePolicy } from '@/app/modePolicy';
+import { examClosed, modePolicy } from '@/app/modePolicy';
 import { useSimStore, type SimStore } from '@/app/store';
 import { MEASUREMENT_SPECS } from '@/simulator/measurements/protocol';
 import { modalityLabel } from '@/simulator/renderer/modality';
@@ -32,6 +32,8 @@ export function MeasureTab() {
       removeMeasurement: st.removeMeasurement,
       setActiveMeasurement: st.setActiveMeasurement,
       setActiveTool: st.setActiveTool,
+      // a finished exam keeps the measurements it was scored on (`examClosed`)
+      closed: examClosed(st),
     })),
   );
   const tip = useTip();
@@ -105,7 +107,12 @@ export function MeasureTab() {
       >
         <div className="tool-grid" role="group" aria-label="Herramienta de medición">
           {tools.map((t) => (
-            <button key={t.id} data-tip={t.title} onClick={() => s.setActiveTool(t.id)}>
+            <button
+              key={t.id}
+              data-tip={t.title}
+              onClick={() => s.setActiveTool(t.id)}
+              disabled={s.closed}
+            >
               {t.label}
             </button>
           ))}
@@ -121,7 +128,7 @@ function MeasureList({
   s,
   showView,
 }: {
-  s: Pick<SimStore, 'measurements' | 'removeMeasurement'>;
+  s: Pick<SimStore, 'measurements' | 'removeMeasurement'> & { closed: boolean };
   showView: boolean;
 }) {
   const primaryValue = (m: SimStore['measurements'][number]) => {
@@ -196,6 +203,7 @@ function MeasureList({
               className="icon-btn"
               aria-label="Eliminar medición"
               onClick={() => s.removeMeasurement(m.id)}
+              disabled={s.closed}
             >
               ×
             </button>

@@ -92,15 +92,18 @@ export const FINDINGS: Finding[] = [
     label: 'Disfunción diastólica',
     domain: 'rhythm-diastole',
   },
+  // the filling pressure is concluded with the algorithm of the case's rhythm (`assessDiastolic`: sinus or AF, ASE 2025),
+  // and the sheet is the same for every case: a label naming one algorithm («algoritmo FA») was the expected answer of
+  // three sinus-rhythm cases (HFrEF, severe AS, MVP), and would name the rhythm, itself a finding, if it followed the case
   {
     id: 'filling-pressure-elevated',
-    label: 'Presión de llenado izquierda elevada (algoritmo FA)',
+    label: 'Presión de llenado izquierda elevada',
     domain: 'rhythm-diastole',
     exclusive: 'filling-pressure',
   },
   {
     id: 'filling-pressure-indeterminate',
-    label: 'Presión de llenado izquierda indeterminada (algoritmo FA)',
+    label: 'Presión de llenado izquierda indeterminada',
     domain: 'rhythm-diastole',
     exclusive: 'filling-pressure',
   },

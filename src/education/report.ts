@@ -13,8 +13,8 @@ import {
   formatClinical,
   RIGHT_HEART_RULES,
 } from '@/clinical/reference-values';
-import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import { discProfileFromContour } from '@/simulator/measurements/simpson';
+import { truthFor } from './scoring/scoring';
 import { rvspFromTr, simpsonBiplaneVolume } from '@/clinical/formulas';
 
 /**
@@ -458,57 +458,28 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
   return out;
 }
 
+/**
+ * The model's value a measurement is compared with: that of its protocol measurement, the one its id says it measured,
+ * when the case has it (`truthFor`, the scorer's rule). Two comparisons the report made are gone. A truth of zero, the A
+ * wave of a case in AF, divided the deviation by zero: «0.00 m/s · +Infinity %», or «NaN %» for 0.00 measured. And a free
+ * measurement, which records no structure, was given the closest of a few true values, so it always looked right: a
+ * 3.4 cm caliper across the RV of the normal case was compared with the LA diameter (3.5 cm) and read −3 %. The protocol
+ * compares by id, never by the closest number.
+ */
 function matchTruth(
   m: Measurement,
   t: StructuredEchoTruth,
 ): { value: number; text: string } | null {
-  if (m.measurementId) {
-    const spec = getMeasurementSpec(m.measurementId);
-    const val = spec ? spec.truth(t) : null;
-    if (val === null || val === undefined) return null;
-    const fmt =
-      m.kind === 'velocity' && m.units === 'm/s'
-        ? formatClinical(val, 'velocityMps')
-        : m.kind === 'vti'
-          ? formatClinical(val, 'vtiCm')
-          : m.kind === 'linear'
-            ? formatClinical(val, 'linearCm')
-            : `${val.toFixed(m.kind === 'time' || m.kind === 'volume' ? 0 : 1)} ${m.units}`;
-    return { value: val, text: fmt };
-  }
-  // Heuristic mapping by kind + modality; explicit labels can be attached by the measurement tools later.
-  if (m.kind === 'velocity' && (m.modality === 'cw' || m.modality === 'pw')) {
-    // choose the closest plausible source: AV Vmax, LVOT Vmax, E, TR
-    const candidates = [
-      t.aorticValve.vmaxMps,
-      t.lvot.vmaxMps,
-      t.mitral.ePeakMps,
-      t.rightHeart.trVmaxMps ?? 0,
-    ].filter((v) => v > 0);
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'velocityMps') };
-  }
-  if (m.kind === 'vti') {
-    const candidates = [t.aorticValve.vtiCm, t.lvot.vtiCm];
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'vtiCm') };
-  }
-  if (m.kind === 'linear') {
-    const candidates = [
-      t.lv.eddCm,
-      t.lvot.diameterCm,
-      t.lv.ivsdCm,
-      t.la.apDiameterCm,
-      t.aorta.sinusCm,
-    ];
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'linearCm') };
-  }
-  return null;
+  const truth = m.measurementId ? truthFor(m.measurementId, t) : null;
+  if (!truth) return null;
+  const val = truth.value;
+  const fmt =
+    m.kind === 'velocity' && m.units === 'm/s'
+      ? formatClinical(val, 'velocityMps')
+      : m.kind === 'vti'
+        ? formatClinical(val, 'vtiCm')
+        : m.kind === 'linear'
+          ? formatClinical(val, 'linearCm')
+          : `${val.toFixed(m.kind === 'time' || m.kind === 'volume' ? 0 : 1)} ${m.units}`;
+  return { value: val, text: fmt };
 }

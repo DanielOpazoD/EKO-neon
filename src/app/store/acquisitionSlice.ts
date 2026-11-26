@@ -12,6 +12,7 @@ import { DEFAULT_QUALITY } from '@/simulator/core/protocol';
 import { easeInOut, lerpControl, presetDurationMs } from '@/simulator/probe/interpolate';
 import { isSpectralModality } from '@/simulator/renderer/modality';
 import { frameBus } from '../frameBus';
+import { examClosed } from '../modePolicy';
 import {
   START_PROBE,
   START_VIEW_ID,
@@ -80,6 +81,8 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
   },
   setModality: (m) =>
     set((s) => {
+      // a modality acquires live: a finished exam keeps the frozen image it was finished on
+      if (examClosed(s)) return s;
       const out: Partial<SimStore> = {
         modality: m,
         frozen: false,
@@ -97,7 +100,8 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
       }
       return constrainAcquisition({ ...s, ...out });
     }),
-  toggleFreeze: () => set((s) => ({ frozen: !s.frozen, cineOffset: 0, cinePlaying: false })),
+  toggleFreeze: () =>
+    set((s) => (examClosed(s) ? s : { frozen: !s.frozen, cineOffset: 0, cinePlaying: false })),
   setCineOffset: (o) =>
     set(() => ({
       cineOffset: Math.min(0, Math.max(-((useHudStore.getState().hud?.cineLength ?? 1) - 1), o)),
