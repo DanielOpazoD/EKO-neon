@@ -522,5 +522,11 @@ export class DopplerPerfMonitor {
   }
 }
 
-/** Default main-thread singleton monitor attached to `frameBus` and exposed on `window.dopplerPerf`. */
-export const dopplerPerfMonitor = new DopplerPerfMonitor();
+/**
+ * Default main-thread singleton monitor attached to `frameBus` and exposed on `window.dopplerPerf`. It is silent: it
+ * keeps every Doppler frame in its history, so `report()` and `summary()` work at any time, and writes a console line
+ * per frame only after `enable()`. Logging by default printed a line for every Doppler frame (30 or more per second)
+ * in the console of every build, the learner's included, burying the warnings that matter (worker failure, lost WebGL
+ * context) and paying a formatted string per frame.
+ */
+export const dopplerPerfMonitor = new DopplerPerfMonitor({ enabled: false });

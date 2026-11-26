@@ -143,6 +143,32 @@ export function summarizeManualVti(
   };
 }
 
+/** Whether the armed tool measures at `p` on this frame: the sector for the caliper and Simpson, its strip for the rest. */
+export function toolActsAt(
+  tool: string,
+  p: { x: number; y: number },
+  hud: Pick<SimOutput, 'sector' | 'strip'>,
+): boolean {
+  const strip = hud.strip;
+  const onStrip = strip.kind !== null && p.y >= strip.y;
+  switch (tool) {
+    case 'caliper':
+    case 'simpson':
+      return p.y < hud.sector.height;
+    case 'velocity':
+    case 'vti':
+    case 'auto-vti':
+    case 'slope':
+      return onStrip && strip.kind === 'spectral';
+    case 'tapse':
+      return onStrip && strip.kind === 'm-mode';
+    case 'time':
+      return onStrip;
+    default:
+      return false;
+  }
+}
+
 /** Handles clicks on the ultrasound canvas when any measurement tool is armed. */
 export function handleMeasurementToolClick(
   p: { x: number; y: number },
@@ -152,10 +178,18 @@ export function handleMeasurementToolClick(
   redrawOverlay: () => void,
 ): void {
   const st = useSimStore.getState();
+  // a click where the armed tool does not measure does nothing, as before
+  if (!toolActsAt(st.activeTool, p, hud)) return;
+  // calipers go on a frozen image, as on a scanner: a click on the live image freezes it, and the points go on the frame
+  // it froze on. Live, each end of a two-click tool landed on another frame or another sweep, and the measurement
+  // recorded the frame and phase of the second
+  if (!hud.frozen) {
+    if (!st.frozen) st.toggleFreeze();
+    return;
+  }
   const m = hud.sector;
   const strip = hud.strip;
   const sectorTool = st.activeTool === 'caliper' || st.activeTool === 'simpson';
-  if (!sectorTool && !strip.kind) return;
   if (sectorTool) {
     pend.points = reprojectGeometry(pend.points, pend.captureSector, m);
     pend.captureSector = { ...m };

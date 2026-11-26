@@ -11,7 +11,9 @@ import {
 } from './store';
 import { DEFAULT_ACQUISITION } from '@/simulator/renderer/types';
 import { SPECTRAL_MODE_DEFAULTS } from '@/simulator/doppler/spectral/spectrum';
-import type { SimOutput } from '@/simulator/core/protocol';
+import type { FrameAcquisition, PhaseMarks, SimOutput } from '@/simulator/core/protocol';
+import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import { frameOfSession } from './store/helpers';
 
 describe('UI preferences schema (prefs.ts)', () => {
   it('accepts valid keys, strips unknown keys, and drops wrong-typed entries without throwing', () => {
@@ -238,5 +240,128 @@ describe('SimStore clamping, cine controls, modality memory and exam policy', ()
     assert.equal(nav.skeleton, true);
     assert.equal(nav.heart, false);
     assert.equal(nav.cut, false);
+  });
+});
+
+describe('SimStore case identity and the views acquired by hand', () => {
+  const get = () => useSimStore.getState();
+  /** Stands for the canonical PLAX the opening jump puts the probe on. */
+  const OPENING_POSE = { u: 1.1, v: 2.3, rotationDeg: 118, tiltDeg: 4, rockDeg: 2, pressure: 0.6 };
+  beforeEach(() => {
+    get().setMode('sandbox');
+    get().loadCase('normal-excellent-window');
+  });
+
+  it('keeps the case the learner chose: a ready sets the truth only, an unknown id resolves to the case loaded', () => {
+    get().loadCase('hocm-sam');
+    assert.equal(get().truth, null, 'the previous case truth does not stand for the new case');
+    const truth = {} as unknown as StructuredEchoTruth;
+    get().setTruth(truth);
+    assert.equal(get().caseId, 'hocm-sam');
+    assert.equal(get().truth, truth);
+    get().loadCase('no-such-case');
+    assert.equal(get().caseId, 'normal-excellent-window', 'as loadCaseById falls back');
+    get().setMode('exam', 'hocm-sam');
+    assert.equal(get().truth, null);
+  });
+
+  it('starts every session with its own number, and an exam started from a learning screen leaves it', () => {
+    const practice = get().sessionEpoch;
+    get().setUi({ screen: 'progress' });
+    get().setMode('exam', 'normal-excellent-window');
+    const exam = get();
+    assert.notEqual(exam.sessionEpoch, practice, 'an exam on the same case is a new session');
+    assert.equal(exam.ui.screen, 'simulator', 'the progress screen lists the event naming the case drawn');
+    get().loadCase('hocm-sam');
+    assert.notEqual(get().sessionEpoch, exam.sessionEpoch);
+    get().setMode('sandbox');
+    get().setUi({ screen: 'report' });
+    get().setMode('exam', 'hocm-sam');
+    assert.equal(get().ui.screen, 'report', 'the report is where the exam is finished');
+  });
+
+  it('the opening jump is not a preset the learner used; a pressed preset is', () => {
+    get().startPresetView('plax', { instant: true });
+    assert.deepEqual(get().presetViews, []);
+    get().startPresetView('a4c');
+    assert.deepEqual(get().presetViews, ['a4c']);
+    get().resetProbe(); // the poses still on their way are cancelled
+  });
+
+  /** The store right after the opening jump of free practice put the probe on PLAX. */
+  const afterOpeningJump = () =>
+    useSimStore.setState({
+      probe: { ...OPENING_POSE },
+      openingView: { viewId: 'plax', pose: { ...OPENING_POSE }, released: false },
+    });
+
+  it('the view free practice opens on counts by hand once the learner has lost it and found it again', () => {
+    afterOpeningJump();
+    // at the opening pose the score is the app's: overall progress, not the learner's
+    get().observeView('plax', 98, { ...OPENING_POSE });
+    get().recordViewScore('plax', 98, { ...OPENING_POSE });
+    assert.equal(get().viewProgress.plax, 98);
+    assert.equal(get().handViewProgress.plax, undefined);
+    // analyses made at the start pose before the jump arrived say nothing about the learner
+    get().observeView('psax-mv', 20, { ...START_PROBE });
+    assert.equal(get().openingView?.released, false);
+    // a nudge that keeps the view is still the opening pose's view
+    const near = { ...OPENING_POSE, u: 1.4 };
+    get().observeView('plax', 86, near);
+    get().recordViewScore('plax', 86, near);
+    assert.equal(get().openingView?.released, false);
+    assert.equal(get().handViewProgress.plax, undefined);
+    // lost by moving the probe away: from here PLAX is the learner's to find
+    get().observeView('plax', 41, { ...OPENING_POSE, rotationDeg: 160 });
+    assert.equal(get().openingView?.released, true);
+    get().observeView('plax', 90, near);
+    get().recordViewScore('plax', 90, near);
+    assert.equal(get().handViewProgress.plax, 90);
+  });
+
+  it('never credits by hand an analysis made where the app put the probe, whatever frame carries it', () => {
+    afterOpeningJump();
+    // «Abrir tarea» on this case keeps the pose and the session: the opening view is still to be lost and found
+    get().openTask({ caseId: 'normal-excellent-window', viewId: 'plax' });
+    assert.equal(get().mode, 'guided');
+    assert.deepEqual(get().probe, OPENING_POSE, 'a measurement task keeps the image the learner had');
+    assert.equal(get().openingView?.released, false);
+    // «Reiniciar sonda» releases it, but the frames still on their way carry the PLAX analysed at the opening pose, and
+    // the first frames at the start pose may carry it too (one frame in five is analysed): neither counts by hand
+    get().resetProbe();
+    assert.deepEqual(get().probe, START_PROBE);
+    assert.equal(get().openingView?.released, true);
+    get().observeView('plax', 100, { ...OPENING_POSE });
+    get().recordViewScore('plax', 100, { ...OPENING_POSE });
+    get().recordViewScore('plax', 38, { ...START_PROBE });
+    assert.equal(get().handViewProgress.plax, undefined);
+    assert.equal(get().viewProgress.plax, 100, 'overall progress counts every frame');
+    // found from the start pose by the learner: theirs
+    const found = { ...OPENING_POSE, tiltDeg: 6 };
+    get().recordViewScore('plax', 92, found);
+    assert.equal(get().handViewProgress.plax, 92);
+  });
+
+  it('keeps a ready only for the store’s case, and scores only the frames of this case and session', () => {
+    get().setMode('guided'); // no opening jump to wait for
+    get().loadCase('hocm-sam');
+    const marks = {} as unknown as PhaseMarks;
+    const stale = {} as unknown as StructuredEchoTruth;
+    const truth = {} as unknown as StructuredEchoTruth;
+    const ready = { phaseMarks: marks, lvLengthCm: 8, workerMode: 'worker' as const };
+    get().caseReady({ ...ready, truth: stale, caseId: 'aortic-stenosis-severe' });
+    assert.equal(get().caseId, 'hocm-sam', 'the store stays on the case chosen');
+    assert.equal(get().truth, null);
+    get().caseReady({ ...ready, truth, caseId: 'hocm-sam' });
+    assert.equal(get().truth, truth);
+    assert.equal(get().workerMode, 'worker');
+
+    const s = get();
+    const acq = (caseId: string, sessionEpoch: number) =>
+      ({ caseId, sessionEpoch }) as unknown as FrameAcquisition;
+    assert.equal(frameOfSession(acq('hocm-sam', s.sessionEpoch), s), true);
+    assert.equal(frameOfSession(acq('hocm-sam', s.sessionEpoch - 1), s), false, 'the last session');
+    assert.equal(frameOfSession(acq('normal-excellent-window', s.sessionEpoch), s), false);
+    assert.equal(frameOfSession(undefined, s), false);
   });
 });

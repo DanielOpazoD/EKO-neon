@@ -35,13 +35,11 @@ export function useSimulation(
       onFrame: (out) => {
         onFrameRef.current(out);
       },
-      onReady: (truth, id, phaseMarks, lvLengthCm) => {
-        useSimStore.getState().setTruth(truth, id);
-        useSimStore.getState().setCycleInfo(phaseMarks, lvLengthCm);
-        useSimStore.getState().setWorkerMode(client.mode);
-        // free practice opens on the canonical PLAX once the case's models exist (decision 343)
-        useSimStore.getState().openOnStartView();
-      },
+      // the store keeps the ready only for its own case (`caseReady`)
+      onReady: (truth, caseId, phaseMarks, lvLengthCm) =>
+        useSimStore
+          .getState()
+          .caseReady({ truth, caseId, phaseMarks, lvLengthCm, workerMode: client.mode }),
       onError: (m) => useSimStore.getState().setError(m),
     });
     clientRef.current = client;
@@ -72,6 +70,7 @@ export function useSimulation(
         next.activeTool === prev.activeTool &&
         next.activeMeasurementId === prev.activeMeasurementId &&
         next.mode === prev.mode &&
+        next.sessionEpoch === prev.sessionEpoch &&
         next.ui === prev.ui
       ) {
         return;
@@ -139,5 +138,6 @@ export function buildInput(display: { width: number; height: number }): SimInput
       s.activeTool !== 'none' ||
       s.activeMeasurementId !== null ||
       (!s.ui.minimal && s.ui.showTorso && !s.ui.railMini && modePolicy(s.mode).navigatorAnatomy),
+    sessionEpoch: s.sessionEpoch,
   };
 }

@@ -86,7 +86,7 @@ export const CURRICULUM: Module[] = [
       {
         id: 'parasternal',
         title: 'Ventana paraesternal',
-        goal: 'Obtener PLAX y los tres niveles de PSAX moviendo la sonda, no con botones: una vista cuyo preajuste usaste no cuenta hasta que recargues el caso.',
+        goal: 'Obtener PLAX y los tres niveles de PSAX moviendo la sonda, no con botones: una vista cuyo preajuste usaste no cuenta hasta que recargues el caso, y el PLAX con que abre la práctica libre cuenta cuando lo pierdas y lo vuelvas a encontrar.',
         tasks: [
           {
             id: 'plax-70',

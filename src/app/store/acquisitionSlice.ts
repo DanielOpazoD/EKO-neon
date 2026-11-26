@@ -137,8 +137,10 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
 
   startPresetView: (viewId, opts) => {
     if (get().mode === 'exam') return;
-    // from now on this view's score is the preset's, not the learner's (decision 174)
-    if (!get().presetViews.includes(viewId))
+    // from now on this view's score is the preset's, not the learner's (decision 174). The opening jump is not a preset
+    // the learner used: it holds its view back only until the learner loses it (`openingView`), or free practice, which
+    // makes the jump on every case it opens, left the first view of the curriculum out of reach for good
+    if (!opts?.instant && !get().presetViews.includes(viewId))
       set((s) => ({ presetViews: [...s.presetViews, viewId] }));
     const token = nextPresetToken();
     const begin = (to: ProbeControl) =>
@@ -149,7 +151,13 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
         // the opening jump (decision 343) yields to a probe moved while its pose was on the way
         if (opts?.instant)
           return atStartProbe(s.probe)
-            ? { probe: to, presetAnim: null, targetViewId: viewId, frozen: false }
+            ? {
+                probe: to,
+                presetAnim: null,
+                targetViewId: viewId,
+                frozen: false,
+                openingView: { viewId, pose: to, released: false },
+              }
             : s;
         const from = { ...s.probe };
         return {
@@ -193,9 +201,15 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
       return t >= 1 ? { probe: a.to, presetAnim: null } : { probe };
     }),
   resetProbe: () => {
-    // a preset pose still on its way does not undo the reset
+    // a preset pose still on its way does not undo the reset. From the start pose any view reached is the learner's, the
+    // one free practice opened on included; analyses made at the opening pose still do not count (`appPlacedPose`), and
+    // the frames on their way carry them
     cancelPendingPresets();
-    set({ probe: { ...START_PROBE }, presetAnim: null });
+    set((s) => ({
+      probe: { ...START_PROBE },
+      presetAnim: null,
+      openingView: s.openingView && { ...s.openingView, released: true },
+    }));
   },
   openOnStartView: () => {
     const s = get();

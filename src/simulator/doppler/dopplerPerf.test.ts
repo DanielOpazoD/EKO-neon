@@ -10,11 +10,45 @@ import {
   createSpectralFrameTiming,
   DOPPLER_FRAME_BUDGET_MS,
   DopplerPerfMonitor,
+  dopplerPerfMonitor,
   formatDopplerPerfLine,
   isDopplerModality,
 } from './dopplerPerf';
 
 describe('Doppler performance diagnostic utility', () => {
+  it('the app-wide monitor records every frame but writes nothing to the console until enabled', () => {
+    const calls: string[] = [];
+    const original = { log: console.log, warn: console.warn };
+    console.log = (...a: unknown[]) => void calls.push(`log ${String(a[0])}`);
+    console.warn = (...a: unknown[]) => void calls.push(`warn ${String(a[0])}`);
+    try {
+      assert.equal(dopplerPerfMonitor.status().enabled, false);
+      const before = dopplerPerfMonitor.history().length;
+      const sp = createSpectralFrameTiming();
+      sp.columns = 2;
+      sp.spectrumSynthMs = 3;
+      dopplerPerfMonitor.record(
+        buildDopplerPerfFrame({ frameId: 1, modality: 'pw', totalMs: 6, spectral: sp }),
+      );
+      dopplerPerfMonitor.record(
+        buildDopplerPerfFrame({ frameId: 2, modality: 'cw', totalMs: 40, spectral: sp }),
+      );
+      assert.deepEqual(calls, [], 'a silent monitor logs neither fast nor over-budget frames');
+      assert.equal(dopplerPerfMonitor.history().length, before + 2, 'report() still has the frames');
+      dopplerPerfMonitor.enable();
+      dopplerPerfMonitor.record(
+        buildDopplerPerfFrame({ frameId: 3, modality: 'pw', totalMs: 6, spectral: sp }),
+      );
+      assert.equal(calls.length, 1, 'enable() turns the per-frame line on');
+      assert.match(calls[0]!, /^log \[DopplerPerf\] #3/);
+    } finally {
+      dopplerPerfMonitor.disable();
+      dopplerPerfMonitor.reset();
+      console.log = original.log;
+      console.warn = original.warn;
+    }
+  });
+
   it('identifies overall and spectral-only bottlenecks and 16 ms budget compliance', () => {
     const sp = createSpectralFrameTiming();
     sp.columns = 2;

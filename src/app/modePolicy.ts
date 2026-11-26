@@ -63,6 +63,20 @@ export function modePolicy(mode: ProductMode): ModePolicy {
   };
 }
 
+/** The screens that teach (decision 244): closed while the exam runs (`learningScreensEnabled`). */
+const LEARNING_SCREENS: readonly string[] = ['references', 'curriculum', 'progress'];
+
+/**
+ * The screen a mode shows for the one asked: a learning screen the mode closes gives way to the simulator. The exam
+ * disabled their buttons, but an exam started from the progress screen kept it open, and its export listed the event
+ * that names the case drawn.
+ */
+export function screenInMode<S extends string>(screen: S, mode: ProductMode): S | 'simulator' {
+  return !modePolicy(mode).learningScreensEnabled && LEARNING_SCREENS.includes(screen)
+    ? 'simulator'
+    : screen;
+}
+
 /** The case's name in an exported file: its id, or a neutral tag while the exam hides it (decision 234). */
 export function exportCaseTag(mode: ProductMode, examFinished: boolean, caseId: string): string {
   return showsCaseIdentity(mode, examFinished) ? caseId : 'examen';

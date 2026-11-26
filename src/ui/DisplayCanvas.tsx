@@ -19,6 +19,8 @@ import { sampleIndexAt, segmentCss, segmentIdOf, segmentNames } from './segmentM
 import { coverageText } from './segmentCoverage';
 import { handleMeasurementToolClick, type PendingMeasurement } from './display/measurementTools';
 import { drawOverlay } from './display/overlayDraw';
+import { frameSizeForBox } from './display/frameSize';
+import { pendingAcquisitionKey } from './display/measurementPlacement';
 import {
   commitReviewLasso,
   identifyReviewMarker,
@@ -68,10 +70,10 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
-      const width = Math.max(320, Math.min(1024, Math.round(r.width)));
-      const height = Math.max(240, Math.min(820, Math.round(r.height)));
-      setSize({ width, height });
-      onSize({ width, height });
+      // the frame keeps the box's proportions: the canvases stretch over the box, and must stretch alike in x and y
+      const next = frameSizeForBox(r.width, r.height);
+      setSize(next);
+      onSize(next);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -116,6 +118,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         state.modality,
         state.activeTool,
         state.activeMeasurementId ?? '',
+        pendingAcquisitionKey(out, state.activeTool === 'caliper' || state.activeTool === 'simpson'),
       ].join('|');
       if (pending.context !== context) {
         pending.points = [];

@@ -121,9 +121,12 @@ export function ReportScreen() {
             <div>
               <dt>Ritmo / FC</dt>
               <dd>
-                {caseDef.rhythm.type === 'atrial-fibrillation'
-                  ? 'Fibrilación auricular'
-                  : 'Sinusal'}{' '}
+                {/* the rhythm is a finding the exam asks for: the learner reports it from the ECG */}
+                {!revealed
+                  ? 'a informar'
+                  : caseDef.rhythm.type === 'atrial-fibrillation'
+                    ? 'Fibrilación auricular'
+                    : 'Sinusal'}{' '}
                 · {caseDef.rhythm.heartRateBpm} lpm
               </dd>
             </div>

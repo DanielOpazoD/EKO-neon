@@ -94,6 +94,12 @@ export interface ViewAnalysis {
    * the 16-segment wall-motion model, whose apical segments include the cap.
    */
   segments: { aha17: SegmentCoverage[]; lv16: SegmentCoverage[] };
+  /**
+   * The probe pose the analysis was made at. The simulator analyses one frame in five and attaches the analysis to the
+   * frames between, which may already show another pose: whether a score was reached by the learner is judged on this
+   * pose, not on the frame's. Absent on analyses from saved reports.
+   */
+  probe?: ProbeControl;
 }
 
 const WEIGHTS: Record<keyof ViewComponentScores, number> = {

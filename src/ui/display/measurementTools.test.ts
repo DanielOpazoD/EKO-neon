@@ -8,15 +8,56 @@ import {
   vtiFromEnvelope,
 } from '@/clinical/formulas';
 import { summarizeEnvelope } from '@/simulator/measurements/vti';
+import { useSimStore } from '@/app/store';
+import type { SimOutput } from '@/simulator/core/protocol';
 import {
   computeDecelerationTime,
   computeLinearCm,
   computeMModeExcursionCm,
+  handleMeasurementToolClick,
   resampleManualVti,
   stripVelocityAtY,
   summarizeManualVti,
+  toolActsAt,
 } from './measurementTools';
 import { computeSpectralTicks } from './overlayDraw';
+
+describe('measurement tools on the live image', () => {
+  /** A PW frame: the sector above y = 200, the spectral strip below. */
+  const pwFrame = (frozen: boolean) =>
+    ({
+      frozen,
+      sector: { height: 200 },
+      strip: { kind: 'spectral', y: 210, height: 150 },
+    }) as unknown as SimOutput;
+
+  it('acts where its tool measures: the sector for calipers, its own strip for the others', () => {
+    const hud = pwFrame(false);
+    assert.equal(toolActsAt('caliper', { x: 50, y: 100 }, hud), true);
+    assert.equal(toolActsAt('caliper', { x: 50, y: 300 }, hud), false);
+    assert.equal(toolActsAt('velocity', { x: 50, y: 300 }, hud), true);
+    assert.equal(toolActsAt('velocity', { x: 50, y: 100 }, hud), false, 'the sector of a PW frame');
+    assert.equal(toolActsAt('tapse', { x: 50, y: 300 }, hud), false, 'not an M-mode strip');
+    assert.equal(toolActsAt('time', { x: 50, y: 300 }, hud), true);
+    assert.equal(toolActsAt('none', { x: 50, y: 300 }, hud), false);
+  });
+
+  it('freezes the live image on a click where the tool would measure, and measures nothing yet', () => {
+    const st = useSimStore.getState();
+    st.loadCase('normal-excellent-window');
+    st.setActiveTool('velocity');
+    const pend = { points: [] as { x: number; y: number }[] };
+    // on the sector, where a strip tool does not measure: nothing happens, as before
+    handleMeasurementToolClick({ x: 50, y: 100 }, 1, pwFrame(false), pend, () => {});
+    assert.equal(useSimStore.getState().frozen, false);
+    // on the strip: the image freezes; the point goes on the frozen frame, with the next click
+    handleMeasurementToolClick({ x: 50, y: 300 }, 1, pwFrame(false), pend, () => {});
+    assert.equal(useSimStore.getState().frozen, true);
+    assert.equal(useSimStore.getState().measurements.length, 0);
+    assert.equal(pend.points.length, 0);
+    useSimStore.getState().setActiveTool('none');
+  });
+});
 
 describe('Display measurement tools math', () => {
   it('computes 2D caliper linear distance and M-mode TAPSE excursion in cm', () => {

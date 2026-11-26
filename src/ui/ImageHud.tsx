@@ -60,9 +60,12 @@ export function ImageHud() {
     return () => ro.disconnect();
   }, [show]);
   if (!show) return null;
-  const title = showsCaseIdentity(mode, examFinished)
+  const identity = showsCaseIdentity(mode, examFinished);
+  const title = identity
     ? (listCases().find((c) => c.id === caseId)?.title ?? caseId)
     : EXAM_CASE_NAME;
+  // the rhythm is a finding the exam asks for (atrial fibrillation): until it is finished the learner reads the ECG
+  const rhythm = truth && identity ? ` · ${RHYTHM_LABEL[truth.rhythm] ?? truth.rhythm}` : '';
   // the view line sits bottom-right on the 2D image; with a strip below the sector it joins the top-right group, off
   // the strip's velocity scale
   const viewLine = modePolicy(mode).showViewFeedback ? <ViewLine mode={mode} /> : null;
@@ -76,7 +79,7 @@ export function ImageHud() {
       <div className="hud-box hud-tr">
         <span>
           FC {hrBpm !== null ? hrBpm : '—'} lpm
-          {truth ? ` · ${RHYTHM_LABEL[truth.rhythm] ?? truth.rhythm}` : ''}
+          {rhythm}
         </span>
         <span>
           {depthCm} cm · {formatMHz(frequencyMHz)}

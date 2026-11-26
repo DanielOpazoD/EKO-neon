@@ -26,6 +26,7 @@ export function MeasureTab() {
     useShallow((st) => ({
       activeMeasurementId: st.activeMeasurementId,
       activeTool: st.activeTool,
+      frozen: st.frozen,
       measurements: st.measurements,
       mode: st.mode,
       removeMeasurement: st.removeMeasurement,
@@ -74,6 +75,11 @@ export function MeasureTab() {
               </div>
             )}
             <p className="capture-hint">{spec ? spec.instruction : FREE_TOOL_HINT[s.activeTool]}</p>
+            {!s.frozen && (
+              <p className="capture-hint">
+                Se mide sobre la imagen congelada: el primer clic sobre la imagen en vivo la congela.
+              </p>
+            )}
           </div>
           <button className="capture-cancel ghost" onClick={cancel}>
             Cancelar

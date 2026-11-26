@@ -1,4 +1,5 @@
 import type { ProbeControl } from '@/simulator/probe/pose';
+import type { FrameAcquisition } from '@/simulator/core/protocol';
 import type { AcquisitionSettings } from '@/simulator/renderer/types';
 import { listCases } from '@/cases';
 import { modePolicy } from '../modePolicy';
@@ -40,7 +41,39 @@ export const START_PROBE: ProbeControl = {
 
 /** Whether a probe is still at START_PROBE, untouched. */
 export function atStartProbe(p: ProbeControl): boolean {
-  return (Object.keys(START_PROBE) as (keyof ProbeControl)[]).every((k) => p[k] === START_PROBE[k]);
+  return samePose(p, START_PROBE);
+}
+
+/** Whether two probe controls are the same pose, value for value. */
+export function samePose(a: ProbeControl, b: ProbeControl): boolean {
+  return (Object.keys(START_PROBE) as (keyof ProbeControl)[]).every((k) => a[k] === b[k]);
+}
+
+/**
+ * Below this score the view free practice opened on counts as lost: the red band of the view guide, and the score under
+ * which a measurement's view is not valid (scoring.ts). A view the learner has lost and found again is theirs.
+ */
+export const OPENING_VIEW_LOST_BELOW = 50;
+
+/**
+ * Whether a probe pose is one the app placed, not one the learner reached: the start pose, or the pose of the jump free
+ * practice opens with (`openingView`). A view analysed at either adds nothing to what the learner acquired by hand,
+ * however the probe got back there, and whatever frame carries the analysis.
+ */
+export function appPlacedPose(pose: ProbeControl, opening: { pose: ProbeControl } | null): boolean {
+  return atStartProbe(pose) || (opening !== null && samePose(pose, opening.pose));
+}
+
+/**
+ * Whether a frame was acquired for this case in this session (`sessionEpoch`): only such a frame is scored. The frames
+ * still in flight when a case loads or an exam starts carry the view of the session before (an A4C credited at 91 in an
+ * exam just begun).
+ */
+export function frameOfSession(
+  acq: FrameAcquisition | undefined,
+  s: { caseId: string; sessionEpoch: number },
+): boolean {
+  return acq !== undefined && acq.caseId === s.caseId && acq.sessionEpoch === s.sessionEpoch;
 }
 
 export function loadPrefs(): Partial<UiPrefs> {
@@ -110,6 +143,9 @@ export function drawExamCase(): string {
   return ids[Math.floor(Math.random() * ids.length)] ?? ids[0]!;
 }
 
+/** The sessions started so far: each one's number travels with its frames (`SimInput.sessionEpoch`). */
+let sessionCounter = 0;
+
 /**
  * What a session starts from, when a case is loaded and when an exam begins (decision 235): one list, so that the two
  * cannot drift apart (the exam start left the artifact lab on and the case load the target view).
@@ -117,6 +153,7 @@ export function drawExamCase(): string {
 export function freshSession() {
   cancelPendingPresets();
   return {
+    sessionEpoch: ++sessionCounter,
     measurements: [],
     frozen: false,
     cineOffset: 0,
@@ -124,6 +161,7 @@ export function freshSession() {
     viewProgress: {},
     handViewProgress: {},
     presetViews: [],
+    openingView: null,
     examFinished: false,
     examResult: null,
     presetAnim: null,
