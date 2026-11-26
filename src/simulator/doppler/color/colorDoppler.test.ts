@@ -28,6 +28,7 @@ import { aorticVelocityProfile } from '@/simulator/doppler/flow-primitives/aorti
 import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
 import { colorWallFilterRangeMps } from './kasaiEstimator';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { regionalMeanFraction } from '@/simulator/anatomy/lvGeometry';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 
 const ACQ: ColorAcquisition = { frequencyMHz: 2.5, harmonics: false };
@@ -1117,8 +1118,10 @@ test('LV radial wall velocity and valve leaflet snap velocity follow cardiac phy
     `Expected inward systolic LV radial velocity (vx < -0.015 m/s) at mid-LV lateral wall, got vx=${vMidNorm.vx.toFixed(4)}`,
   );
 
-  // Akinetic segment (segAmp = 0) zeros radial velocity cleanly while preserving basal longitudinal TDI behavior
-  const akineticHeart = { ...heart, segAmp: heart.segAmp.map(() => 0) };
+  // Akinetic segment (segAmp = 0) zeros radial velocity cleanly while preserving basal longitudinal TDI behavior; the
+  // heart declares the field as createHeartModel does (the tissue velocity, as the classifier, reads it only then)
+  const segAmp = heart.segAmp.map(() => 0);
+  const akineticHeart = { ...heart, segAmp, regionalMeanFrac: regionalMeanFraction(segAmp, heart.lv.shape) };
   const vMidAkinetic = sampleTissueVelocity(
     akineticHeart,
     tables,

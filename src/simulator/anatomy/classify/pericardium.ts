@@ -8,6 +8,7 @@ import { rvCrescent, rvInflowSdf } from '../rv';
 import { rootCoordinates } from './root';
 import { classifyLeftVentricle } from './leftVentricle';
 import { rvFreeWallNow } from './rightVentricle';
+import { leftAppendageDistance, rightAppendageLumen } from '../atrialAppendages';
 import type { AnchorsCached } from '../anchors';
 import type { HeartModel } from '../heartModel';
 import type { ChamberPose } from '../heartPose';
@@ -103,10 +104,29 @@ export const PARIETAL_COLUMN_BLEND_CM = 1;
  * are built from, in straight faces meeting at corners, and its thinning over the left atrium, 2.2 to 0.3 cm within 1 cm
  * of the difference between two distances, drew steps. A smooth envelope pushed out by a thickness that changes
  * smoothly in space has neither.
+ *
+ * Over the oblique sinus the layer rests on the heart. Between the full sac and the same thinned over the atrium's
+ * footprint, both held off the column, it lies no nearer the epicardium of the moment (`dEpi`, the visceral layer's
+ * inner face) than the sinus' film beyond the visceral layer. The thinned sac alone did not know where the atrium is: its
+ * thinning is laid on the envelope's anchor ellipsoid, while the atrium the blocks draw reaches back to the descending
+ * aorta (decision 330), the more as the posture and the breath bring the column near, and the coronary sinus rides the
+ * groove with the base. In the tamponade case its face ran through the heart. On a 0.5 mm grid over eight phases, the
+ * coronary sinus and the visceral layer over it stood up to 0.57 cm past it in the resting posture (0.04-0.43 mL per
+ * phase, from phase 0.875 to 0.375), 0.51-0.59 cm in four of the other hearts the app's postures and breathing build,
+ * and supine in inspiration the left atrium's wall, its cavity and the fat up to 0.91 cm (2.6-3.9 mL in every phase), a
+ * ray from the atrium crossing the face twice with a centimetre of fluid beyond the heart between the crossings. Now no
+ * heart tissue lies against or past the face over the sinus, and the film is 0.30 cm or more (0.35 supine in
+ * inspiration). The real layer is reflected onto the atrium around the pulmonary veins and moves with it there: the face
+ * takes 0.1-2.2 mL of the space past the thinned sac into the sac in each phase, up to 0.92 cm beyond it (5.8-8.1 mL, up
+ * to 1.30 cm, supine in inspiration), over 1.1-1.9 % of the directions from the sac's centre (3.1 % supine in
+ * inspiration). Resting it on the heart before holding it off the column would let the column's blend pull it back: the
+ * film fell to 0.20 cm supine in expiration and to 0.10 cm in inspiration. Elsewhere, and wherever the heart stays
+ * farther than the film from the thinned sac, the face is the still sac's, to the last bit.
  */
 export function parietalSdf(
   eff: number,
   dFull: number,
+  dEpi: number,
   behind: number,
   footprint: number,
   colDist: number,
@@ -122,7 +142,12 @@ export function parietalSdf(
     ),
   );
   const w = tb * tb * (3 - 2 * tb) * (1 - tf * tf * (3 - 2 * tf));
-  return smax(dFull + (eff - thin) * w, 2 * PERICARDIUM_CM - colDist, PARIETAL_COLUMN_BLEND_CM);
+  // the still sac and the same thinned over the atrium's footprint, both held off the column
+  const col = 2 * PERICARDIUM_CM - colDist;
+  const full = smax(dFull, col, PARIETAL_COLUMN_BLEND_CM);
+  const thinned = smax(dFull + (eff - thin) * w, col, PARIETAL_COLUMN_BLEND_CM);
+  // between them the layer rests on the heart of the moment, the sinus' film beyond the visceral layer
+  return Math.max(full, Math.min(thinned, dEpi - PERICARDIUM_CM - thin));
 }
 
 /**
@@ -131,11 +156,13 @@ export function parietalSdf(
  * between the beating epicardium and that still sheet, so its thickness changes with the phase, the parietal line of the
  * M-mode is flat and the swinging heart of tamponade moves inside a sac that stays. The sheet is the end-diastolic
  * heart's envelope pushed out by the declared effusion (decision 383), at the heart's largest, which is when an effusion
- * is measured. The sac used to be rebuilt every sample from the epicardium of the moment and moved with the swing: in the
- * tamponade case the fluid was 2.20 cm thick in every phase on fixed rays from the left ventricle's axis, and the sac's
- * outer face travelled 0.27 cm on the inferior ray and 0.96 cm on the lateral one over the beat. Now the face does not
- * move, and the fluid goes from 2.19 cm at end-diastole to 2.44 cm at end-systole on the inferior ray and from 1.88 to
- * 2.84 cm on the lateral one as the heart swings toward it and away.
+ * is measured, with the atria's appendages at theirs (heartEnvelope). The sac used to be rebuilt every sample from the
+ * epicardium of the moment and moved with the swing: in the tamponade case the fluid was 2.20 cm thick in every phase on
+ * fixed rays from the left ventricle's axis, and the sac's outer face travelled 0.27 cm on the inferior ray and 0.96 cm
+ * on the lateral one over the beat. Now the face does not move, and the fluid goes from 2.19 cm at end-diastole to 2.44
+ * cm at end-systole on the inferior ray and from 1.88 to 2.84 cm on the lateral one as the heart swings toward it and
+ * away. Over the oblique sinus alone, where the layer is reflected onto the left atrium, it rests on the heart and moves
+ * with it (`parietalSdf`).
  *
  * The sac is tabulated once per case (anchors.ts) as its radius from the centre of the heart's bounding sphere along
  * PARIETAL_AZ_BINS azimuths (around z, from +x toward +y) by PARIETAL_POLAR_BINS polar angles (from +z, the apex, to −z,
@@ -143,9 +170,10 @@ export function parietalSdf(
  * star-shaped from that centre but for one direction that grazes a 0.2 mm crease; the table puts the parietal within
  * 0.6 mm of the analytic surface on the rays from the left ventricle, 1.0-1.3 mm outside it behind the left atrium (the
  * oblique sinus holds 0.4 cm instead of 0.3), and within 0.2-0.5 mm (median) and 4 mm (worst) around the great vessels,
- * where the envelope turns fastest: 1.5 % of the sac's 1 700 mL changes side. The oblique sinus and the column
- * (`parietalSdf`) are applied to it as they were to the envelope. A read costs about 50 ns on the CPU against the 20 ns
- * of the terms it replaces, within the noise of the 1.8-1.9 µs the classifier takes per sample in the tamponade case.
+ * where the envelope turns fastest: 1.5 % of the sac's 1 800 mL changes side. The column and the oblique sinus
+ * (`parietalSdf`) are applied to it, the sinus resting on the heart of the moment. A read costs about 50 ns on the CPU
+ * against the 20 ns of the terms it replaces, within the noise of the 1.8-1.9 µs the classifier takes per sample in the
+ * tamponade case.
  */
 export const PARIETAL_AZ_BINS = 48;
 export const PARIETAL_POLAR_BINS = 25;
@@ -161,9 +189,22 @@ export interface ParietalSac {
 const sacSample = makeSample();
 /**
  * The heart's smooth envelope (cm, negative inside) the sac is pushed out from (decision 383): the left ventricle's
- * epicardium, the right ventricle's free wall over its crescent and inflow, the atria at their largest sizes, and the
- * outflow tract and the trunk where the pericardium is anchored to them, smoothly united, in pose `hp`. It runs the left
- * ventricle's block for the epicardium the block leaves in the context, whatever it classifies.
+ * epicardium, the right ventricle's free wall over its crescent and inflow, the atria at their largest sizes with their
+ * appendages, and the outflow tract and the trunk where the pericardium is anchored to them, smoothly united, the
+ * ventricles in pose `hp` and the appendages at end-systole. It runs the left ventricle's block for the epicardium the
+ * block leaves in the context, whatever it classifies.
+ *
+ * The atria's bodies are their anchor ellipsoids over their largest sizes: the outer faces their blocks draw are
+ * distances only near the wall (their clipping planes and the walls rising from the hinges are bounds of it), and their
+ * level set the effusion away lay up to 3.1 cm beyond the true one in the tamponade case, past the right ventricle's
+ * inferior wall, where no atrium is. The appendages are a capsule and a round cone, distances at any range, at their largest and
+ * without the clips that keep the right one off the atrial floor and the aortic root (they only take from it): their
+ * radial scales (atrialScale, appendageScale) are 1 at end-systole and less in every other phase, and the left one hangs
+ * lowest then, the atrium at its longest. Without the right one, which reaches past the right side of the aortic root,
+ * 0.11-0.90 mL of it, of the right atrium's wall and of the visceral layer over them lay past the inner face of the
+ * tamponade case's parietal layer, up to 0.61 cm, in every phase and in five of the six hearts the app's postures and
+ * breathing build; none does now, and the sac moves out by up to 2.9 cm (0.07 cm on average) around the appendage. The
+ * left one lies within its body's envelope: it moves the sac 1 mm at most.
  */
 function heartEnvelope(
   m: HeartModel,
@@ -191,12 +232,24 @@ function heartEnvelope(
     lr = A.laR,
     ra = A.raCenter,
     rar = A.raR;
+  // the left atrium's height centre as its block places it (classify/atria.ts) at end-systole, the annulus down the whole
+  // MAPSE then (zAnn = mapseCm·longitudinal, longitudinal 1): read from the model, no end-systolic pose built for it
+  const czL = (la.z - lr.z + m.physiology.mapseCm + 0.25) / 2;
+  const dAppendages = smin(
+    leftAppendageDistance(la, lr, czL, 1, 0, x, y, z) - LAA_WALL_CM,
+    rightAppendageLumen(A.raaBase, A.avCenter, 1, x, y, z) - LAA_WALL_CM,
+    0.8,
+  );
   return smin(
     smin(
       smin(dLvEpi, dRvEpi, 0.8),
       smin(
-        sdEllipsoid(x, y, z, la.x, la.y, la.z, lr.x + 0.25, lr.y + 0.25, lr.z + 0.25),
-        sdEllipsoid(x, y, z, ra.x, ra.y, ra.z, rar.x + 0.22, rar.y + 0.22, rar.z + 0.22),
+        smin(
+          sdEllipsoid(x, y, z, la.x, la.y, la.z, lr.x + 0.25, lr.y + 0.25, lr.z + 0.25),
+          sdEllipsoid(x, y, z, ra.x, ra.y, ra.z, rar.x + 0.22, rar.y + 0.22, rar.z + 0.22),
+          0.8,
+        ),
+        dAppendages,
         0.8,
       ),
       0.8,
@@ -228,10 +281,11 @@ function rvotEpiDistance(A: AnchorsCached, fw: number, x: number, y: number, z: 
 }
 
 /**
- * Tabulate the sac of the case's effusion around the heart at end-diastole `ed` (no swing): along each direction from
- * the centre, the first point where the envelope lies the pericardium and the effusion away, found by stepping out by
- * half the envelope's distance and halving the last step ten times (to 0.1 mm or better). About 25 000 evaluations of
- * the envelope, 13 ms, once per heart model with an effusion.
+ * Tabulate the sac of the case's effusion around the heart at end-diastole `ed` with the appendages at end-systole (no
+ * swing): along each direction from the centre, the first point where the envelope lies the pericardium and the
+ * effusion away, found by stepping out by half the envelope's distance and halving the last step ten times (to 0.1 mm
+ * or better). About 25 000 evaluations of the envelope, 13-15 ms (1 ms more with the appendages), once per heart model
+ * with an effusion.
  */
 export function buildParietalSac(m: HeartModel, A: AnchorsCached, ed: ChamberPose): ParietalSac {
   const reach = PERICARDIUM_CM + m.anatomy.pericardium.effusionCm;
@@ -362,7 +416,8 @@ export function classifyPericardium(c: ClassifyCtx): boolean {
     0.2,
   );
   // the parietal layer over an effusion is the fixed sac (ParietalSac), read at the point before the tamponade swing: the
-  // heart beats and swings inside it. While the anchors are being fitted it is not built yet, and no effusion is drawn.
+  // heart beats and swings inside it, but over the oblique sinus, where the layer rests on the heart (parietalSdf). While
+  // the anchors are being fitted it is not built yet, and no effusion is drawn.
   const sac = A.parietal;
   const la = A.laCenter,
     lr = A.laR;
@@ -372,11 +427,13 @@ export function classifyPericardium(c: ClassifyCtx): boolean {
       ? parietalSdf(
           hp.effusion,
           parietalSacDistance(sac, x0, y, z),
+          dEpi,
           (la.y - y) / lr.y,
           ((x0 - la.x) / lr.x) ** 2 + ((z - la.z) / lr.z) ** 2,
           c.colDist,
         )
       : 1e3;
+  c.parietal = par;
   if (dEpi < 0) {
     setSample(out, Tissue.Fat, dEpi, nx0, ny0, nz0, x, y, z, 0, Structure.EpicardialFat);
     return true;

@@ -422,6 +422,86 @@ test('the RV crescent, the epicardial radius of the tools and the tissue velocit
   assert.ok(Math.abs(radial(270) / vNormal - 0.1) < 0.01, `mid inferior / normal ${(radial(270) / vNormal).toFixed(3)}`);
 });
 
+test('TDI: the remote walls of the infarction move as fast as they are drawn, as the walls of a normal heart do', () => {
+  // The TDI moves the whole thickness of a wall at one radial velocity, R_ED·d(V/EDV)^(1/3)/dt within the envelope of the
+  // levels. The pose contracts the remote walls of the infarction dR/dR0 = 1.3-1.5 times faster than the volume alone
+  // would (computeChamberPose), and their tissue velocity scales by that slope at the volume and length of the moment
+  // (lvCompensationGain). The drawn wall's radial velocity, ±0.003 of the cycle around a phase, over the TDI's at it,
+  // against two references:
+  // - the same heart with every wall normal (segAmp 1, regionalMeanFrac 0: the same tables, profile and anchors, no
+  //   compensation), at the endocardium, at mid- and late ejection and at the peaks of E and A, within 3 %. The slope
+  //   changes with the volume: a constant gain 1/(1 − F) was 4-6 % fast at mid-ejection, 10-12 % in late ejection and
+  //   6-8 % at peak E, and the volume alone made the ratio 1.33-1.49 times the reference's; the exact slope agrees
+  //   within 1.4 %;
+  // - a normal heart's drawn mid-wall at mid-ejection, within 10 %: even there it goes 0.80-1.02 times as fast as the
+  //   TDI, the remote walls on the volume alone 1.38-1.42 times that ratio; the two hearts' shapes and volumes leave ±2 %.
+  const dph = 0.003;
+  const drawnOverTdi = (m: CaseModels, ph: number, deg: number, lf: number, endocardium: boolean): number => {
+    const az = azOf(deg);
+    const drawn = (p: number): [number, number] => {
+      const pose = computeHeartPose(m.heart, cycleStateAt(m.tables, p));
+      const z = zAt(pose, lf);
+      const [endo, epi] = wallRun(m, pose, az, z);
+      return [endocardium ? endo : (endo + epi) / 2, z];
+    };
+    const vDrawn = (drawn(ph + dph)[0] - drawn(ph - dph)[0]) / (2 * dph * m.tables.rrS);
+    const [r, z] = drawn(ph);
+    const v = sampleTissueVelocity(m.heart, m.tables, ph, Math.cos(az) * r, Math.sin(az) * r, z);
+    return vDrawn / ((v.vx * Math.cos(az) + v.vy * Math.sin(az)) * 100);
+  };
+  const midEjection = (m: CaseModels): number => {
+    const t = m.tables.timings;
+    return (t.ejectionStartS + 0.45 * (t.ejectionEndS - t.ejectionStartS)) / m.tables.rrS;
+  };
+  const infarct = rwma();
+  const allNormal: CaseModels = {
+    ...infarct,
+    heart: { ...infarct.heart, segAmp: infarct.heart.segAmp.map(() => 1), regionalMeanFrac: 0 },
+  };
+  const normal = buildCaseModels(loadCaseById('normal-excellent-window'), REST_PATIENT);
+  const t = infarct.tables.timings,
+    rr = infarct.tables.rrS;
+  const phases: [string, number][] = [
+    ['mid-ejection', midEjection(infarct)],
+    ['late ejection', (t.ejectionStartS + 0.8 * (t.ejectionEndS - t.ejectionStartS)) / rr],
+    ['peak E', (t.mitralOpenS + t.eAccelS) / rr],
+    ['peak A', (t.aStartS + t.aEndS) / 2 / rr],
+  ];
+  let remote = 0;
+  for (let deg = 30; deg <= 210; deg += 30)
+    for (const lf of [0.35, 0.5, 0.65]) {
+      if (lvRegionalMotion(infarct.heart.segAmp, azOf(deg), lf) < 1) continue;
+      remote++;
+      for (const [name, ph] of phases) {
+        const k = drawnOverTdi(infarct, ph, deg, lf, true) / drawnOverTdi(allNormal, ph, deg, lf, true);
+        assert.ok(
+          Math.abs(k - 1) < 0.03,
+          `AHA ${deg}°, level ${lf}, ${name}: ${k.toFixed(3)} times the ratio with every wall normal`,
+        );
+      }
+      const k =
+        drawnOverTdi(infarct, midEjection(infarct), deg, lf, false) /
+        drawnOverTdi(normal, midEjection(normal), deg, lf, false);
+      assert.ok(Math.abs(k - 1) < 0.1, `AHA ${deg}°, level ${lf}: ${k.toFixed(3)} times the normal heart's ratio`);
+    }
+  assert.ok(remote >= 18, `${remote} remote wall samples`);
+  // the longitudinal e' at the annulus stays the declared one: the compensation scales the radial velocity alone
+  const A = heartAnchors(infarct.heart);
+  for (const [side, x, declared] of [
+    ['septal', A.mvCenter.x - A.mvR, infarct.heart.physiology.ePrimeSeptalCmps],
+    ['lateral', A.mvCenter.x + A.mvR, infarct.heart.physiology.ePrimeLateralCmps],
+  ] as const) {
+    let ePrime = 0;
+    for (let i = 0; i < 1000; i++) {
+      const p = i / 1000;
+      const zAnn = infarct.heart.physiology.mapseCm * cycleStateAt(infarct.tables, p).longitudinal;
+      const v = sampleTissueVelocity(infarct.heart, infarct.tables, p, x, A.mvCenter.y, zAnn + 0.2);
+      ePrime = Math.max(ePrime, -v.vz * 100);
+    }
+    assert.ok(Math.abs(ePrime / declared - 1) < 0.005, `${side} e' ${ePrime.toFixed(3)} cm/s, declared ${declared}`);
+  }
+});
+
 test('only the cases that declare regional motion evaluate the field', () => {
   for (const input of CASE_INPUTS) {
     const { heart } = buildCaseModels(loadCaseById(input.id), REST_PATIENT);

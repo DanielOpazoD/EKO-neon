@@ -34,6 +34,7 @@ import { skirtOffsetAt, skirtWarpScale } from '../valveSkirt';
 import { setSample, type ClassifyCtx } from './context';
 import { AORTIC_ROOT_WALL_CM } from '../aorticValve';
 import { LA_WALL_CM, LAA_WALL_CM } from './pericardium';
+import { leftAppendageDistance } from '../atrialAppendages';
 import {
   appendageScale,
   atrialPoseCache,
@@ -174,19 +175,7 @@ export function classifyAtria(c: ClassifyCtx): boolean {
       : leftAtrialFreeSdf(x, y, z, la.x, la.y, czL, lr.x * bo, lr.y * bo, rzL, zTop);
   // the atrium's epicardium, for the pericardial sac: the outer face of the appendage's wall here, and of the body's below,
   // once its clips are known (decision 273)
-  c.laEpi =
-    sdCapsule(
-      x,
-      y,
-      z,
-      la.x + lr.x * 0.55,
-      la.y + lr.y * 0.55,
-      czL + 0.4,
-      la.x + lr.x * 0.95,
-      la.y + lr.y * 0.55 + 2.0,
-      czL + 0.9,
-      0.55 * bo,
-    ) - LAA_WALL_CM;
+  c.laEpi = leftAppendageDistance(la, lr, czL, bo, 0, x, y, z) - LAA_WALL_CM;
   // The corner between the septum and the annulus belongs to the atrium (decision 318)
   const dCrossLa = leftAtrialFreeSdf(
     la.x,
