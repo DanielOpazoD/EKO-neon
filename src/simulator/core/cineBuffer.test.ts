@@ -33,6 +33,8 @@ function makeCineFrame(frameId: number, phase: number, timeS: number, fillByte: 
       colorTimeS: null,
     },
     scene: {} as Scene,
+    tables: {} as CineFrame['tables'],
+    flow: {} as CineFrame['flow'],
     gate: null,
     spectrumColumn: null,
     spectralRange: { vMin: -1, vMax: 1 },
@@ -74,6 +76,9 @@ test('CineBuffer enforces capacity ring eviction, clamps offsets, and isolates c
   src.acquisition.probe.u = 99;
   assert.equal(buf.newest?.display[0], 50);
   assert.equal(buf.newest?.acquisition.probe.u, 3);
+  // the beat context is immutable: shared by reference, never copied
+  assert.equal(buf.newest?.tables, src.tables);
+  assert.equal(buf.newest?.flow, src.flow);
 
   for (let i = 2; i <= 6; i++) {
     buf.capture(makeCineFrame(i, (i * 0.15) % 1, i * 0.15, i * 10));

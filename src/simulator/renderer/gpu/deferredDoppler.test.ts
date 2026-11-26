@@ -23,13 +23,16 @@ import { ATTEN_NP_PER_DB, SOFT_TISSUE_ATTEN_DB } from '../acoustic/acoustics';
 import { buildScanLut, computeSectorMapping } from '../scanConvert';
 import type { PolarFrameSpec } from '../types';
 import {
+  colorPowerFromPresentAlpha,
   computeDopplerBoxBounds,
   DeferredDopplerPipeline,
   type DeferredDopplerSettings,
   type PolarGBuffer,
 } from './deferredDoppler';
 import {
+  colorPowerConfidence,
   ST_HYSTERESIS_RATIO,
+  ST_POW_ALPHA_MIN,
   ST_SPATIAL_LAMINAR_MIX,
   ST_SPATIAL_TURB_MIX,
 } from '@/simulator/doppler/color/spatiotemporalFilter';
@@ -434,7 +437,36 @@ test('DeferredDopplerPipeline.readbackBox decodes complex phasors back into alia
     Math.abs(velOut[polarIdx]! - vShiftedExpected) < 1e-5,
     `expected shifted readback ${vShiftedExpected}, got ${velOut[polarIdx]}`,
   );
+
+  // A freeze snapshot also takes the power: alpha 0.78 = 0.5 + 0.5·confidence, so the CPU overlay of the read-back field
+  // fades the texel as the present pass did; overgain breakthrough (alpha 1 + b) is the CPU power 1 + b
+  const powOut = new Float32Array(TEST_SPEC.lines * TEST_SPEC.samples).fill(9);
+  assert.equal(pipe.readbackBox(TEST_SPEC, scale, shift, velOut, varOut, powOut), true);
+  assert.ok(Math.abs(colorPowerConfidence(powOut[polarIdx]!, COLOR_THRESHOLD) - 0.56) < 1e-6);
+  assert.equal(powOut[0], 0, 'no power outside the ROI box');
+  fakeReadback[idx + 3] = 1.3;
+  assert.equal(pipe.readbackBox(TEST_SPEC, scale, shift, velOut, varOut, powOut), true);
+  assert.ok(Math.abs(powOut[polarIdx]! - 1.3) < 1e-6);
   pipe.dispose();
+});
+
+test('colorPowerFromPresentAlpha gives the CPU overlay the opacity and breakthrough the present pass gives the texel', () => {
+  // GLSL_PRESENT_FRAG: powAlpha = mix(ST_POW_ALPHA_MIN, 1, clamp((a − 0.5)·2, 0, 1)), breakthrough = clamp(a − 1, 0, 1);
+  // overlayColorField: ST_POW_ALPHA_MIN + (1 − ST_POW_ALPHA_MIN)·colorPowerConfidence(p), breakthrough p > 1 ? p − 1 : 0
+  for (let a = 0.5; a <= 2.0001; a += 0.01) {
+    const p = colorPowerFromPresentAlpha(a);
+    const gpuAlpha = ST_POW_ALPHA_MIN + (1 - ST_POW_ALPHA_MIN) * Math.min(1, Math.max(0, (a - 0.5) * 2));
+    const cpuAlpha = ST_POW_ALPHA_MIN + (1 - ST_POW_ALPHA_MIN) * colorPowerConfidence(p, COLOR_THRESHOLD);
+    assert.ok(Math.abs(cpuAlpha - gpuAlpha) < 1e-9, `alpha ${a.toFixed(2)}: opacity ${cpuAlpha} vs ${gpuAlpha}`);
+    const gpuBreak = Math.min(1, Math.max(0, a - 1));
+    const cpuBreak = p > 1 ? Math.min(1, p - 1) : 0;
+    assert.ok(Math.abs(cpuBreak - gpuBreak) < 1e-9, `alpha ${a.toFixed(2)}: breakthrough ${cpuBreak} vs ${gpuBreak}`);
+  }
+  // and it inverts the upload encoding (GlPresentUploads.ensureColor) wherever the power is recoverable
+  for (let p = COLOR_THRESHOLD * ST_HYSTERESIS_RATIO + 0.005; p < COLOR_THRESHOLD + 0.3; p += 0.01) {
+    const a = 0.5 + 0.5 * colorPowerConfidence(p, COLOR_THRESHOLD);
+    assert.ok(Math.abs(colorPowerFromPresentAlpha(a) - p) < 1e-6, `power ${p.toFixed(3)}`);
+  }
 });
 
 test('Webgl2Renderer defers Doppler allocation in B-mode and binds GPU-resident deferred texture in present() with zero CPU color upload', () => {

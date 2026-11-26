@@ -331,16 +331,20 @@ export class Webgl2Renderer implements RendererBackend {
     this.doppler.resetHistory();
   }
 
-  /** Optional on-demand readback of the shaded Doppler ROI box for verification or freeze snapshots. */
+  /**
+   * Optional on-demand readback of the shaded Doppler ROI box for verification or freeze snapshots
+   * (`ColorFieldDriver.readbackDeferredGpu`); `powOut` takes the colour power the CPU overlay blends like the present pass.
+   */
   readbackDopplerBox(
     spec: PolarFrameSpec,
     scaleMps: number,
     baselineShiftMps: number,
     velOut: Float32Array,
     varOut: Float32Array,
+    powOut?: Float32Array,
   ): boolean {
     if (this.disposed || this.contextLost) return false;
-    return this.doppler.readbackBox(spec, scaleMps, baselineShiftMps, velOut, varOut);
+    return this.doppler.readbackBox(spec, scaleMps, baselineShiftMps, velOut, varOut, powOut);
   }
 
   dispose(): void {

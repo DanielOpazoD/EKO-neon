@@ -34,21 +34,33 @@ export function scoreAcquisition(
   return { total: Math.round(Math.min(100, total)), perView };
 }
 
+/** The model's value of a protocol measurement and what can capture it: its kind and units, in one of its modalities. */
+export interface MeasurementTruth {
+  value: number;
+  units: string;
+  kind: Measurement['kind'];
+  label: string;
+  modalities: readonly string[];
+}
+
 /**
  * Map a required measurement id to the truth value and the measurement kind that can capture it. The protocol registry
  * is the single source: a hand-kept list here once dropped seven required measurements from every score (Simpson
  * volumes, TAPSE, e′, LA AP, PW thickness, LVOT velocity) without a trace.
  */
-export function truthFor(
-  id: string,
-  t: StructuredEchoTruth,
-): { value: number; units: string; kind: Measurement['kind']; label: string } | null {
+export function truthFor(id: string, t: StructuredEchoTruth): MeasurementTruth | null {
   const spec = getMeasurementSpec(id);
   if (!spec) return null;
   const value = spec.truth(t);
-  // a truth that does not exist in this case (no TR jet, for instance) cannot be scored
+  // a truth that does not exist in this case (no TR jet, no A wave in AF) can be neither scored nor compared with
   if (value === null || !Number.isFinite(value) || value <= 0) return null;
-  return { value, units: spec.units, kind: spec.kind, label: spec.label };
+  return {
+    value,
+    units: spec.units,
+    kind: spec.kind,
+    label: spec.label,
+    modalities: spec.modalities,
+  };
 }
 
 export interface MeasurementScoreRow {
@@ -75,6 +87,8 @@ const MIN_VIEW_SCORE_FOR_VALID = 50;
 export interface MeasurementScoringOptions {
   /** Free measurements may stand for required ones (`modePolicy(mode).freeMeasurementsScored`); default true. */
   freeMeasurements?: boolean;
+  /** They will once the impression is corrected (practice): the unmatched rows say so instead of «No medida». */
+  freeMeasurementsPending?: boolean;
 }
 
 export interface ExamScoringOptions extends MeasurementScoringOptions {
@@ -85,12 +99,12 @@ export interface ExamScoringOptions extends MeasurementScoringOptions {
 /**
  * Matching user measurement: by semantic id when the protocol panel was used (the last one taken
  * wins, as on a real machine); otherwise, when free measurements are scored, the closest free
- * measurement of the right kind.
+ * measurement that can be this one: the same kind and units, taken in one of its modalities. By kind
+ * alone a free CW velocity of 5.0 m/s stood for the septal e′ of the AF case (TDI, 5.5 cm/s): 100 points.
  */
 function bestMatch(
   id: string,
-  kind: Measurement['kind'],
-  truth: number,
+  truth: MeasurementTruth,
   ms: Measurement[],
   freeMeasurements: boolean,
 ): Measurement | null {
@@ -99,8 +113,9 @@ function bestMatch(
   if (!freeMeasurements) return null;
   let best: Measurement | null = null;
   for (const m of ms) {
-    if (m.kind !== kind || m.measurementId) continue;
-    if (!best || Math.abs(m.value - truth) < Math.abs(best.value - truth)) best = m;
+    if (m.measurementId || m.kind !== truth.kind || m.units !== truth.units) continue;
+    if (!truth.modalities.includes(m.modality)) continue;
+    if (!best || Math.abs(m.value - truth.value) < Math.abs(best.value - truth.value)) best = m;
   }
   return best;
 }
@@ -109,13 +124,13 @@ export function scoreMeasurements(
   caseDef: CaseDefinition,
   truth: StructuredEchoTruth,
   measurements: Measurement[],
-  { freeMeasurements = true }: MeasurementScoringOptions = {},
+  { freeMeasurements = true, freeMeasurementsPending = false }: MeasurementScoringOptions = {},
 ): MeasurementScore {
   const rows: MeasurementScoreRow[] = [];
   for (const req of caseDef.requiredMeasurements) {
     const t = truthFor(req.measurementId, truth);
     if (!t) continue;
-    const m = bestMatch(req.measurementId, t.kind, t.value, measurements, freeMeasurements);
+    const m = bestMatch(req.measurementId, t, measurements, freeMeasurements);
     if (!m) {
       rows.push({
         measurementId: req.measurementId,
@@ -130,7 +145,9 @@ export function scoreMeasurements(
         points: 0,
         comment: freeMeasurements
           ? 'No medida.'
-          : 'No medida desde la lista del protocolo (en el examen una medición libre no cuenta).',
+          : freeMeasurementsPending
+            ? 'No medida desde la lista del protocolo (una medición libre se compara al corregir).'
+            : 'No medida desde la lista del protocolo (en el examen una medición libre no cuenta).',
       });
       continue;
     }

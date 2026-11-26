@@ -1,3 +1,5 @@
+import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
+import type { FlowFieldParams } from '@/simulator/doppler/flow-primitives/flowField';
 import type { BeamFrame } from '@/simulator/probe/pose';
 import type { FrameAcquisition, GateInfo } from './protocol';
 import type { Scene } from '@/simulator/renderer/types';
@@ -8,6 +10,15 @@ export interface CineFrame {
   acquisition: FrameAcquisition;
   /** Models are replaced, not mutated, by the core; retain the acquired pose and model references. */
   scene: Scene;
+  /**
+   * The beat the frame was acquired in, kept by reference like the models: in atrial fibrillation and free breathing the
+   * core replaces its tables and flow field every beat and never mutates them. A frozen frame's colour is formed from
+   * them, not from the beat that is live when the learner scrolls back: a colour cine spans many beats, and with the live
+   * beat a frame in diastasis could fill with another beat's mitral inflow. A full cine keeps at most one context per
+   * beat it spans (32 KiB each; 13 beats, 0.4 MiB, in af-diastolic at 10 colour frames/s).
+   */
+  tables: BeatTables;
+  flow: FlowFieldParams;
   gate: GateInfo | null;
   spectrumColumn: Float32Array | null;
   spectralRange: { vMin: number; vMax: number };

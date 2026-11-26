@@ -13,8 +13,8 @@ import {
   formatClinical,
   RIGHT_HEART_RULES,
 } from '@/clinical/reference-values';
-import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import { discProfileFromContour } from '@/simulator/measurements/simpson';
+import { truthFor } from './scoring/scoring';
 import { rvspFromTr, simpsonBiplaneVolume } from '@/clinical/formulas';
 
 /**
@@ -385,16 +385,16 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
   if (t.wallMotion.abnormalSegments.length) out.push(`${t.wallMotion.description}.`);
   const mr = t.regurgitation.mr;
   if (mr) {
-    // EROA, regurgitant volume, fraction and vena contracta: integrative grading (ASE/EACVI 2017)
+    // graded on the EROA, regurgitant volume and fraction the line cites (valveGrading.ts, ASE 2017). It cites neither a
+    // vena contracta nor a PISA radius: both are the EROA restated (as a width, and at a 40 cm/s aliasing velocity for
+    // the jet's own peak), and the radius of a mild orifice (0.47–0.62 cm in the AF, artifact and HCM cases) sits in the
+    // guideline's intermediate band, so the line read «leve (… radio PISA@40 0.62 cm)» against its own grade, as it had
+    // with «VC 0.44 cm»
     const grade = { none: 'trivial', mild: 'leve', moderate: 'moderada', severe: 'severa' }[
       gradeMitralRegurgitation(mr)
     ];
-    const extra: string[] = [];
-    if (mr.venaContractaCm !== undefined) extra.push(`VC ${mr.venaContractaCm.toFixed(2)} cm`);
-    if (mr.pisaRadius40Cm !== undefined)
-      extra.push(`radio PISA@40 ${mr.pisaRadius40Cm.toFixed(2)} cm`);
     out.push(
-      `Insuficiencia mitral ${grade} (ORE ${mr.eroaCm2.toFixed(2)} cm², volumen regurgitante ${mr.regurgitantVolumeMl.toFixed(0)} mL, fracción ${mr.regurgitantFractionPct.toFixed(0)} %${extra.length ? `, ${extra.join(', ')}` : ''})${Math.abs(mr.jetDirectionDeg) > 15 ? ', chorro excéntrico' : ''}.`,
+      `Insuficiencia mitral ${grade} (ORE ${mr.eroaCm2.toFixed(2)} cm², volumen regurgitante ${mr.regurgitantVolumeMl.toFixed(0)} mL, fracción ${mr.regurgitantFractionPct.toFixed(0)} %)${Math.abs(mr.jetDirectionDeg) > 15 ? ', chorro excéntrico' : ''}.`,
     );
   }
   const ar = t.regurgitation.ar;
@@ -458,57 +458,28 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
   return out;
 }
 
+/**
+ * The model's value a measurement is compared with: that of its protocol measurement, the one its id says it measured,
+ * when the case has it (`truthFor`, the scorer's rule). Two comparisons the report made are gone. A truth of zero, the A
+ * wave of a case in AF, divided the deviation by zero: «0.00 m/s · +Infinity %», or «NaN %» for 0.00 measured. And a free
+ * measurement, which records no structure, was given the closest of a few true values, so it always looked right: a
+ * 3.4 cm caliper across the RV of the normal case was compared with the LA diameter (3.5 cm) and read −3 %. The protocol
+ * compares by id, never by the closest number.
+ */
 function matchTruth(
   m: Measurement,
   t: StructuredEchoTruth,
 ): { value: number; text: string } | null {
-  if (m.measurementId) {
-    const spec = getMeasurementSpec(m.measurementId);
-    const val = spec ? spec.truth(t) : null;
-    if (val === null || val === undefined) return null;
-    const fmt =
-      m.kind === 'velocity' && m.units === 'm/s'
-        ? formatClinical(val, 'velocityMps')
-        : m.kind === 'vti'
-          ? formatClinical(val, 'vtiCm')
-          : m.kind === 'linear'
-            ? formatClinical(val, 'linearCm')
-            : `${val.toFixed(m.kind === 'time' || m.kind === 'volume' ? 0 : 1)} ${m.units}`;
-    return { value: val, text: fmt };
-  }
-  // Heuristic mapping by kind + modality; explicit labels can be attached by the measurement tools later.
-  if (m.kind === 'velocity' && (m.modality === 'cw' || m.modality === 'pw')) {
-    // choose the closest plausible source: AV Vmax, LVOT Vmax, E, TR
-    const candidates = [
-      t.aorticValve.vmaxMps,
-      t.lvot.vmaxMps,
-      t.mitral.ePeakMps,
-      t.rightHeart.trVmaxMps ?? 0,
-    ].filter((v) => v > 0);
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'velocityMps') };
-  }
-  if (m.kind === 'vti') {
-    const candidates = [t.aorticValve.vtiCm, t.lvot.vtiCm];
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'vtiCm') };
-  }
-  if (m.kind === 'linear') {
-    const candidates = [
-      t.lv.eddCm,
-      t.lvot.diameterCm,
-      t.lv.ivsdCm,
-      t.la.apDiameterCm,
-      t.aorta.sinusCm,
-    ];
-    const best = candidates.reduce((a, b) =>
-      Math.abs(b - m.value) < Math.abs(a - m.value) ? b : a,
-    );
-    return { value: best, text: formatClinical(best, 'linearCm') };
-  }
-  return null;
+  const truth = m.measurementId ? truthFor(m.measurementId, t) : null;
+  if (!truth) return null;
+  const val = truth.value;
+  const fmt =
+    m.kind === 'velocity' && m.units === 'm/s'
+      ? formatClinical(val, 'velocityMps')
+      : m.kind === 'vti'
+        ? formatClinical(val, 'vtiCm')
+        : m.kind === 'linear'
+          ? formatClinical(val, 'linearCm')
+          : `${val.toFixed(m.kind === 'time' || m.kind === 'volume' ? 0 : 1)} ${m.units}`;
+  return { value: val, text: fmt };
 }

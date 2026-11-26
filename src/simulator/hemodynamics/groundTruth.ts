@@ -65,8 +65,11 @@ export interface StructuredEchoTruth {
       vmaxMps: number;
       vtiCm: number;
       jetDirectionDeg: number;
-      /** Circular-equivalent vena contracta width (cm). */
-      venaContractaCm?: number;
+      /**
+       * Expected vena contracta width (cm): the circular-equivalent width of the model orifice, 2·√(EROA/π), which its
+       * jet neck is built from. A value to read a caliper against, never a grading criterion: it is the EROA again.
+       */
+      expectedVenaContractaCm?: number;
       /** Expected hemispheric PISA radius (cm) at standard aliasing velocity v_a = 0.40 m/s. */
       pisaRadius40Cm?: number;
     } | null;
@@ -262,7 +265,7 @@ export function computeGroundTruth(c: CaseDefinition, tables?: BeatTables): Stru
               vmaxMps: rg.mrVmaxMps,
               vtiCm: rg.mrVtiCm,
               jetDirectionDeg: mrCfg.jetDirectionDeg,
-              venaContractaCm: venaContractaFromEroaCm(mrCfg.eroaCm2),
+              expectedVenaContractaCm: venaContractaFromEroaCm(mrCfg.eroaCm2),
               pisaRadius40Cm:
                 rg.mrVmaxMps > 0 ? pisaRadiusCm(mrCfg.eroaCm2, rg.mrVmaxMps, 0.4) : undefined,
             }

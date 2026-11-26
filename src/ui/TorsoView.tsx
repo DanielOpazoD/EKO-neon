@@ -7,8 +7,16 @@ import { RotationDial } from './RotationDial';
 import { CheckItem, MenuCap, usePopover } from './menu';
 import { IconCrosshair, IconLayers, IconMinus, IconPlus } from './icons';
 import { mountNavigatorScene, type NavigatorZoom } from './navigator/navigatorScene';
+import type { NavigatorCameraState } from './navigator/navigatorCamera';
 
 export { narrowPanelFovDeg } from './navigator/navigatorScene';
+
+/**
+ * Where the learner left the navigator's camera. It outlives each scene and the component itself: breathing, position
+ * or case rebuild the scene, and the report, the curriculum or a collapsed rail unmount it, and each time the framing
+ * went back to the overview.
+ */
+const navigatorCamera: { current: NavigatorCameraState | null } = { current: null };
 
 /**
  * 3D torso + probe trainer (spec 4.3, 58, 76). Clean clinical torso: wrap-around superellipse chest
@@ -38,7 +46,13 @@ export function TorsoView() {
   useEffect(() => {
     const el = ref.current;
     if (!el || webglError) return;
-    return mountNavigatorScene(el, { caseId, patient, dragAction: dragActionRef, zoom: zoomRef });
+    return mountNavigatorScene(el, {
+      caseId,
+      patient,
+      dragAction: dragActionRef,
+      zoom: zoomRef,
+      camera: navigatorCamera,
+    });
   }, [caseId, patient, webglError]);
 
   return (

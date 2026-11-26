@@ -28,6 +28,7 @@ import {
 import { measureMediastinum } from './mediastinum';
 import { IAS_FOSSA_DESCENT_SHARE, IAS_FOSSA_EDGE_TO } from './laGeometry';
 import { bsaMosteller } from '@/clinical/formulas';
+import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 
 /**
  * Measures the geometric model of a case the way an echocardiographer would (chamber volumes by
@@ -237,6 +238,19 @@ export function measureModel(
     1,
     3,
   );
+  // SIVd and PPd where the protocol takes them: in the PLAX plane (the anteroseptal direction, azimuth 120°, of
+  // viewDefinitions.ts), perpendicular to the long axis at the level of the LVIDd, from the cavity through the
+  // anteroseptal and through the inferolateral wall, on the structures its caliper must sit on. The rows above cross
+  // the septum at 180° and the free wall at −90°, where no standard caliper does: with the septal thickness centred on
+  // the A4C they read 2.28 / 1.50 cm in HOCM, and its PLAX 1.88 / 1.36 cm, of the 2.1 / 1.1 declared.
+  const plaxWall = (id: 'ivsd' | 'lvpwd', sign: 1 | -1): number => {
+    const d: [number, number, number] = [-0.5 * sign, 0.866 * sign, 0];
+    const r = lvCavityRadiusAt(heart, edPose, Math.atan2(d[1], d[0]), zEDD) + 0.3;
+    const structs = getMeasurementSpec(id)!.placement!.structures as Structure[];
+    return runDir(edPose, structs, [d[0] * r, d[1] * r, zEDD], d, 3);
+  };
+  const ivsdPlax = plaxWall('ivsd', 1);
+  const pwdPlax = plaxWall('lvpwd', -1);
   // systolic septal thickness at the same material level (the base descends with the annulus)
   const zEDS = esPose.zAnn + (zEDD / L) * esPose.lengthNow;
   const ivsS = runAt(
@@ -466,6 +480,16 @@ export function measureModel(
   add('lv-shortening', 'LV longitudinal shortening', lvLenED - lvLenES, 'cm', 0.9, 1.7, CQ, true);
   add('ivsd', 'IVS diastolic thickness', ivsD, 'cm', 0.6, female ? 0.9 : 1.0, CQ);
   add('lvpwd', 'PW diastolic thickness', pwD, 'cm', 0.6, female ? 0.9 : 1.0, CQ);
+  // against what the case declares, within the tolerance its student's caliper is graded with (the case's own when it
+  // requires the measurement, the protocol's otherwise): a wall drawn outside it fails an exact caliper
+  const declared = (id: 'ivsd' | 'lvpwd', label: string, value: number, truth: number) => {
+    const tol =
+      (c.requiredMeasurements.find((r) => r.measurementId === id)?.tolerancePct ??
+        getMeasurementSpec(id)!.tolerancePct) / 100;
+    add(`${id}-plax`, label, value, 'cm', truth * (1 - tol), truth * (1 + tol), 'case-declared');
+  };
+  declared('ivsd', 'IVSd on the PLAX caliper line (vs declared)', ivsdPlax, c.anatomy.lv.ivsdCm);
+  declared('lvpwd', 'PWd on the PLAX caliper line (vs declared)', pwdPlax, c.anatomy.lv.lvpwdCm);
   add('ivs-thickening', 'IVS systolic thickening', (ivsS / ivsD - 1) * 100, '%', 30, 75, CQ, true);
   add('apex-thickness', 'Apex wall thickness', apexT, 'cm', 0.5, 0.9, CQ, true);
   add(

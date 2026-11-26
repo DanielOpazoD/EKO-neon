@@ -1,11 +1,51 @@
 import { axialWallFactor } from './lvShape';
 import { latticeNoise3 } from '@/core/noise';
+import { RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD } from './lvSegments';
 import type { HeartModel } from './heartModel';
 
 /**
- * Local LV wall thickness (cm) at azimuth/level: end-diastolic thickness interpolated between the
- * septal and free-wall values, systolic thickening from wall incompressibility scaled by the segment's
- * motion (akinetic segments barely thicken), and a low-frequency modulation around the wall.
+ * Share of the septal thickness in the wall at azimuth `az` (rad): 1 on the septum, the wall between the RV insertions
+ * `rvAzA` and `rvAzP` (the anteroseptal and inferoseptal walls of lvSegments.ts), 0 on the free wall, and a smoothstep
+ * across ±0.2 rad (11.5°) of each insertion. It was 0.5 − 0.5·cos(az), centred on the septum of the A4C: ivsd only at the
+ * inferoseptal 180° and lvpwd only at the anterolateral 0°, while the PLAX caliper crosses the anteroseptal wall at
+ * 120° and the inferolateral at −60°, where it gave 0.75 and 0.25. HOCM (2.1 / 1.1 cm declared) then measured 1.88 cm of
+ * septum and 1.36 cm of posterior wall at the level of the mitral tips in PLAX, SIV/PP 1.38 instead of 1.91.
+ * The transition is narrower than the 28° from the anterior insertion to the PLAX (and PSAX) caliper line and the 20°
+ * from the inferior insertion to the A4C one. The smoothstep is antisymmetric about each insertion, so the share
+ * integrates to the septal arc exactly (meanWallThicknessCm). Translated to GLSL (glslGenerated.ts).
+ */
+export function septalShare(az: number, rvAzA: number, rvAzP: number): number {
+  const d = az - (rvAzA + rvAzP) * 0.5;
+  // angular distance from the septal centre, in [0, π]
+  const off = Math.abs(d - 2 * Math.PI * Math.floor(d / (2 * Math.PI) + 0.5));
+  const t = Math.min(1, Math.max(0, ((rvAzP - rvAzA) * 0.5 + 0.2 - off) / 0.4));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * End-diastolic base thickness (cm) averaged around the circumference: the free wall, and the septum over its share of
+ * it ((rvAzP − rvAzA) / 2π = 0.33). The shell volume that the systolic thickening conserves is the wall as drawn; with
+ * the septal share centred on the A4C the mean was (ivsd + lvpwd) / 2.
+ */
+export function meanWallThicknessCm(ivsd: number, lvpwd: number): number {
+  return (
+    lvpwd + ((ivsd - lvpwd) * (RV_GROOVE_INFERIOR_RAD - RV_GROOVE_ANTERIOR_RAD)) / (2 * Math.PI)
+  );
+}
+
+/**
+ * Gain of the low-frequency thickness modulation: the wall varies by up to ±WALL_MODULATION_GAIN / 2 at the base, fading
+ * to none at the apical cap. It was 0.28 (±14 %), more than the 12 % the protocol grants SIVd and PPd: at the caliper
+ * sites of the 12 cases it moved the drawn wall by −11.4 … +10.8 % (rms 5.8 % over the basal ring), so that an exact
+ * caliper could fail a case. At 0.08 (at most ±3.6 % at those sites, rms 1.6 %) it takes under a third of the
+ * tolerance and leaves the rest to the caliper. Shared with GLSL (glslHeartChambers.ts).
+ */
+export const WALL_MODULATION_GAIN = 0.08;
+
+/**
+ * Local LV wall thickness (cm) at azimuth/level: the end-diastolic thickness of the septum (`ivsd`) between the RV
+ * insertions and of the free wall (`lvpwd`) elsewhere (`septalShare`), systolic thickening from wall incompressibility
+ * scaled by the segment's motion (akinetic segments barely thicken), and a low-frequency modulation around the wall.
  */
 export function wallThicknessAt(
   m: HeartModel,
@@ -15,14 +55,15 @@ export function wallThicknessAt(
   amp: number,
 ): number {
   const lv = m.lv;
-  const septalness = 0.5 - 0.5 * Math.cos(az);
-  const tBase = lv.lvpwd + (lv.ivsd - lv.lvpwd) * septalness;
+  const tBase =
+    lv.lvpwd +
+    (lv.ivsd - lv.lvpwd) * septalShare(az, RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD);
   // end-diastolic thickness: septal / free-wall value over the basal half, tapering to the apical thickness
   const tED = tBase * axialWallFactor(levelFrac, lv.apexT / tBase);
-  // low-frequency thickness modulation (±14 % at the base, fading to none at the apical cap)
+  // low-frequency thickness modulation (at most ±4 % at the base, fading to none at the apical cap)
   const wallMod =
     1 +
-    0.28 *
+    WALL_MODULATION_GAIN *
       (latticeNoise3(
         Math.cos(az) * 1.6 + 7.3,
         Math.sin(az) * 1.6 + 2.1,

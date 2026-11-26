@@ -143,14 +143,17 @@ float mvAnnulusDistance(vec3 p, float tube) {
   float dzz = p.z - (MVL_CZ + mvHingeHeight(qu, qv));
   return sqrt(dPlane * dPlane + dzz * dzz) - tube;
 }
+// share of the SAM a fibre takes at fan fraction q: the chordae hold the commissures (samShare, mitralValve.ts)
+float mvSamShare(float q) { return 1.0 - q * q; }
 // one leaflet (fan of fibres from its focus): updates the nearest hit
-void mvLeaflet(float v, float u, float zr0, int tab, int prof, float focusV, float axisSign, float halfSpan, int leaflet, float openness,
+void mvLeaflet(float v, float u, float zr0, int tab, int prof, float focusV, float axisSign, float halfSpan, int leaflet, float opening, float samBlend,
                inout float best, inout float bestFrac, inout int bestLeaflet, inout float bestW, inout vec3 bestN) {
   float dv = v - focusV;
   float rho = length(vec2(dv, u));
   if (rho < 1e-6) return;
   float q = atan(u, dv * axisSign) / halfSpan;
   if (q <= -1.0 || q >= 1.0) return;
+  float openness = max(opening, samBlend * mvSamShare(q));
   float f = (q + 1.0) * 0.5 * float(MV_BINS);
   float hingeS = mvBin(tab, 0, f);
   float reach = mvBin(tab, 1, f);
@@ -200,8 +203,8 @@ float mitralDistance(vec3 p, out float dOut, out float fracOut, out int leafletO
   float best = 1e9, bestFrac = 0.0, bestW = 1.0;
   int bestLeaflet = 0;
   vec3 bestN = vec3(0.0, 0.0, 1.0);
-  mvLeaflet(v, u, zr0, MVL_A_TAB_BASE, MVL_A_PROF_BASE, MVL_A_FOCUS, MVL_A_AXIS, MVL_A_HALF, 0, max(MVL_OPEN, MVL_SAM), best, bestFrac, bestLeaflet, bestW, bestN);
-  mvLeaflet(v, u, zr0, MVL_P_TAB_BASE, MVL_P_PROF_BASE, MVL_P_FOCUS, MVL_P_AXIS, MVL_P_HALF, 1, MVL_OPEN, best, bestFrac, bestLeaflet, bestW, bestN);
+  mvLeaflet(v, u, zr0, MVL_A_TAB_BASE, MVL_A_PROF_BASE, MVL_A_FOCUS, MVL_A_AXIS, MVL_A_HALF, 0, MVL_OPEN, MVL_SAM, best, bestFrac, bestLeaflet, bestW, bestN);
+  mvLeaflet(v, u, zr0, MVL_P_TAB_BASE, MVL_P_PROF_BASE, MVL_P_FOCUS, MVL_P_AXIS, MVL_P_HALF, 1, MVL_OPEN, 0.0, best, bestFrac, bestLeaflet, bestW, bestN);
   if (best >= 1e8) return 0.0;
   dOut = best;
   fracOut = bestFrac;

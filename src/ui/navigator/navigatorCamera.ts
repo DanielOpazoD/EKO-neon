@@ -24,23 +24,47 @@ export function narrowPanelFovDeg(aspect: number): number {
   return (2 * Math.atan(Math.tan(half) * Math.max(1, 0.5 / aspect)) * 180) / Math.PI;
 }
 
+/** Azimuth and elevation (rad), distance (cm) and target point of the camera's orbit. */
+export interface NavigatorOrbit {
+  az: number;
+  el: number;
+  r: number;
+  tx: number;
+  ty: number;
+  tz: number;
+}
+
+/** Where the camera stands: carried over when the scene is rebuilt for another patient state or case. */
+export interface NavigatorCameraState {
+  orbit: NavigatorOrbit;
+  up: { x: number; y: number; z: number };
+}
+
 /** The orbit of the navigator's camera around a target point, and the framings its buttons offer. */
 export interface NavigatorCameraRig {
-  /** Azimuth and elevation (rad), distance (cm) and target point; change it, then call `update`. */
-  readonly orbit: { az: number; el: number; r: number; tx: number; ty: number; tz: number };
+  /** Change it, then call `update`. */
+  readonly orbit: NavigatorOrbit;
   /** Places the camera on the orbit and asks for a redraw. */
   update: () => void;
   readonly zoom: NavigatorZoom;
+  /** The camera as it stands, for the next rig to start from. */
+  state: () => NavigatorCameraState;
 }
 
-const OVERVIEW = { az: 0.12, el: 0.08, r: 54, tx: 2, ty: -1.5, tz: -6 };
+const OVERVIEW: NavigatorOrbit = { az: 0.12, el: 0.08, r: 54, tx: 2, ty: -1.5, tz: -6 };
 
+/**
+ * The rig starts at the overview, or where `from` left the camera: the scene is rebuilt when the patient's breathing or
+ * position changes, and the learner's framing went back to the overview each time.
+ */
 export function createCameraRig(
   camera: THREE.PerspectiveCamera,
   thorax: () => ThoraxModel | null,
   markDirty: () => void,
+  from?: NavigatorCameraState | null,
 ): NavigatorCameraRig {
-  const orbit = { ...OVERVIEW };
+  const orbit = { ...(from?.orbit ?? OVERVIEW) };
+  if (from) camera.up.set(from.up.x, from.up.y, from.up.z);
   const update = () => {
     markDirty();
     camera.position.set(
@@ -90,5 +114,9 @@ export function createCameraRig(
       update();
     },
   };
-  return { orbit, update, zoom };
+  const state = (): NavigatorCameraState => ({
+    orbit: { ...orbit },
+    up: { x: camera.up.x, y: camera.up.y, z: camera.up.z },
+  });
+  return { orbit, update, zoom, state };
 }

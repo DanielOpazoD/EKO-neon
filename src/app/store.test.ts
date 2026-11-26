@@ -14,6 +14,7 @@ import { SPECTRAL_MODE_DEFAULTS } from '@/simulator/doppler/spectral/spectrum';
 import type { FrameAcquisition, PhaseMarks, SimOutput } from '@/simulator/core/protocol';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import { frameOfSession } from './store/helpers';
+import { buildInput } from './useSimulation';
 
 describe('UI preferences schema (prefs.ts)', () => {
   it('accepts valid keys, strips unknown keys, and drops wrong-typed entries without throwing', () => {
@@ -340,6 +341,15 @@ describe('SimStore case identity and the views acquired by hand', () => {
     const found = { ...OPENING_POSE, tiltDeg: 6 };
     get().recordViewScore('plax', 92, found);
     assert.equal(get().handViewProgress.plax, 92);
+  });
+
+  it('pauses the simulator wherever the scanner is not on screen', () => {
+    get().setUi({ screen: 'report' });
+    assert.equal(buildInput({ width: 320, height: 240 }).paused, true);
+    get().setUi({ screen: 'references' });
+    assert.equal(buildInput({ width: 320, height: 240 }).paused, true);
+    get().setUi({ screen: 'simulator' });
+    assert.equal(buildInput({ width: 320, height: 240 }).paused, false);
   });
 
   it('keeps a ready only for the store’s case, and scores only the frames of this case and session', () => {

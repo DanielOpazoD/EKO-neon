@@ -170,9 +170,12 @@ export class SimulatorCore {
 
   constructor(caseDef: CaseDefinition, input: SimInput, options: SimulatorCoreOptions = {}) {
     this.caseDef = caseDef;
-    this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () =>
-      this.atlas.invalidate(),
-    );
+    // an experimental asset arriving (the Rodero heart, the Cole kernels) changes what the beam meets: the frames cached by
+    // pose and the strip's caches by ray and bin were formed without it
+    this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () => {
+      this.atlas.invalidate();
+      this.strips.reset();
+    });
     this.input = constrainAcquisition(input);
     this.acquisitionModality = input.modality;
     this.sessionEpoch = input.sessionEpoch ?? 0;
@@ -285,18 +288,16 @@ export class SimulatorCore {
           );
           this.poseCacheBins[phaseBin] = heartPose;
         }
+        // The column's own instant, as the 2D would see it then. With the beat's static thorax the spectrum kept the
+        // end-expiratory window all breath long (PW at 1.62 s: lung border −1.60 cm and diaphragm 0 against the 2D's
+        // −0.45 and −0.50), so a lung that shadowed the 2D and M-mode in inspiration left the spectrum intact.
         return {
           phase: beat.phase,
           beatIndex: beat.beatIndex,
           tablesVersion: bc.tablesVersion,
           tables: bc.tables,
           flow: bc.flow,
-          scene: {
-            heart: bc.heart,
-            thorax: bc.thorax,
-            heartPose,
-            physics: this.physics(),
-          },
+          scene: this.sceneAt(bc.heart, heartPose, bc.thorax, timeS),
         };
       },
       scene: (ph) => this.scene(ph),
@@ -326,7 +327,12 @@ export class SimulatorCore {
     const anatomyChanged = (input.anatomy ?? 'analytic') !== (this.input.anatomy ?? 'analytic');
     if (input.rendererBackend !== this.input.rendererBackend || anatomyChanged) {
       this.backend = this.pickBackend(input.rendererBackend, input.anatomy ?? 'analytic');
-      if (anatomyChanged) this.atlas.invalidate();
+      if (anatomyChanged) {
+        // another heart: a new acquisition, or the strip's caches keyed by ray (anatomy is not in the key) kept serving
+        // CW columns traced through the other one
+        this.atlas.invalidate();
+        this.strips.reset();
+      }
     }
     if ((input.imageFormation ?? 'lattice') !== (this.input.imageFormation ?? 'lattice'))
       this.atlas.invalidate();
@@ -464,9 +470,11 @@ export class SimulatorCore {
         {
           frame: this.frame,
           scene: sceneUse,
-          heart: this.heart,
-          flow: this.flow,
-          tables: this.tables,
+          // the acquired frame's own beat: a step that crosses a beat boundary without forming a frame has already
+          // swapped the live tables and flow for the next beat's
+          heart: sceneUse.heart,
+          flow: acquiredPrev?.flow ?? this.flow,
+          tables: acquiredPrev?.tables ?? this.tables,
           beam: beamUse,
           spec: specUse,
           phase: phaseUse,
@@ -530,28 +538,49 @@ export class SimulatorCore {
     });
   }
 
-  private thoraxAtTime(timeS = this.timeS): ThoraxModel {
-    if (this.input.patient.respiration !== 'free-breathing') return this.thorax;
+  /**
+   * The thorax at `timeS`: in free breathing the lung border slides medially by up to 1.15 cm and the diaphragm descends
+   * 0.5 cm with the depth of inspiration; otherwise `base`, the patient's static thorax. `base` is the thorax of the beat
+   * the instant belongs to, since the strips acquire up to a step back.
+   */
+  private thoraxAtTime(timeS: number, base = this.thorax): ThoraxModel {
+    if (this.input.patient.respiration !== 'free-breathing') return base;
     const d = respiratoryDepth(timeS);
     return {
-      ...this.thorax,
-      lungShiftCm: this.thorax.lungShiftCm + 1.15 * d,
-      diaphragmRiseCm: this.thorax.diaphragmRiseCm - 0.5 * d,
+      ...base,
+      lungShiftCm: base.lungShiftCm + 1.15 * d,
+      diaphragmRiseCm: base.diaphragmRiseCm - 0.5 * d,
     };
   }
 
+  /** The scene of the frames now: the current beat's heart at `phase`. */
   private scene(phase: number): Scene {
     const state = cycleStateAt(this.tables, phase, this.flow.flowPeaks);
-    const heartPose = computeHeartPose(this.heart, state);
+    return this.sceneAt(this.heart, computeHeartPose(this.heart, state), this.thorax, this.timeS);
+  }
+
+  /**
+   * The scene a beat's heart in `heartPose` is acquired in at `timeS`: the one recipe of the 2D, colour and M-mode frames
+   * (`scene`) and of every spectral column (`moment`), so the thorax breathes and the experimental anatomy and image
+   * formation apply alike in all of them.
+   */
+  private sceneAt(
+    heart: HeartModel,
+    heartPose: HeartPose,
+    thorax: ThoraxModel,
+    timeS: number,
+  ): Scene {
     const rodero = this.experimental.roderoHeart(this.input.anatomy, this.heart, this.tables);
     const cole = this.experimental.coleImage(this.input.imageFormation);
     return {
-      heart: this.heart,
+      heart,
       heartPose,
-      thorax: this.thoraxAtTime(),
+      thorax: this.thoraxAtTime(timeS, thorax),
       physics: this.physics(),
       ...(cole ? { imageFormation: cole.COLE_FORMATION, scatterGpu: cole.COLE_GPU } : {}),
-      ...(rodero
+      // The volume heart is bound to the current heart: a column of the beat before a change of patient (at most a step
+      // back) samples that beat's analytic heart, as the frames do while the volume loads, instead of rebinding it.
+      ...(rodero && rodero.heart === heart
         ? {
             heartClassifier: rodero.vh.classifier({
               apparatus: heartPose,
@@ -677,7 +706,13 @@ export class SimulatorCore {
       this.lastAnalysis = {
         ...analyzeView({
           heart: this.heart,
-          thorax: scene.thorax,
+          // The view's reference pose is the patient's at rest, the thorax the presets are solved against; the breath
+          // reaches the analysis through the frame, whose transmission carries the lung sliding over the window. Given
+          // the frame's thorax, rebuilt every frame in free breathing, each analysis solved the reference poses again
+          // (A4C 29 ms on average, suprasternal 30 ms; 0.37 and 0.30 ms now, as in expiration) and the reference moved
+          // with the breath: past half an inspiration the apical window left the axis, and the A4C preset, held still,
+          // scored 68-97 instead of 87-97, up to 4.8° and 1.2 cm off its own reference.
+          thorax: this.thorax,
           control: inp.probe,
           beam,
           frame: this.frame,
@@ -713,6 +748,8 @@ export class SimulatorCore {
         sessionEpoch: this.sessionEpoch,
       },
       scene,
+      tables: this.tables,
+      flow: this.flow,
       gate: isStripModality(inp.modality)
         ? this.strips.gateInfo(beam, spec, phase, this.frame.structure, this.stripCtx())
         : null,
@@ -809,8 +846,16 @@ export class SimulatorCore {
   private frozenOutput(): SimOutput | null {
     const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
+    // a frame acquired on the GPU deferred path keeps no colour field (zero readback): form it on its first frozen display
     if (cf.acquisition.modality === 'color' && !cf.colorVel && cf.colorTissue && cf.colorTransCode) {
-      this.colorDriver.reconstructCineColor(cf, this.heart, this.flow, this.tables, this.caseDef.seed);
+      // the field the GPU was presenting belongs to the newest frame, and nothing re-shades it while frozen: freeze that
+      // frame as it was seen; re-estimate any other from its own beat
+      const asSeen =
+        cf === this.cine.newest &&
+        this.dopplerOnGpu &&
+        this.gpu !== null &&
+        this.colorDriver.readbackDeferredGpu(cf, this.gpu);
+      if (!asSeen) this.colorDriver.reconstructCineColor(cf, this.caseDef.seed);
     }
     return this.composite(cf.beam, cf.spec, true, cf);
   }

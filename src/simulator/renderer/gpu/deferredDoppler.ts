@@ -8,7 +8,11 @@ import {
   UPLOAD_UNIT,
   type Locations,
 } from './glHelpers';
-import { DEFAULT_COLOR_SMOOTHING } from '@/simulator/doppler/color/spatiotemporalFilter';
+import { COLOR_THRESHOLD } from '@/simulator/doppler/color/colorDoppler';
+import {
+  DEFAULT_COLOR_SMOOTHING,
+  ST_HYSTERESIS_RATIO,
+} from '@/simulator/doppler/color/spatiotemporalFilter';
 import {
   GLSL_DOPPLER_AUTOCORR_FRAG,
   GLSL_DOPPLER_SHADE_FRAG,
@@ -119,6 +123,22 @@ export interface DeferredDopplerStats {
 }
 
 const ZERO4 = new Float32Array([0, 0, 0, 0]);
+
+/**
+ * CPU colour power of a present-texture texel from its alpha, the inverse of Pass D3's `encodeDisplayAlpha` (and of
+ * `GlPresentUploads.ensureColor`): alpha 0.5 + 0.5·c carries the power confidence c = colorPowerConfidence(p), alpha
+ * 1 + b the breakthrough b, which the CPU power encodes as 1 + b too. The confidence is a smoothstep between
+ * COLOR_THRESHOLD·ST_HYSTERESIS_RATIO and COLOR_THRESHOLD + 0.3, inverted in closed form (t = ½ − sin(asin(1 − 2c)/3)):
+ * `overlayColorField` then gives a read-back field the opacity and breakthrough the present pass gave the texel. Power
+ * outside that band is not recoverable and does not need to be: it maps to the same confidence.
+ */
+export function colorPowerFromPresentAlpha(alpha: number): number {
+  if (alpha > 1) return alpha;
+  const c = Math.min(1, Math.max(0, (alpha - 0.5) * 2));
+  const lo = COLOR_THRESHOLD * ST_HYSTERESIS_RATIO;
+  const hi = COLOR_THRESHOLD + 0.3;
+  return lo + (hi - lo) * (0.5 - Math.sin(Math.asin(1 - 2 * c) / 3));
+}
 
 /**
  * Pure helper computing the exact inclusive polar ROI box bounds and scissor rect matching
@@ -507,8 +527,9 @@ export class DeferredDopplerPipeline {
   }
 
   /**
-   * Optional on-demand readback of the shaded ROI box into CPU polar buffers (e.g. for GPU-vs-CPU
-   * parity verification). Not called during live GPU presentation.
+   * Optional on-demand readback of the shaded ROI box into CPU polar buffers (GPU-vs-CPU parity verification, and the
+   * freeze of the frame on screen). Not called during live GPU presentation. `powOut` receives the CPU colour power that
+   * `overlayColorField` blends exactly as the present pass blends the texel's alpha (`colorPowerFromPresentAlpha`).
    */
   readbackBox(
     spec: PolarFrameSpec,
@@ -516,12 +537,14 @@ export class DeferredDopplerPipeline {
     baselineShiftMps: number,
     velOut: Float32Array,
     varOut: Float32Array,
+    powOut?: Float32Array,
   ): boolean {
     const gl = this.gl;
     const box = this.lastBox;
     if (!this._valid || !box || !this.fbOut) return false;
     velOut.fill(NaN);
     varOut.fill(0);
+    powOut?.fill(0);
     if (box.empty) return true;
 
     const needed = box.boxW * box.boxH * 4;
@@ -548,6 +571,7 @@ export class DeferredDopplerPipeline {
         const vRaw = baselineShiftMps + invPiScale * Math.atan2(buf[o + 1]!, buf[o]!);
         velOut[polarRow + dx] = aliasVelocity(vRaw, scale, baselineShiftMps);
         varOut[polarRow + dx] = buf[o + 2]!;
+        if (powOut) powOut[polarRow + dx] = colorPowerFromPresentAlpha(buf[o + 3]!);
       }
     }
     return true;

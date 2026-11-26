@@ -6,6 +6,7 @@ import {
 import { VASCULAR_JOIN_EPS_CM } from '@/simulator/anatomy/vascularTube';
 import { ROOT_TUBE_END_T } from '@/simulator/anatomy/classify/root';
 import { PA_WALL_CM } from '@/simulator/anatomy/greatVessels';
+import { WALL_MODULATION_GAIN } from '@/simulator/anatomy/lvWall';
 
 /**
  * GLSL chamber & great-vessel geometry helpers (LV bullet profile, wall thickness, RV crescent
@@ -88,11 +89,11 @@ float lvCavitySdf(float xs, float y, float z, out vec3 n) {
   return (rad - R) * f * corr;
 }
 
+// lvWall.ts wallThicknessAt: ivsd between the RV insertions, lvpwd on the free wall (septalShare)
 float wallThicknessAt(float az, float levelFrac, float amp) {
-  float septalness = 0.5 - 0.5 * cos(az);
-  float tBase = LV_LVPWD + (LV_IVSD - LV_LVPWD) * septalness;
+  float tBase = LV_LVPWD + (LV_IVSD - LV_LVPWD) * septalShare(az, RV_AZA, RV_AZP);
   float tED = tBase * axialWallFactor(levelFrac, APEX_T / tBase);
-  float wallMod = 1.0 + 0.28 * (lat(vec3(cos(az) * 1.6 + 7.3, sin(az) * 1.6 + 2.1, levelFrac * 2.4), 3) - 0.5) * (1.0 - levelFrac * levelFrac);
+  float wallMod = 1.0 + ${WALL_MODULATION_GAIN.toFixed(8)} * (lat(vec3(cos(az) * 1.6 + 7.3, sin(az) * 1.6 + 2.1, levelFrac * 2.4), 3) - 0.5) * (1.0 - levelFrac * levelFrac);
   return tED * max(0.6, 1.0 + (LV_THICK_K - 1.0) * (0.35 + 0.65 * amp)) * wallMod;
 }
 

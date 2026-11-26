@@ -21,6 +21,8 @@
  * and the open leaflets swung out of the four-chamber plane.
  */
 
+import { fitOpenRotation, openProfile } from './openLeafletFit';
+
 export interface MitralParams {
   anteriorLeafletLengthCm: number;
   posteriorLeafletLengthCm: number;
@@ -76,14 +78,59 @@ export interface MitralValve {
 }
 
 /**
- * Systolic anterior motion (decision 268). It is driven by the ejection, beginning after the aortic valve opens and
- * peaking in mid-systole, and at a severity of `SAM_CONTACT_SEVERITY` and above it carries the anterior leaflet past its
- * open profile (to `SAM_MAX_BLEND` of the way from closed to open) until it meets the septum, the mitral–septal contact
- * of obstructive hypertrophic cardiomyopathy. It followed the contraction, which peaks at end-systole, and stopped at
- * 0.8: the leaflet stayed 19–21 mm from the septal muscle through systole.
+ * Systolic anterior motion (decision 268). The outflow drags the anterior leaflet toward the septum (`samDrag`), and at a
+ * severity of `SAM_CONTACT_SEVERITY` and above it carries the leaflet past its open profile (to `SAM_MAX_BLEND` of the way
+ * from closed to open) until it meets the septum, the mitral–septal contact of obstructive hypertrophic cardiomyopathy.
+ * It followed the contraction, which peaks at end-systole, and stopped at 0.8: the leaflet stayed 19–21 mm from the
+ * septal muscle through systole.
  */
 export const SAM_CONTACT_SEVERITY = 0.6;
 export const SAM_MAX_BLEND = 1.2;
+/**
+ * Time course of the drag, in ejection times from aortic valve opening (`CycleState.ejectionProgress`). SAM begins with
+ * the ejection, at low outflow velocity (Sherrid et al., J Am Coll Cardiol 2000;36:1344–1354), and the drag grows
+ * smoothly over its first 0.45 (`SAM_DRAG_RISE`); it holds while the Doppler's dynamic obstruction (`lvotNarrowing`)
+ * closes the tract from 0.25 to 0.85, and from `SAM_RELEASE_START` the leaflet returns over `SAM_RELEASE` ejection times:
+ * as the outflow wanes it lets the leaflet go, and the valve is closed by aortic closure, when the beat tables close the
+ * SAM's regurgitant orifice too (cycleModel, 'sam'). Released over 0.4 ejection times from 0.9, the anterior free edge
+ * was still 29 mm from the posterior one at aortic closure and coapted 90 ms into isovolumic relaxation: the 2D and the
+ * M-mode showed the valve open with no regurgitation in colour or CW, and the end-systolic LV diameter cut the leaflet.
+ * In the HOCM case (ejection 301 ms) the free edge meets the septum 114 ms after aortic opening and leaves it at 262 ms;
+ * by Pollick's relation of the gradient to the time from SAM onset to septal contact (y) and the contact's duration (x),
+ * 25·x/y + 25 mmHg (Circulation 1984;69:43–49), that is 58 mmHg, and the case declares 64. Its fastest point travels at
+ * 0.50 m/s going and 1.26 m/s returning, the speed of a valve closing.
+ * The drag followed the aortic opening, √(Q/Qmax), whose slope is infinite as the ejection starts: the tip moved 0.98 cm in
+ * the first 1/256 of the cycle of ejection and 2.5 cm in 18 ms (1–3 m/s), a step in M-mode instead of the anterior slope
+ * of SAM, and it fell back as steeply as the ejection ended.
+ */
+export const SAM_DRAG_RISE = 0.45;
+export const SAM_RELEASE_START = 0.85;
+export const SAM_RELEASE = 0.15;
+
+/**
+ * Share of the SAM a fibre takes at fraction `q` ∈ (−1, 1) of the anterior fan: the chordae hold the commissures to the
+ * tips of the papillary muscles and leave the middle of the leaflet free for the outflow to carry to the septum, as at the
+ * A2 scallop in obstructive HCM. Every fibre took the whole blend, and with the contact held into late systole the
+ * medial fibres of the HOCM case ran 4.7 mm deep into the posteromedial muscle over the last 30 % of their length; held
+ * by their chordae they touch its tip with the free edge, ≤ 1.7 mm deep, while the middle of the leaflet meets the
+ * septum. Mirrored in GLSL (mvSamShare, glslHeartValves.ts).
+ */
+export function samShare(q: number): number {
+  return 1 - q * q;
+}
+
+/** How far the outflow has dragged the anterior leaflet toward the septum (0…1) at `u` ejection times from aortic opening. */
+export function samDrag(u: number): number {
+  if (!(u > 0)) return 0;
+  if (u < SAM_DRAG_RISE) {
+    const s = u / SAM_DRAG_RISE;
+    return s * s * (3 - 2 * s);
+  }
+  const r = (u - SAM_RELEASE_START) / SAM_RELEASE;
+  if (r <= 0) return 1;
+  if (r >= 1) return 0;
+  return 1 - r * r * (3 - 2 * r);
+}
 /** Linear shortening of the annulus at end systole (area −19 %). */
 export const MV_SYSTOLIC_SHORTENING = 0.1;
 /** D/R of the D-shaped annulus: anteroposterior diameter ≈ 0.82 of the intercommissural one. */
@@ -119,19 +166,6 @@ function rayToAnnulus(fv: number, dv: number, R: number, D: number): number {
     if (sSeg > 0 && sSeg < sCircle) return sSeg;
   }
   return sCircle;
-}
-
-function openProfile(angles: number[], segLen: number): Float64Array {
-  const out = new Float64Array(6);
-  let a = 0,
-    z = 0;
-  for (let i = 0; i < 3; i++) {
-    a += Math.sin(angles[i]!) * segLen;
-    z += Math.cos(angles[i]!) * segLen;
-    out[i * 2] = a;
-    out[i * 2 + 1] = z;
-  }
-  return out;
 }
 
 /** Hinge height above the hinge plane at angle theta from the anteroposterior axis: saddle plus the curtain lift. */
@@ -245,6 +279,7 @@ function buildLeaflet(
  * @param lift z offset of the anterior (curtain) annulus relative to the hinge plane: the aortic root moves half as
  * much as the ventricular base, and the curtain with it.
  * @param tetherAL,tetherPM apical pull (cm) of each papillary muscle on the closed coaptation (papillaryTether).
+ * @param ejectionProgress ejection times since the aortic valve opened (CycleState.ejectionProgress), for the SAM drag.
  */
 export function buildMitralValve(
   cx0: number,
@@ -259,7 +294,7 @@ export function buildMitralValve(
   lift: number,
   tetherAL = 0,
   tetherPM = 0,
-  ejection = 0,
+  ejectionProgress = Number.NaN,
 ): MitralValve {
   const l = Math.hypot(toAortaX, toAortaY) || 1;
   // systolic annular contraction (area about a fifth smaller at end systole): the fibrous curtain keeps its place and
@@ -286,7 +321,10 @@ export function buildMitralValve(
     lift,
     thickness: p.thickeningCm,
     open,
-    samBlend: Math.min(SAM_MAX_BLEND, (p.samSeverity / SAM_CONTACT_SEVERITY) * ejection),
+    samBlend: Math.min(
+      SAM_MAX_BLEND,
+      (p.samSeverity / SAM_CONTACT_SEVERITY) * samDrag(ejectionProgress),
+    ),
     inflowSlope: 0,
     inflowDepth: 2,
     // normal coaptation 3.5 mm apical of the line between the hinges; prolapse carries the posterior body (and a little
@@ -373,7 +411,8 @@ function leafletDistance(
   mv: MitralValve,
   L: MitralLeaflet,
   leaflet: number,
-  openness: number,
+  open: number,
+  sam: number,
   best: number,
 ): number {
   const dv = v - L.focusV;
@@ -382,6 +421,7 @@ function leafletDistance(
   const psi = Math.atan2(u, dv * L.axisSign);
   const q = psi / L.halfSpan;
   if (q <= -1 || q >= 1) return best;
+  const openness = Math.max(open, sam * samShare(q));
   const f = ((q + 1) / 2) * MV_BINS;
   const hingeS = sampleBins(L.hinge, f);
   const reach = sampleBins(L.reach, f);
@@ -447,17 +487,8 @@ export function mitralDistance(x: number, y: number, z: number, mv: MitralValve)
   if (zr0 > 3.5 || zr0 < -2.5 || dx * dx + dy * dy > (mv.R + 2.2) * (mv.R + 2.2)) return 0;
   const v = dx * mv.ux + dy * mv.uy;
   const u = -dx * mv.uy + dy * mv.ux;
-  let best = leafletDistance(
-    v,
-    u,
-    zr0,
-    mv,
-    mv.anterior,
-    0,
-    Math.max(mv.open, mv.samBlend),
-    Infinity,
-  );
-  best = leafletDistance(v, u, zr0, mv, mv.posterior, 1, mv.open, best);
+  let best = leafletDistance(v, u, zr0, mv, mv.anterior, 0, mv.open, mv.samBlend, Infinity);
+  best = leafletDistance(v, u, zr0, mv, mv.posterior, 1, mv.open, 0, best);
   if (!(best < Infinity)) return 0;
   // leaflets are thickest at the free edge (rough zone) and thin out toward the commissures
   return (mv.thickness * (0.6 + 0.4 * mitralHit.frac) * 0.5 + 0.035) * (0.4 + 0.6 * mitralHit.w);
@@ -475,7 +506,7 @@ export function mitralLeafletPoint(
   out: number[],
 ): void {
   const L = leaflet === 0 ? mv.anterior : mv.posterior;
-  const openness = leaflet === 0 ? Math.max(mv.open, mv.samBlend) : mv.open;
+  const openness = leaflet === 0 ? Math.max(mv.open, mv.samBlend * samShare(q)) : mv.open;
   const psi = q * L.halfSpan;
   const f = ((q + 1) / 2) * MV_BINS;
   const hingeS = sampleBins(L.hinge, f);
@@ -593,22 +624,19 @@ export function mitralInflowSdf(x: number, y: number, z: number, mv: MitralValve
   return mitralOutlineSdf(x, y, mv) + 0.04 + inflowTaper(z - mitralHingeZ(x, y, mv), mv);
 }
 
-/** Minimum blood between an open leaflet and the ventricular wall (cm), beyond the first few millimetres of leaflet. */
-const OPEN_WALL_GAP = 0.25;
-/** Largest inward rotation of an open fibre (rad). */
-const OPEN_ROT_MAX = 1.5;
+/** Open profile of the fibre being fitted, scaled to its length. */
+const fibreProf = new Float64Array(6);
 
 /**
- * Rotate each open fibre inward, the least that keeps it inside the ventricle with a gap: the open profiles are the
- * same angles for every fibre, and without this the posterior leaflet opened through the posterior wall (the wall runs
- * almost parallel to the long axis below the posterior annulus) while its lateral fibres, facing a wall that flares
- * outward, have room to swing. `cavity` is the ventricular cavity's signed distance (negative inside).
+ * Turn each open fibre inward, the least that keeps it inside the ventricle with a gap (`fitOpenRotation`): the open
+ * profiles are the same angles for every fibre, and without this the posterior leaflet opened through the posterior wall
+ * (the wall runs almost parallel to the long axis below the posterior annulus) while its lateral fibres, facing a wall
+ * that flares outward, have room to swing. `cavity` is the ventricular cavity's signed distance (negative inside).
  */
 export function fitOpenLeaflets(
   mv: MitralValve,
   cavity: (x: number, y: number, z: number) => number,
 ): void {
-  const pts = new Float64Array(12);
   for (const [L, openness] of [
     [mv.anterior, Math.max(mv.open, mv.samBlend)],
     [mv.posterior, mv.open],
@@ -632,48 +660,8 @@ export function fitOpenLeaflets(
       const ix = -(mv.ux * dv - mv.uy * du),
         iy = -(mv.uy * dv + mv.ux * du);
       const openScale = 0.55 + 0.45 * Math.sqrt(Math.max(0, 1 - q * q));
-      // vertices and segment midpoints of the fully open profile
-      let pa = 0,
-        pz = 0;
-      for (let i = 0; i < 3; i++) {
-        const na = L.openProf[i * 2]! * openScale,
-          nz = L.openProf[i * 2 + 1]! * openScale;
-        pts[i * 4] = (pa + na) / 2;
-        pts[i * 4 + 1] = (pz + nz) / 2;
-        pts[i * 4 + 2] = na;
-        pts[i * 4 + 3] = nz;
-        pa = na;
-        pz = nz;
-      }
-      const clear = (rot: number): boolean => {
-        const cr = Math.cos(rot),
-          sr = Math.sin(rot);
-        for (let j = 0; j < 6; j++) {
-          const a0 = pts[j * 2]!,
-            z0 = pts[j * 2 + 1]!;
-          // the leaflet leaves the wall at its hinge: the gap it needs grows over the first half centimetre
-          const need = Math.min(OPEN_WALL_GAP, 0.4 * (Math.hypot(a0, z0) - 0.15));
-          if (need <= 0) continue;
-          const a = a0 * cr + z0 * sr,
-            zz = z0 * cr - a0 * sr;
-          if (cavity(hx + ix * a, hy + iy * a, hz + zz) > -need) return false;
-        }
-        return true;
-      };
-      let rot = 0;
-      while (rot < OPEN_ROT_MAX && !clear(rot)) rot += 0.1;
-      if (rot > 0 && rot < OPEN_ROT_MAX) {
-        // refine between the last blocked and the first clear angle
-        let lo = rot - 0.1,
-          hi = rot;
-        for (let i = 0; i < 4; i++) {
-          const mid = (lo + hi) / 2;
-          if (clear(mid)) hi = mid;
-          else lo = mid;
-        }
-        rot = hi;
-      }
-      L.openRot[k] = Math.min(rot, OPEN_ROT_MAX);
+      for (let i = 0; i < 6; i++) fibreProf[i] = L.openProf[i]! * openScale;
+      L.openRot[k] = fitOpenRotation(fibreProf, (a, z) => cavity(hx + ix * a, hy + iy * a, hz + z));
     }
     // neighbouring fibres of one sheet cannot turn independently: smooth across the fan
     const tmp = Float64Array.from(L.openRot);

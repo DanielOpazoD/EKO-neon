@@ -1,4 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { useShallow } from 'zustand/shallow';
 import { useHudStore, useSimStore } from './store';
 import { frameOfSession } from './store/helpers';
@@ -87,6 +95,10 @@ export function App() {
     })),
   );
   const modality = useSimStore((s) => s.modality);
+  // a learning screen the mode closes is never drawn, whatever the store holds (setMode moves off it too)
+  const screen = screenInMode(ui.screen, mode);
+  const isSim = screen === 'simulator';
+  const pageVisible = usePageVisible();
   useShortcuts();
 
   const onFrame = useCallback(
@@ -154,13 +166,16 @@ export function App() {
   useSimulation(size, onFrame);
 
   useEffect(() => {
-    const wantAudio = spectral.audioOn && isSpectralModality(modality);
+    // the Doppler sound is the scanner's: it stops with the scanner on another screen or in a hidden tab (the simulator
+    // pauses there, and the last spectrum would hold as a steady tone)
+    const wantAudio = spectral.audioOn && isSpectralModality(modality) && isSim && pageVisible;
     let cancelled = false;
     if (wantAudio && !audioRef.current) {
       import('@/simulator/doppler/audio/dopplerAudio').then(({ DopplerAudio }) => {
         if (cancelled) return;
         const st = useSimStore.getState();
         if (!st.spectral.audioOn || !isSpectralModality(st.modality) || audioRef.current) return;
+        if (screenInMode(st.ui.screen, st.mode) !== 'simulator' || document.hidden) return;
         const instance = new DopplerAudio();
         instance.start();
         instance.setVolume(st.spectral.volume);
@@ -177,15 +192,12 @@ export function App() {
       } else audioRef.current.setVolume(spectral.volume);
     }
     return undefined;
-  }, [spectral.audioOn, spectral.volume, modality]);
+  }, [spectral.audioOn, spectral.volume, modality, isSim, pageVisible]);
 
   // Clean interface: the whole left rail hides. The exam keeps it, with a torso of skin and ribs and no guide
   // (decision 256): where the probe sits on the chest is the learner's own reference, not a hint.
   const railVisible = ui.showTorso && !ui.minimal;
   const hints = modePolicy(mode).hintsEnabled;
-  // a learning screen the mode closes is never drawn, whatever the store holds (setMode moves off it too)
-  const screen = screenInMode(ui.screen, mode);
-  const isSim = screen === 'simulator';
   return (
     <div
       data-mobile-panel={mobilePanel ?? 'none'}
@@ -366,6 +378,16 @@ export function App() {
       )}
     </div>
   );
+}
+
+const onVisibility = (cb: () => void) => {
+  document.addEventListener('visibilitychange', cb);
+  return () => document.removeEventListener('visibilitychange', cb);
+};
+
+/** Whether the tab is visible (the Page Visibility API). */
+function usePageVisible(): boolean {
+  return useSyncExternalStore(onVisibility, () => !document.hidden);
 }
 
 /** The view score beside the guide's header, so it is glanceable while the guide is closed. */

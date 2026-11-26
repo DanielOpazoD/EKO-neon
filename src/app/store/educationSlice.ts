@@ -9,7 +9,7 @@ import {
 } from '@/education/progress';
 import { expectedFindings, getFinding, scoreImpression } from '@/education/impression';
 import { examSummaryOf, impressionCorrected } from '../examSummary';
-import { modePolicy, screenInMode } from '../modePolicy';
+import { examClosed, modePolicy, screenInMode } from '../modePolicy';
 import { OPENING_VIEW_LOST_BELOW, appPlacedPose, drawExamCase, freshSession } from './helpers';
 import type { EducationSlice, SimSliceCreator } from './types';
 
@@ -87,6 +87,8 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
   },
   addMeasurement: (m) =>
     set((s) => {
+      // the measurements of a finished exam are the ones it was scored on
+      if (examClosed(s)) return s;
       const progress = addEvent(s.progress, {
         t: Date.now(),
         kind: 'measurement',
@@ -99,18 +101,24 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       return { measurements: [...s.measurements, m], progress };
     }),
   removeMeasurement: (id) =>
-    set((s) => ({ measurements: s.measurements.filter((m) => m.id !== id) })),
-  clearMeasurements: () => set({ measurements: [] }),
+    set((s) =>
+      examClosed(s) ? s : { measurements: s.measurements.filter((m) => m.id !== id) },
+    ),
+  clearMeasurements: () => set((s) => (examClosed(s) ? s : { measurements: [] })),
   setActiveTool: (t) =>
-    set({
-      activeTool: t,
-      activeMeasurementId: null,
-      ...(t !== 'none' ? { cinePlaying: false } : {}),
-    }),
+    set((s) =>
+      t !== 'none' && examClosed(s)
+        ? s
+        : {
+            activeTool: t,
+            activeMeasurementId: null,
+            ...(t !== 'none' ? { cinePlaying: false } : {}),
+          },
+    ),
   setActiveMeasurement: (id) => {
     if (!id) return set({ activeMeasurementId: null, activeTool: 'none' });
     const spec = getMeasurementSpec(id);
-    if (!spec) return set({ activeMeasurementId: null, activeTool: 'none' });
+    if (!spec || examClosed(get())) return set({ activeMeasurementId: null, activeTool: 'none' });
     set({ activeMeasurementId: id, activeTool: spec.tool, cinePlaying: false });
   },
   completeTasks: (ids) =>
@@ -211,10 +219,13 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
         });
         saveProgress(typeof localStorage !== 'undefined' ? localStorage : null, progress);
       }
+      // closed from here on (`examClosed`): the image stays frozen and no tool stays armed over it
       return {
         examFinished: true,
         examResult: summary,
         frozen: true,
+        activeTool: 'none',
+        activeMeasurementId: null,
         progress,
         ui: { ...s.ui, screen: 'report' },
       };

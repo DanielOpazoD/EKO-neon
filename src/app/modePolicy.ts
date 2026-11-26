@@ -45,6 +45,17 @@ export function showsCaseIdentity(mode: ProductMode, examFinished: boolean): boo
 /** Name shown for the case while its identity is hidden. */
 export const EXAM_CASE_NAME = 'Caso de examen';
 
+/**
+ * A finished exam is closed, as its confirmation says: no acquiring, no measuring, no changing the impression. Only the
+ * impression used to close: Space or a modality key resumed the live image, whose views then filled the report's table
+ * of views while the recorded score left them out (decision 236), and a measurement taken after the finish joined the
+ * report's list beside a score row that read «No medida». The image stays frozen as the finish left it, with its cine
+ * to review, and the measurement list stays the one scored; changing the mode reopens the case for practice.
+ */
+export function examClosed(s: { mode: ProductMode; examFinished: boolean }): boolean {
+  return s.mode === 'exam' && s.examFinished;
+}
+
 /** What each product mode hides or disables. Extracted so the rules live in one place. */
 export function modePolicy(mode: ProductMode): ModePolicy {
   const exam = mode === 'exam';
