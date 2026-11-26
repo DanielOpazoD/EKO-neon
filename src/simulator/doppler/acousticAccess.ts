@@ -11,7 +11,7 @@ import {
 import { DOPPLER_SHADOW_TRANSMISSION } from './color/colorDoppler';
 
 /** 1 mm midpoint quadrature, independent of display resolution; refinements are checked explicitly. */
-const PATH_STEP_CM = 0.1;
+export const PATH_STEP_CM = 0.1;
 
 /**
  * Central-ray propagation at the spectral acquisition phase, never an older B-mode frame.
