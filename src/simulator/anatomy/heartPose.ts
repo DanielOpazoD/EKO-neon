@@ -2,7 +2,8 @@ import { radiusPreservingSeptalVolume } from './septalVolume';
 import { buildAorticExtension, type AorticExtension } from './aorticExtension';
 import type { CycleState } from '@/simulator/cardiac-cycle/cycleModel';
 import { Structure } from './tissue';
-import { sdRoundCone, smin } from './sdf';
+import { smin } from './sdf';
+import { fitOpenRotation, openProfile } from './openLeafletFit';
 import {
   allocLvProfileTable,
   axialWallFactor,
@@ -183,28 +184,35 @@ function raCollapseWindow(state: CycleState): number {
   return Math.exp(-(d * d) / (2 * 0.06 * 0.06));
 }
 
-/** Distance (cm) from a point to the nearer papillary muscle of `paps` (two round cones, 8 floats each). */
-function papillaryDistance(paps: Float64Array, x: number, y: number, z: number): number {
-  let d = Infinity;
-  for (let o = 0; o < 16; o += 8)
-    d = Math.min(
-      d,
-      sdRoundCone(
-        x,
-        y,
-        z,
-        paps[o]!,
-        paps[o + 1]!,
-        paps[o + 2]!,
-        paps[o + 3]!,
-        paps[o + 4]!,
-        paps[o + 5]!,
-        paps[o + 6]!,
-        paps[o + 7]!,
-      ),
+/**
+ * Signed distance (cm, negative inside) of the cavity the open mitral leaflets are kept inside (fitOpenLeaflets): the
+ * ventricle and its inflow column. The open leaflets swing apically into the ventricle, so the annular plane that clips
+ * the profile is not a wall here; the septum is where the classifier puts it, flattened toward the LV by a
+ * pressure-loaded RV. The papillary muscles were walls too, 3.5 mm thick (decision 225): a muscle tip just inward of a
+ * fibre's wall-limited position split its clear rotations in two and the free edge hopped between them, up to 2.3 cm per
+ * 1/256 of the cycle (openLeafletFit.ts), and the leaflets still entered the muscles in four cases, up to 3.5 mm. Kept
+ * off the wall alone, no leaflet reaches a muscle in ten cases; the free edges of the pulmonary hypertension case and of
+ * the elongated anterior leaflet of the HOCM case touch the tip of the posteromedial muscle, where their chordae insert,
+ * 0.3 and 1.8 mm deep.
+ */
+export function lvInflowCavitySdf(
+  m: HeartModel,
+  hp: Pick<ChamberPose, 'prof' | 'zAnn' | 'lengthNow' | 'septalShiftCm'>,
+  mv: MitralValve,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  const xs =
+    x -
+    septalShiftAt(
+      hp.septalShiftCm,
+      Math.atan2(y, x),
+      Math.min(1, Math.max(0, (z - hp.zAnn) / Math.max(hp.lengthNow, 1))),
     );
-  return d;
+  return smin(lvCavitySdf(hp.prof, m.lv.shape.ratio, xs, y, z), mitralInflowSdf(x, y, z, mv), 0.3);
 }
+
 export function computeHeartPose(m: HeartModel, state: CycleState): HeartPose {
   const pose = computeChamberPose(m, state);
   return { ...pose, aorta: buildAorticExtension(m, pose) };
@@ -348,7 +356,7 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
     -(1 - ROOT_EXCURSION) * zAnn,
     papillaryTether(tipAL[0], tipAL[1], tipAL[2], antAnnX, antAnnY, antAnnZ, m.anatomy.mitral),
     papillaryTether(tipPM[0], tipPM[1], tipPM[2], antAnnX, antAnnY, antAnnZ, m.anatomy.mitral),
-    state.avOpen,
+    state.ejectionProgress,
   );
   {
     // inflow below the annulus: from the outline where it lies farthest outside the cavity profile, straight to just
@@ -384,22 +392,8 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
       0,
       (rOut - lvCavityRadius(sh, prof, worstAz, zAnn + hMax) + 0.15) / hMax,
     );
-    // the open leaflets swing apically into the ventricle, so the annular plane that clips the profile is not a wall here;
-    // the septum is where the classifier puts it, flattened toward the LV by a pressure-loaded RV
-    fitOpenLeaflets(mitral, (px, py, pz) => {
-      const xs =
-        px -
-        septalShiftAt(
-          septalShiftCm,
-          Math.atan2(py, px),
-          Math.min(1, Math.max(0, (pz - zAnn) / Math.max(lengthNow, 1))),
-        );
-      // and the papillary muscles are not cavity: an open leaflet that reached one ran through it (decision 225)
-      return Math.max(
-        smin(lvCavitySdf(prof, sh.ratio, xs, py, pz), mitralInflowSdf(px, py, pz, mitral), 0.3),
-        0.1 - papillaryDistance(paps, px, py, pz),
-      );
-    });
+    const cavity = { prof, zAnn, lengthNow, septalShiftCm };
+    fitOpenLeaflets(mitral, (px, py, pz) => lvInflowCavitySdf(m, cavity, mitral, px, py, pz));
   }
   // Tricuspid valve: three radial leaflets — anterior (largest), septal (hanging along the septum, the +x side
   // of the RV inflow) and posterior (inferior) — whose closed tips converge toward the orifice centre. The annulus
@@ -544,57 +538,38 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
         c: 0,
         structure: Structure.TricuspidValve,
       });
+    // each zone's profile is fitted at three azimuths across it, with the mitral fibres' fitter (openLeafletFit.ts): its
+    // points in real coordinates are the circle's radius stretched by the annulus extension (decision 224) and the hinge
+    // on the annulus surface
     const rots: number[] = [];
+    const azimuths = new Float64Array(12);
     for (let zi = 0; zi < zoneDefs.length; zi++) {
       const [phi, halfSpan, lenFrac, opened] = zoneDefs[zi]!;
-      const segLen = (A.tvR * lenFrac) / 3;
       let rot = 0;
       if (tvOpen > 0) {
-        const clear = (r: number): boolean => {
-          const pr = buildProfile(
-            tvRNow,
-            opened.map((a) => a + r),
-            segLen,
-          );
-          for (const off of [-0.6, 0, 0.6]) {
-            const ang = phi + off * halfSpan;
-            const ca = Math.cos(ang),
-              sa = Math.sin(ang);
-            for (let i = 1; i <= 6; i++) {
-              // vertices (even i) and segment midpoints (odd i) of the three segments
-              const j = i >> 1,
-                t = i % 2 ? 0.5 : 0;
-              const rho = i % 2 ? pr[j * 2]! + (pr[j * 2 + 2]! - pr[j * 2]!) * t : pr[j * 2]!;
-              const zz =
-                i % 2 ? pr[j * 2 + 1]! + (pr[j * 2 + 3]! - pr[j * 2 + 1]!) * t : pr[j * 2 + 1]!;
-              const need = Math.min(0.25, 0.4 * (Math.hypot(tvRNow - rho, zz) - 0.15));
-              if (need <= 0) continue;
-              // in real coordinates: the circle's radius stretched by the annulus extension (decision 224)
-              const rr = rho * (1 + skirtBumpAt(tv, ang) / tv.R);
-              if (
-                rvCavity(
-                  tv.cx + rr * ca,
-                  tv.cy + rr * sa,
-                  tv.cz + zz + skirtOffset(tv, ang) * Math.min(1, rho / tv.R),
-                ) > -need
-              )
-                return false;
-            }
-          }
-          return true;
-        };
-        while (rot < 1.5 && !clear(rot)) rot += 0.1;
-        if (rot > 0 && rot < 1.5) {
-          let lo = rot - 0.1,
-            hi = rot;
-          for (let i = 0; i < 4; i++) {
-            const mid = (lo + hi) / 2;
-            if (clear(mid)) hi = mid;
-            else lo = mid;
-          }
-          rot = hi;
+        for (let n = 0; n < 3; n++) {
+          const ang = phi + (n - 1) * 0.6 * halfSpan;
+          azimuths[n * 4] = Math.cos(ang);
+          azimuths[n * 4 + 1] = Math.sin(ang);
+          azimuths[n * 4 + 2] = 1 + skirtBumpAt(tv, ang) / tv.R;
+          azimuths[n * 4 + 3] = skirtOffset(tv, ang);
         }
-        rot = Math.min(rot, 1.5);
+        rot = fitOpenRotation(openProfile(opened, (A.tvR * lenFrac) / 3), (a, zz) => {
+          const rho = tvRNow - a;
+          let d = -Infinity;
+          for (let n = 0; n < 12; n += 4) {
+            const rr = rho * azimuths[n + 2]!;
+            d = Math.max(
+              d,
+              rvCavity(
+                tv.cx + rr * azimuths[n]!,
+                tv.cy + rr * azimuths[n + 1]!,
+                tv.cz + zz + azimuths[n + 3]! * Math.min(1, rho / tv.R),
+              ),
+            );
+          }
+          return d;
+        });
       }
       rots.push(rot);
     }
