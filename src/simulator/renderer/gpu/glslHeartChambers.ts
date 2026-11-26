@@ -7,6 +7,7 @@ import { VASCULAR_JOIN_EPS_CM } from '@/simulator/anatomy/vascularTube';
 import { ROOT_TUBE_END_T } from '@/simulator/anatomy/classify/root';
 import { PA_WALL_CM } from '@/simulator/anatomy/greatVessels';
 import { WALL_MODULATION_GAIN } from '@/simulator/anatomy/lvWall';
+import { WALL_MOTION_BORDER_DEG, WALL_MOTION_BORDER_LEVEL } from '@/simulator/anatomy/lvGeometry';
 
 /**
  * GLSL chamber & great-vessel geometry helpers (LV bullet profile, wall thickness, RV crescent
@@ -89,12 +90,68 @@ float lvCavitySdf(float xs, float y, float z, out vec3 n) {
   return (rad - R) * f * corr;
 }
 
-// lvWall.ts wallThicknessAt: ivsd between the RV insertions, lvpwd on the free wall (septalShare)
-float wallThicknessAt(float az, float levelFrac, float amp) {
+// ---- regional wall motion (lvGeometry.ts), continuous across the AHA segment borders ----
+// a segment's share of the normal motion: its amplitude, no more than normal
+float wallMotionSegment(float id) {
+  return min(1.0, P(SEG_AMP_BASE + int(id + 0.5)));
+}
+// lvGeometry.ts ringMotion: n segments from id first, blended by a smoothstep over the borders
+float wallMotionRing(float deg, float n, float offsetDeg, float first) {
+  float span = 360.0 / n;
+  float u = (deg + offsetDeg) / span;
+  float k = floor(u);
+  float f = u - k;
+  float hw = ${WALL_MOTION_BORDER_DEG.toFixed(8)} / span;
+  float here = wallMotionSegment(first + (k - 1.0 - n * floor((k - 1.0) / n)));
+  if (f < hw) {
+    float prev = wallMotionSegment(first + (k - 2.0 - n * floor((k - 2.0) / n)));
+    return prev + (here - prev) * smoothstep(-hw, hw, f);
+  }
+  if (f > 1.0 - hw) {
+    float next = wallMotionSegment(first + (k - n * floor(k / n)));
+    return here + (next - here) * smoothstep(1.0 - hw, 1.0 + hw, f);
+  }
+  return here;
+}
+// lvGeometry.ts lvRegionalMotion: basal, mid and apical rings blended across the level borders, the cap (17) at the end
+float lvRegionalMotion(float az, float levelFrac) {
+  float raw = (az - (RV_AZA + RV_AZP) * 0.5) * 180.0 / PI + 180.0;
+  float deg = raw - 360.0 * floor(raw / 360.0);
+  float h = ${WALL_MOTION_BORDER_LEVEL.toFixed(8)};
+  if (levelFrac < 1.0 / 3.0 + h) {
+    float basal = wallMotionRing(deg, 6.0, 0.0, 1.0);
+    if (levelFrac <= 1.0 / 3.0 - h) return basal;
+    float mid = wallMotionRing(deg, 6.0, 0.0, 7.0);
+    return basal + (mid - basal) * smoothstep(1.0 / 3.0 - h, 1.0 / 3.0 + h, levelFrac);
+  }
+  if (levelFrac < 2.0 / 3.0 + h) {
+    float mid = wallMotionRing(deg, 6.0, 0.0, 7.0);
+    if (levelFrac <= 2.0 / 3.0 - h) return mid;
+    float apical = wallMotionRing(deg, 4.0, 45.0, 13.0);
+    return mid + (apical - mid) * smoothstep(2.0 / 3.0 - h, 2.0 / 3.0 + h, levelFrac);
+  }
+  float apical = wallMotionRing(deg, 4.0, 45.0, 13.0);
+  if (levelFrac <= 1.0 - h) return apical;
+  float t = smoothstep(1.0 - h, 1.0, levelFrac);
+  return apical * (1.0 - t) + wallMotionSegment(17.0) * t;
+}
+// the field, or 1 without reading it when the case has no regional abnormality: SEG_AMP[0], which no AHA id uses, holds
+// the heart's regionalMeanFrac (paramLayout.ts), 0 exactly when the field is 1 everywhere
+float lvMotionAt(float az, float levelFrac) {
+  return P(SEG_AMP_BASE) > 0.0 ? lvRegionalMotion(az, levelFrac) : 1.0;
+}
+// lvGeometry.ts regionalCavityOffset: an akinetic wall keeps its end-diastolic radius, a dyskinetic one bulges past it
+float regionalCavityOffset(float az, float levelFrac, float motion) {
+  return motion < 1.0 ? (1.0 - motion) * (LV_RMAX_ED - LV_RMAX) * lvProfileG(levelFrac) * ellipseFactor(LV_RATIO, az) : 0.0;
+}
+
+// lvWall.ts wallThicknessAt: ivsd between the RV insertions, lvpwd on the free wall (septalShare); the wall gains the share
+// of the normal thickening that it makes of the normal excursion (motion)
+float wallThicknessAt(float az, float levelFrac, float motion) {
   float tBase = LV_LVPWD + (LV_IVSD - LV_LVPWD) * septalShare(az, RV_AZA, RV_AZP);
   float tED = tBase * axialWallFactor(levelFrac, APEX_T / tBase);
   float wallMod = 1.0 + ${WALL_MODULATION_GAIN.toFixed(8)} * (lat(vec3(cos(az) * 1.6 + 7.3, sin(az) * 1.6 + 2.1, levelFrac * 2.4), 3) - 0.5) * (1.0 - levelFrac * levelFrac);
-  return tED * max(0.6, 1.0 + (LV_THICK_K - 1.0) * (0.35 + 0.65 * amp)) * wallMod;
+  return tED * max(0.6, 1.0 + (LV_THICK_K - 1.0) * motion) * wallMod;
 }
 
 
@@ -103,11 +160,13 @@ vec4 rvRadii(float az, float z, float contraction, float tvZ, float rvCollapse) 
   float L = LV_LEN;
   float azN = az < 0.0 ? az + TWO_PI : az;
   float u = (azN - RV_AZA) / (RV_AZP - RV_AZA);
-  float rCav = lvCavityRadius(az, z);
   float levelFrac = clamp((z - ZANN) / max(LENGTH_NOW, 1.0), 0.0, 1.0);
-  float amp = P(SEG_AMP_BASE + ahaSegment(az, levelFrac));
+  // the LV epicardium as the classifier draws it, regional offset of the endocardium included (rv.ts)
+  float motion = lvMotionAt(az, levelFrac);
+  float radialFactor = lvRadialOffsetFactor(az, z);
+  float rCav = lvCavityRadius(az, z) + regionalCavityOffset(az, levelFrac, motion) * radialFactor;
   // decision 223: the crest's lost thickness goes to the cavity below the tricuspid plane, the free wall stays
-  float wFull = wallThicknessAt(az, levelFrac, amp) * lvRadialOffsetFactor(az, z);
+  float wFull = wallThicknessAt(az, levelFrac, motion) * radialFactor;
   float below = clamp((z - (TV_CZ + tvZ - 0.6)) / 0.3, 0.0, 1.0);
   float crestLossR = wFull * (1.0 - septalCrestFactor(az, z - ZANN)) * below * below * (3.0 - 2.0 * below);
   float rEpi = rCav + wFull - crestLossR;
