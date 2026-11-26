@@ -30,6 +30,17 @@ export function impressionCorrected(s: {
 }
 
 /**
+ * Whether the score table shows the model's value of a required measurement. Those values are the answer key (decision
+ * 257): in practice the table listed them for every required measurement before «Corregir», measured or not, so the
+ * severe stenosis gave away its Vmax and its VTIs before the learner had measured anything. As the report's «Modelo
+ * (verdad)» column does, a value the learner has measured is compared at once; the others wait for the correction, which
+ * in the exam is the finish, the only time its table is shown.
+ */
+export function showsScoredTruth(row: { measured: number | null }, corrected: boolean): boolean {
+  return corrected || row.measured !== null;
+}
+
+/**
  * The impression score the curriculum sees: none until the impression is corrected, so that a task cannot complete
  * while the learner toggles findings until it does — that would tell which ones are right (decision 257). In practice it
  * is the first impression ever corrected on the case: «Corregir» reveals the key and «Rehacer» clears the sheet, so a

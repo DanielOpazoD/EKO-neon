@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSlidingPill } from './useSlidingPill';
 import { useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
-import { exportCaseTag, modePolicy } from '@/app/modePolicy';
+import { examClosed, exportCaseTag, modePolicy } from '@/app/modePolicy';
 import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
 import { IconPause, IconPlay, IconSliders, IconTorso } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
@@ -17,6 +17,8 @@ const MODES = MODALITY_LIST;
 export function ModeBar() {
   const s = useSimStore(
     useShallow((st) => ({
+      // a finished exam keeps its frozen image: the store refuses a modality or a resume (`examClosed`)
+      closed: examClosed(st),
       frozen: st.frozen,
       modality: st.modality,
       setModality: st.setModality,
@@ -40,6 +42,7 @@ export function ModeBar() {
             data-tour={m.id === 'color' ? 'color' : m.id === 'pw' ? 'pw' : undefined}
             onClick={() => s.setModality(m.id)}
             aria-pressed={s.modality === m.id}
+            disabled={s.closed}
           >
             {m.label}
             <kbd className="kbd" aria-hidden="true">
@@ -54,9 +57,16 @@ export function ModeBar() {
         className={`freeze-btn${s.frozen ? ' active' : ''}`}
         data-tour="freeze"
         onClick={() => s.toggleFreeze()}
-        data-tip={s.frozen ? 'Reanudar' : 'Congelar la imagen'}
-        data-tip-key="Espacio"
+        data-tip={
+          s.closed
+            ? 'Examen finalizado: la imagen queda congelada'
+            : s.frozen
+              ? 'Reanudar'
+              : 'Congelar la imagen'
+        }
+        data-tip-key={s.closed ? undefined : 'Espacio'}
         aria-pressed={s.frozen}
+        disabled={s.closed}
       >
         <i className="run-dot" aria-hidden="true" />
         {s.frozen ? 'Reanudar' : 'Congelar'}

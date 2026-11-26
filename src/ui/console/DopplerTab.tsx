@@ -1,3 +1,4 @@
+import { examClosed } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
 import { SPECTRAL_SCALE_RANGE, type SpectralModality } from '@/simulator/doppler/spectral/spectrum';
@@ -39,6 +40,8 @@ export function DopplerTab() {
       setUi: st.setUi,
       settings: st.settings,
       spectral: st.spectral,
+      // a finished exam keeps the image it was finished on (`examClosed`)
+      closed: examClosed(st),
     })),
   );
   const tip = useTip();
@@ -51,11 +54,11 @@ export function DopplerTab() {
         <IconDoppler size={22} />
         <p>Activa una modalidad Doppler para ajustarla aquí.</p>
         <div className="quick">
-          <button onClick={() => s.setModality('color')}>Color</button>
-          <button onClick={() => s.setModality('pw')}>PW</button>
-          <button onClick={() => s.setModality('cw')}>CW</button>
-          <button onClick={() => s.setModality('tdi')}>TDI</button>
-          <button onClick={() => s.setModality('m-mode')}>M</button>
+          <button onClick={() => s.setModality('color')} disabled={s.closed}>Color</button>
+          <button onClick={() => s.setModality('pw')} disabled={s.closed}>PW</button>
+          <button onClick={() => s.setModality('cw')} disabled={s.closed}>CW</button>
+          <button onClick={() => s.setModality('tdi')} disabled={s.closed}>TDI</button>
+          <button onClick={() => s.setModality('m-mode')} disabled={s.closed}>M</button>
         </div>
       </div>
     );

@@ -1,5 +1,5 @@
 import { useSimStore } from '@/app/store';
-import { modePolicy, showsCaseIdentity } from '@/app/modePolicy';
+import { examClosed, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
 import { useShallow } from 'zustand/shallow';
 import { loadCaseById } from '@/cases';
 import { MEASUREMENT_SPECS, type MeasurementSpec } from '@/simulator/measurements/protocol';
@@ -62,6 +62,7 @@ export function MeasurementPanel() {
           onClick={() => s.setActiveMeasurement(isActive ? null : spec.id)}
           data-tip={spec.instruction}
           aria-label={`Medir ${spec.label}`}
+          disabled={examClosed(s)}
         >
           {spec.shortLabel}
         </button>

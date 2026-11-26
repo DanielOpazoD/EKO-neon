@@ -27,6 +27,27 @@ export function markerScreenPosition(
   return reprojectGeometry([{ x: mk.x, y: mk.y }], mk.captureSector, m)[0] ?? { x: mk.x, y: mk.y };
 }
 
+/**
+ * The orientation marker beside the apex shows the side of the image the probe's index mark points to: the +lateral side
+ * (θ > 0), screen right, and screen left once «Invertir izq/der» mirrors the image, as `polarToPixel` maps it. It was
+ * drawn on the right whatever the setting, so with the image inverted it pointed at the side opposite the notch, which is
+ * the one thing it is there to tell. The label sits outside the dot, on the same side.
+ */
+export function orientationMarker(m: SectorMapping): {
+  x: number;
+  y: number;
+  labelX: number;
+  labelAlign: 'left' | 'right';
+} {
+  const side = m.invertLR ? -1 : 1;
+  return {
+    x: m.apexX + 16 * side,
+    y: m.apexY + 4,
+    labelX: m.apexX + 24 * side,
+    labelAlign: side > 0 ? 'left' : 'right',
+  };
+}
+
 export interface SpectralAxisTick {
   valueMps: number;
   frac: number; // 0 = top of strip, 1 = bottom of strip
@@ -152,12 +173,15 @@ export function drawOverlay(
     ctx.closePath();
     ctx.fill();
   }
+  const mark = orientationMarker(m);
   ctx.fillStyle = '#5cc8ff';
   ctx.beginPath();
-  ctx.arc(m.apexX + 16, m.apexY + 4, 4, 0, Math.PI * 2);
+  ctx.arc(mark.x, mark.y, 4, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#9aa4b5';
-  ctx.fillText('R', m.apexX + 24, m.apexY + 4);
+  ctx.textAlign = mark.labelAlign;
+  ctx.fillText('R', mark.labelX, mark.y);
+  ctx.textAlign = 'left';
   ctx.strokeStyle = 'rgba(92,200,255,0.5)';
   ctx.beginPath();
   for (let i = 0; i <= 20; i++) {

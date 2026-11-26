@@ -1,7 +1,7 @@
 import { viewLabel } from '@/simulator/windows/viewLabels';
 import { modalityLabel } from '@/simulator/renderer/modality';
 import { useSimStore } from '@/app/store';
-import { examSummaryOf, impressionCorrected } from '@/app/examSummary';
+import { examSummaryOf, impressionCorrected, showsScoredTruth } from '@/app/examSummary';
 import { useShallow } from 'zustand/shallow';
 import { formatClinical } from '@/clinical/reference-values';
 import { buildEducationalReport } from '@/education/report';
@@ -67,13 +67,14 @@ export function ReportScreen() {
   const revealed = showsCaseIdentity(s.mode, s.examFinished);
   const report = buildEducationalReport(s.measurements, s.truth, !revealed);
   const caseDef = loadCaseById(s.caseId);
-  const acquisition = scoreAcquisition(caseDef, s.viewProgress);
   const expected = s.truth ? expectedFindings(s.truth) : [];
   const impression = s.impressionSelection.length
     ? scoreImpression(s.impressionSelection, expected)
     : null;
   // the exam shows the summary recorded when it was finished (decision 236); practice, the live one
   const summary = s.mode === 'exam' ? s.examResult : examSummaryOf(s);
+  // the views as they were scored: in the exam, those of its record, not the ones the frames still on their way add
+  const acquisition = summary?.acquisition ?? scoreAcquisition(caseDef, s.viewProgress);
   // nothing says which findings are right until the impression is corrected (decision 257); then the sheet closes
   const corrected = impressionCorrected(s);
   const sheetClosed = corrected;
@@ -443,7 +444,9 @@ export function ReportScreen() {
                   <tr key={r.measurementId}>
                     <td>{r.label}</td>
                     <td>{r.measured === null ? '—' : `${r.measured.toFixed(2)} ${r.units}`}</td>
-                    <td>{`${r.truth.toFixed(2)} ${r.units}`}</td>
+                    <td>
+                      {showsScoredTruth(r, corrected) ? `${r.truth.toFixed(2)} ${r.units}` : '—'}
+                    </td>
                     <td>{r.errorPct === null ? '—' : `${r.errorPct.toFixed(0)} %`}</td>
                     <td>{r.viewScore ?? '—'}</td>
                     <td>{r.points}</td>
