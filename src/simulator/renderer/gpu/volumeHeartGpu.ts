@@ -61,7 +61,10 @@ export function volumeHeartGpu(vh: VolumeHeart, endDiastole: HeartPose): HeartVo
     key,
     glsl: GLSL_VOLUME_HEART,
     upload(gl) {
-      if (tex) return;
+      // the renderer a recovery builds after a lost context (core/gpuRecovery.ts) calls this again from its new pass A
+      // variant: the textures of the lost context belong neither to the restored context nor to a new one (isTexture is
+      // false for them); kept, binding them would fail (INVALID_OPERATION) and the volume heart would draw empty
+      if (tex && gl.isTexture(tex.label)) return;
       const d = vh.gpu();
       const [nx, ny, nz] = d.dims;
       const make3d = (internal: number, format: number, type: number, data: ArrayBufferView) => {

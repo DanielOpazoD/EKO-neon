@@ -258,7 +258,12 @@ export type SimRequest =
   /** One-touch Auto-Optimization (iScan): analyzes current polar frame bands to optimize gain & TGC. */
   | { kind: 'autoOpt' }
   /** Jump to the cine frame closest to end-diastole ('ed') or end-systole ('es'). */
-  | { kind: 'cinePhaseJump'; target: 'ed' | 'es' };
+  | { kind: 'cinePhaseJump'; target: 'ed' | 'es' }
+  /**
+   * Dev hook (`__echotwin.frameBus.request`): lose the GPU port's WebGL context, or restore the one so lost, through
+   * WEBGL_lose_context, to check the recovery in a browser (`core/gpuRecovery.ts`).
+   */
+  | { kind: 'gpuContext'; action: 'lose' | 'restore' };
 export type SimResponse =
   | {
       kind: 'autoTrace';
@@ -272,7 +277,9 @@ export type SimResponse =
   | { kind: 'probePoint'; point: ProbePointInfo }
   | { kind: 'explainPoint'; explain: PointExplanation }
   | { kind: 'autoOpt'; gainDb: number; tgcDb: number[] }
-  | { kind: 'cinePhaseJump'; offset: number; phase: number };
+  | { kind: 'cinePhaseJump'; offset: number; phase: number }
+  /** Whether there was a live context to lose, or a context lost by the hook to restore. */
+  | { kind: 'gpuContext'; ok: boolean };
 
 export type { EchoSourceId };
 
