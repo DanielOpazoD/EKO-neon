@@ -36,7 +36,6 @@ export const artifactChallengeCase: CaseDefinitionInput = {
     aorta: { lvotDiameterCm: 2.0, annulusCm: 2.3, sinusCm: 3.4, ascendingCm: 3.5 },
     mitral: { ...normalExcellentCase.anatomy.mitral, calcification: 0.85, thickeningCm: 0.2 },
     aorticValve: {
-      maxOpeningFraction: 0.6,
       calcification: 0.7,
       cuspThicknessCm: 0.2,
       bicuspid: false,

@@ -36,7 +36,6 @@ export const aorticStenosisModerateCase: CaseDefinitionInput = {
     aorta: { lvotDiameterCm: 1.9, annulusCm: 2.2, sinusCm: 3.0, ascendingCm: 3.1 },
     mitral: { ...normalExcellentCase.anatomy.mitral, annulusDiameterCm: 2.85, calcification: 0.35 },
     aorticValve: {
-      maxOpeningFraction: 0.5,
       calcification: 0.55,
       cuspThicknessCm: 0.18,
       bicuspid: false,

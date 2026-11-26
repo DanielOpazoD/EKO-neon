@@ -12,6 +12,7 @@ import {
   type BeatTables,
 } from '@/simulator/cardiac-cycle/cycleModel';
 import { fitDiaphragmMap } from './diaphragm';
+import { aorticOpeningForEoa, aorticRootProfile } from './aorticValve';
 import { caseOutflow } from '@/simulator/cardiac-cycle/outflow';
 
 /**
@@ -57,6 +58,12 @@ export function buildCaseModels(caseDef: CaseDefinition, patient: PatientState):
   // the descending aorta pulses as much as the patient's age lets it (decision 272)
   thorax.descAortaAreaStrain = descendingAortaAreaStrain(caseDef.demographics.ageYears);
   heart.descAortaAreaStrain = thorax.descAortaAreaStrain;
+  // the aortic cusps open as far as the Doppler's effective orifice needs, so the 2D and the Doppler show one valve
+  heart.aorticOpening = aorticOpeningForEoa(
+    aorticRootProfile(caseDef.anatomy),
+    caseDef.anatomy.aorticValve.cuspThicknessCm,
+    caseDef.hemodynamics.avEffectiveAreaCm2,
+  );
   heartLandmarks(heart);
   const tables = buildBeatTables(
     60 / caseDef.rhythm.heartRateBpm,

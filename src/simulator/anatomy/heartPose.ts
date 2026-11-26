@@ -123,7 +123,6 @@ export interface ChamberPose {
   rvPap: Float64Array;
   mvAngleAnt: number; // anterior leaflet angle (rad) in y–z plane from +z toward −y
   mvAnglePost: number;
-  avOpenAngle: number; // rad from perpendicular (closed) toward axis (open)
   tvAngleAnt: number;
   tvAnglePost: number;
   rvScale: number;
@@ -294,8 +293,6 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
   const postOpen = [-0.61 * openScale, -0.79 * openScale, -0.96 * openScale];
   const mvAngleAnt = antClosed[1]! + (antOpen[1]! - antClosed[1]!) * open;
   const mvAnglePost = postClosed[1]! + (postOpen[1]! - postClosed[1]!) * open;
-  const avOpenAngle =
-    0.15 + (1.35 * m.anatomy.aorticValve.maxOpeningFraction - 0.15) * state.avOpen;
   const tvAngleAnt = -1.0 + (0.6 + 1.0) * state.tvOpen;
   const tvAnglePost = 0.8 + (-0.7 - 0.8) * state.tvOpen;
   const A = anchorsCached(m);
@@ -588,10 +585,11 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
       );
     }
   }
-  // aortic cusps: pockets on the sinus wall opening by the cycle's opening times the case's maximum (decision 79)
+  // aortic cusps: pockets on the sinus wall (decision 79) opening by the cycle's opening times the case's peak, the one
+  // whose orifice gives the Doppler's effective area
   const aortic = buildAorticValve(
     cusps,
-    Math.max(0, Math.min(1, state.avOpen)) * m.anatomy.aorticValve.maxOpeningFraction,
+    Math.max(0, Math.min(1, state.avOpen)) * m.aorticOpening,
     m.anatomy.aorticValve.cuspThicknessCm,
   );
   // pulmonary valve: three cusps hinged at the outflow–trunk junction on the trunk axis, opening with RV ejection
@@ -715,7 +713,6 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
     rvPap,
     mvAngleAnt,
     mvAnglePost,
-    avOpenAngle,
     tvAngleAnt,
     tvAnglePost,
     rvScale: 1 - 0.3 * state.contraction,
