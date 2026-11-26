@@ -62,12 +62,12 @@ import { constrainAcquisition } from './acquisitionInput';
 import { artifactOverridesKey, patientKey } from './acquisitionKeys';
 import { buildChainedBeatTables, computePhaseMarks } from './beatChaining';
 import { BeatHistory } from './beatHistory';
-import { CineBuffer, type CineFrame } from './cineBuffer';
+import { CineBuffer, type CineFrame, type FrameFormation } from './cineBuffer';
 import { ColorFieldDriver } from './colorFieldDriver';
 import { EcgRing } from './ecgRing';
 import { ExperimentalLoaders } from './experimentalLoaders';
 import { FrameCompositor } from './frameCompositor';
-import { GpuRecovery, type GpuFactory } from './gpuRecovery';
+import { GPU_LOST, GpuRecovery, type GpuFactory } from './gpuRecovery';
 import { MMODE_TRACE_SHARE } from './mmodeStrip';
 import type {
   PhaseMarks,
@@ -115,6 +115,7 @@ export class SimulatorCore {
   private backend: RendererBackend;
   /** WebGL2 port of the procedural renderer; null when unavailable (reason in `gpuReason`). */
   private gpu: Webgl2Renderer | null;
+  /** 'ok' with the port; otherwise why the CPU tracer forms the frames: the start's reason, or `GPU_LOST` until it is back. */
   private gpuReason: string;
   /** Brings the port back after its context was lost (suspend, GPU process restart) instead of keeping the CPU tracer. */
   private gpuRecovery: GpuRecovery;
@@ -158,6 +159,8 @@ export class SimulatorCore {
   private sessionEpoch = 0;
   private ecgRing = new EcgRing();
   private strips = new StripEngine();
+  /** The strips start a new acquisition at the next live step (`restartStrips`): what the beam meets changed while frozen. */
+  private stripsRestartPending = false;
   private poseCacheHeart: HeartModel | null = null;
   private poseCacheTablesVersion = -1;
   private poseCacheBins: Array<HeartPose | undefined> = new Array(256);
@@ -189,7 +192,7 @@ export class SimulatorCore {
     // pose and the strip's caches by ray and bin were formed without it
     this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () => {
       this.atlas.invalidate();
-      this.strips.reset();
+      this.restartStrips(this.input.frozen);
     });
     this.input = constrainAcquisition(input);
     this.acquisitionModality = input.modality;
@@ -348,7 +351,7 @@ export class SimulatorCore {
         // another heart: a new acquisition, or the strip's caches keyed by ray (anatomy is not in the key) kept serving
         // CW columns traced through the other one
         this.atlas.invalidate();
-        this.strips.reset();
+        this.restartStrips(input.frozen);
       }
     }
     if ((input.imageFormation ?? 'lattice') !== (this.input.imageFormation ?? 'lattice'))
@@ -378,6 +381,18 @@ export class SimulatorCore {
     }
     this.input = constrainAcquisition(input);
     this.inputVersion++;
+  }
+
+  /**
+   * What the beam meets changed (an experimental asset arrived, another heart): the strips start a new acquisition, at
+   * once when live and at the next live step when frozen, as a change of modality waits for the unfreeze. The frozen strip
+   * is what the learner measures on: reset under it, it was drawn no more (0 columns over the frozen frame) and the
+   * auto-trace answered nothing until the image was live again. A new session still resets at once: nothing of the last
+   * one is measured in it.
+   */
+  private restartStrips(frozen: boolean): void {
+    if (frozen) this.stripsRestartPending = true;
+    else this.strips.reset();
   }
 
   recycle(buffer: ArrayBuffer): void {
@@ -413,15 +428,23 @@ export class SimulatorCore {
     const tStepStart = performance.now();
     const inp = this.input;
     const dt = Math.min(0.1, Math.max(0, dtS));
-    if (inp.frozen) return present ? this.frozenOutput() : null;
-    this.strips.resetStepTiming();
-    this.lastColorStepMs = 0;
     // A context lost since the last step is seen here, before the tier is resolved: the CPU tracer's first frame is formed
     // at medium («auto»), not at the calibrated tier (about 40 ms instead of 170 in Node; about a second in a browser, as
     // quality.ts says). The port comes back here too, so the frame of the return is at the calibrated tier, and when the
     // browser has restored the context by now the loss costs no CPU frame at all. Nothing to do on a machine without it.
-    if (this.gpu?.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+    // Frozen too, though nothing is formed then (the frozen frame is composed on the CPU from the cine): the frozen branch
+    // returned first, and a context lost while the learner measured was seen only on unfreezing. The HUD said «gpu ok»
+    // meanwhile, a restoration waited for the unfreeze, and the first attempt came a second after it instead of a second
+    // after the loss: unfrozen a minute later, a second of CPU-traced frames at medium (20 at 50 ms steps), none now.
+    if (this.gpu?.contextLost) this.dropGpu();
     if (!this.gpu) this.recoverGpu();
+    if (inp.frozen) return present ? this.frozenOutput() : null;
+    if (this.stripsRestartPending) {
+      this.stripsRestartPending = false;
+      this.strips.reset();
+    }
+    this.strips.resetStepTiming();
+    this.lastColorStepMs = 0;
     const tier = resolveQualityTier(
       inp.quality,
       this.gpu !== null && this.backend !== this.procedural,
@@ -477,6 +500,14 @@ export class SimulatorCore {
       const t0 = performance.now();
       this.renderFrame(beam, spec);
       this.timing.renderFrameMs = performance.now() - t0;
+      // forming the frame took all of renderFrame, its copy to the cine included: known only now that it is kept, and
+      // kept with the rest of how it was formed, so the frozen frame states its own cost and not the last live frame's
+      const formed = this.cine.newest!;
+      formed.formation = {
+        ...formed.formation,
+        renderFrameMs: this.timing.renderFrameMs,
+        cineMs: this.timing.cineMs,
+      };
       const gateInRender = this.strips.lastStepTiming.gateInfoMs - gateBefore;
       bmodeRenderMs = Math.max(0, this.timing.renderFrameMs - this.lastColorStepMs - gateInRender);
       produced = true;
@@ -524,7 +555,7 @@ export class SimulatorCore {
         this.gpu,
       );
       if (dopplerReshaded) this.lastColorStepMs += performance.now() - tReshade;
-      if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+      if (this.gpu.contextLost) this.dropGpu();
     }
     if (!produced && !isStrip && !dopplerReshaded) return null;
     if (!present) {
@@ -565,23 +596,29 @@ export class SimulatorCore {
    * once replaced or given up. Before, it was only dropped: never disposed (its listener stayed on the canvas) and never
    * rebuilt, so the session kept the CPU tracer, at medium quality, until the case was reloaded.
    */
-  private dropGpu(reason: string): void {
+  private dropGpu(): void {
     if (this.gpu) this.gpuRecovery.lost(this.gpu);
     this.gpu = null;
-    this.gpuReason = this.gpuRecovery.reason ?? reason;
+    this.gpuReason = GPU_LOST;
     this.switchBackendSource(this.procedural);
   }
 
   /** The port is back: a new atlas over it, the calibrated tier from this step on, and the HUD's warning gone. */
   private recoverGpu(): void {
     const renderer = this.gpuRecovery.poll();
-    if (!renderer) {
-      this.gpuReason = this.gpuRecovery.reason ?? this.gpuReason;
-      return;
-    }
+    if (!renderer) return;
     this.gpu = renderer;
     this.gpuReason = 'ok';
     this.switchBackendSource(renderer);
+  }
+
+  /**
+   * The port's state now, apart from how the frame shown was formed (`stats.gpuLive`): 'ok', lost (the attempt next, or
+   * given up), or, on a machine without it, why there is none. Part of the frozen key: the HUD over a frozen frame follows
+   * the port (the tip over one the CPU tracer formed, the badge over one the GPU formed), the frame's own unchanged.
+   */
+  private get gpuLive(): string {
+    return this.gpu ? 'ok' : (this.gpuRecovery.status ?? this.gpuReason);
   }
 
   /**
@@ -706,10 +743,10 @@ export class SimulatorCore {
       sceneAtPhase: (ph) => this.scene(ph),
     };
     const needSegments = (inp.needSegments ?? true) || (this.analysisCounter + 1) % 5 === 1;
-    if (this.gpu?.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+    if (this.gpu?.contextLost) this.dropGpu();
     let onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     if (this.gpu?.contextLost) {
-      this.dropGpu('WebGL context lost: CPU tracer');
+      this.dropGpu();
       onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     }
     this.displayOnGpu = onGpu;
@@ -740,7 +777,7 @@ export class SimulatorCore {
       };
       if (onGpu && this.gpu && this.gpu.gbuffer.ready) {
         const ok = this.colorDriver.stepDeferredGpu(colorCtx, this.gpu);
-        if (this.gpu.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+        if (this.gpu.contextLost) this.dropGpu();
         if (ok && this.gpu && this.gpu.hasDeferredDoppler) {
           this.dopplerOnGpu = true;
           const n = spec.lines * spec.samples;
@@ -794,6 +831,7 @@ export class SimulatorCore {
     }
     const tCine = performance.now();
     this.cine.capture({
+      formation: this.formation(),
       acquisition: {
         modality: inp.modality,
         probe: inp.probe,
@@ -932,8 +970,9 @@ export class SimulatorCore {
     const cf = this.cine.select(this.input.cineOffset);
     if (!cf) return null;
     // frozen, neither the clock, the ECG nor the sweep moves: the composite changes only with the frame selected, the
-    // input (cine offset, presentation, display size, maps asked for…) or the strip history (an asset load resets it)
-    const key = `${cf.frameId}|${this.inputVersion}|${this.strips.historyId}`;
+    // input (cine offset, presentation, display size, maps asked for…), the strip history it overlays (frozen, a strip
+    // restart waits for the live image: `restartStrips`) or the port's state in the HUD (lost, each attempt, back)
+    const key = `${cf.frameId}|${this.inputVersion}|${this.strips.historyId}|${this.gpuLive}`;
     if (key === this.frozenShown) return null;
     // a frame acquired on the GPU deferred path keeps no colour field (zero readback): form it on its first frozen display
     if (cf.acquisition.modality === 'color' && !cf.colorVel && cf.colorTissue && cf.colorTransCode) {
@@ -944,11 +983,37 @@ export class SimulatorCore {
         this.dopplerOnGpu &&
         this.gpu !== null &&
         this.colorDriver.readbackDeferredGpu(cf, this.gpu);
-      if (!asSeen) this.colorDriver.reconstructCineColor(cf, this.caseDef.seed);
+      if (!asSeen) {
+        this.colorDriver.reconstructCineColor(cf, this.caseDef.seed);
+        // the colour the frame shows from now on is the CPU's estimate, not the field the GPU presented: the Dev panel
+        // said 'gpu-deferred' over it (an older frame scrolled back to; the newest when the context went before)
+        cf.formation = { ...cf.formation, dopplerPipe: 'gpu-deferred (reestimado en CPU)' };
+      }
     }
     const out = this.composite(cf.beam, cf.spec, true, cf);
     this.frozenShown = out ? key : '';
     return out;
+  }
+
+  /** How the frames are formed now: what a live output says, and what each frame keeps in the cine to say frozen. */
+  private formation(): FrameFormation {
+    const inp = this.input;
+    const t = this.timing;
+    return {
+      gpu: this.gpuReason,
+      tier: this.tier,
+      backend: this.backend.id,
+      backendStats: this.backend.stats(),
+      console: this.displayOnGpu ? 'gpu' : 'cpu',
+      dopplerPipe: inp.modality === 'color' ? (this.dopplerOnGpu ? 'gpu-deferred' : 'cpu') : 'off',
+      anatomy: this.experimental.anatomyStatus(inp.anatomy, this.backend === this.procedural),
+      imagen: this.experimental.imageFormationStatus(inp.imageFormation),
+      renderFrameMs: t.renderFrameMs,
+      consoleMs: t.consoleMs,
+      analysisMs: t.analysisMs,
+      cineMs: t.cineMs,
+      persistence: this.lastPersistence,
+    };
   }
 
   private composite(
@@ -968,8 +1033,11 @@ export class SimulatorCore {
       displayOnGpu: this.displayOnGpu,
       dopplerOnGpu: this.dopplerOnGpu,
       gpu: this.gpu,
-      gpuReason: this.gpuReason,
-      onGpuContextLost: (reason) => this.dropGpu(reason),
+      onGpuContextLost: () => this.dropGpu(),
+      // a frozen frame is described as it was formed, a live one by the pipeline forming it; the port's state goes apart
+      // in both, since a frame cannot keep it: it moves on after the capture (an attempt, the return)
+      formation: frozen && cf ? cf.formation : this.formation(),
+      gpuLive: this.gpuLive,
       colorCurrent: this.colorDriver.current,
       colorVersion: this.colorDriver.version,
       colorFps: this.colorFps,
@@ -983,11 +1051,6 @@ export class SimulatorCore {
       acquisitionFps: this.acquisitionFps(),
       ecgRing: this.ecgRing,
       cine: this.cine,
-      backend: this.backend,
-      isProceduralBackend: this.backend === this.procedural,
-      experimental: this.experimental,
-      tier: this.tier,
-      lastPersistence: this.lastPersistence,
       timing: this.timing,
     });
     if (!res) return null;

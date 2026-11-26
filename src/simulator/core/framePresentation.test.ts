@@ -4,7 +4,7 @@ import { loadCaseById } from '@/cases';
 import { buildScanLut, computeSectorMapping, scanConvertLut } from '@/simulator/renderer/scanConvert';
 import { baseInput } from './baseInput';
 import type { CineBuffer } from './cineBuffer';
-import type { SimInput } from './protocol';
+import type { SimInput, SimOutput } from './protocol';
 import { SimulatorCore } from './simulatorCore';
 import type { StripEngine } from './stripEngine';
 
@@ -67,11 +67,90 @@ test('frozen over a strip, the frame is formed again when the strip history it o
   assert.equal(first?.strip.kind, 'spectral');
   core.recycle(first.rgba);
   assert.equal(core.step(0.08), null);
-  // an experimental asset arriving resets the strips (SimulatorCore's loader callback): the screen must follow the core
+  // the strip history under the frozen frame is reset (frozen, only a new session does so; other restarts wait for the
+  // live image, `restartStrips`): the screen follows the core, and neither shows nor traces a strip it no longer holds
   internals(core).strips.reset();
   const after = core.step(0.08);
-  assert.ok(after?.frozen);
-  assert.notEqual(after.strip.acquisitionId, first.strip.acquisitionId);
+  assert.ok(after?.frozen, 'formed again');
+  assert.equal(after.frameId, first.frameId, 'the same frame');
+  assert.equal(after.strip.kind, null, 'without the strip it overlaid');
+  assert.equal(after.strip.columns, 0);
+  assert.equal(core.request({ kind: 'autoTrace', x0: 10, x1: 300 }), null, 'nor traced');
+  core.dispose();
+});
+
+/**
+ * A PW strip acquired live while the experimental image loads, then frozen (the frozen frame shown, its strip area and
+ * auto-trace kept), and the image's module arriving frozen: its loader callback runs then, as in the worker.
+ */
+async function frozenWhenAnAssetArrives() {
+  // the module starts loading on the first frame; until it arrives the lattice forms the image
+  const live = baseInput({ modality: 'pw', imageFormation: 'cole' });
+  const core = new SimulatorCore(caseDef, live);
+  stepLive(core, 45);
+  const frozen = { ...live, frozen: true };
+  core.setInput(frozen);
+  const first = core.step(0.08);
+  assert.equal(first?.strip.kind, 'spectral');
+  const stripBytes = (o: SimOutput): Uint8ClampedArray =>
+    new Uint8ClampedArray(o.rgba, o.strip.y * o.width * 4).slice();
+  const firstStrip = stripBytes(first);
+  assert.ok(firstStrip.some((v, i) => i % 4 !== 3 && v > 0), 'a strip on screen');
+  const firstTrace = core.request({ kind: 'autoTrace', x0: 10, x1: 300 });
+  assert.ok(firstTrace, 'measured on');
+  core.recycle(first.rgba);
+  await core.coleReady();
+  return { core, live, frozen, first, firstStrip, firstTrace, stripBytes };
+}
+
+test('frozen over a strip, an experimental asset arriving leaves the strip as it is, auto-trace included', async () => {
+  const { core, frozen, first, firstStrip, firstTrace, stripBytes } = await frozenWhenAnAssetArrives();
+  // before, the asset reset the strips under the frozen frame: it was shown again without them (0 columns), and the
+  // auto-trace answered nothing until the image was live again
+  assert.equal(core.step(0.08), null, 'the frozen frame stands: nothing it shows changed');
+  assert.deepEqual(core.request({ kind: 'autoTrace', x0: 10, x1: 300 }), firstTrace);
+  core.setInput({ ...frozen, cineOffset: -1 });
+  core.recycle(core.step(0.08)!.rgba);
+  core.setInput(frozen);
+  const back = core.step(0.08);
+  assert.equal(back?.frameId, first.frameId);
+  assert.equal(back.strip.kind, 'spectral');
+  assert.equal(back.strip.acquisitionId, first.strip.acquisitionId, 'the same acquisition');
+  assert.deepEqual(stripBytes(back), firstStrip, 'drawn as it was');
+  core.recycle(back.rgba);
+  // nor does another heart, chosen in dev mode while frozen: the strip of the frozen frame is the one measured on
+  core.setInput({ ...frozen, anatomy: 'rodero' });
+  const otherHeart = core.step(0.08);
+  assert.equal(otherHeart?.strip.acquisitionId, first.strip.acquisitionId);
+  assert.deepEqual(core.request({ kind: 'autoTrace', x0: 10, x1: 300 }), firstTrace);
+  core.dispose();
+});
+
+test('frozen over a frame formed while the convolution loaded, the Dev panel says so after it arrives', async () => {
+  const { core, live, frozen, first } = await frozenWhenAnAssetArrives();
+  assert.equal(first.stats['imagen'], 'convolución (cargando…)', 'formed by the lattice: the module still loading');
+  // composed again (a scroll and back): before, it took the loader's state and said the frame was formed by the module
+  core.setInput({ ...frozen, cineOffset: -1 });
+  core.recycle(core.step(0.08)!.rgba);
+  core.setInput(frozen);
+  const back = core.step(0.08);
+  assert.equal(back?.frameId, first.frameId);
+  assert.equal(back.stats['imagen'], 'convolución (cargando…)', 'the frame as it was formed');
+  core.recycle(back.rgba);
+  core.setInput(live);
+  assert.equal(core.step(1 / 30)?.stats['imagen'], 'convolución', 'live, formed by it');
+  core.dispose();
+});
+
+test('the strips start a new acquisition at the first live step after the unfreeze', async () => {
+  const { core, live, first } = await frozenWhenAnAssetArrives();
+  const head = core.spectralStrip.head;
+  core.setInput(live);
+  const out = core.step(1 / 30);
+  assert.ok(out && !out.frozen);
+  assert.equal(out.strip.kind, 'spectral');
+  assert.notEqual(out.strip.acquisitionId, first.strip.acquisitionId, 'acquired again with the asset');
+  assert.ok(core.spectralStrip.head < head, `the sweep starts again: head ${core.spectralStrip.head} < ${head}`);
   core.dispose();
 });
 

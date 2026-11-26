@@ -1,13 +1,57 @@
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import type { FlowFieldParams } from '@/simulator/doppler/flow-primitives/flowField';
 import type { BeamFrame } from '@/simulator/probe/pose';
-import type { FrameAcquisition, GateInfo } from './protocol';
-import type { Scene } from '@/simulator/renderer/types';
+import type { FrameAcquisition, GateInfo, QualityTier } from './protocol';
+import type { RendererBackend, Scene } from '@/simulator/renderer/types';
 import type { PolarFrameSpec } from '@/simulator/renderer/types';
 import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 
+/**
+ * How a frame was formed, as its output's stats say it (the HUD's GPU notice, the Dev panel, a review report's tier and
+ * backend). Kept with the frame, so that a frozen one is described as it was formed and not by the pipeline that runs
+ * meanwhile. Described by that pipeline, a frame the GPU formed at high quality said «Sin GPU · trazador CPU, calidad
+ * alta» once the context was lost while frozen, with its console and Doppler on the CPU and no source; one the CPU
+ * tracer formed at medium lost its notice when the GPU came back; and a frame scrolled back to in the cine took the
+ * newest one's tier and GPU, and the last live frame's timings next to its own render's (51.7 ms of a CPU frame beside
+ * the 0.22 ms of the GPU frame shown). Only what composes and presents an output stays live (`stats.compositeMs`,
+ * `presentMs`, the worker's), with the GPU port's state now (`stats.gpuLive`).
+ */
+export interface FrameFormation {
+  /**
+   * 'ok' with the GPU port there to form it; otherwise only why the CPU tracer did: the start's reason (no WebGL2) or
+   * `GPU_LOST`. Not the port's state then («intento 1 de 5»), which the frame cannot keep: it changes after.
+   */
+  gpu: string;
+  tier: QualityTier;
+  /** The backend that formed it and the stats of that render (an atlas's name its source). */
+  backend: RendererBackend['id'];
+  backendStats: Record<string, number | string>;
+  /** Where its 2D console and its colour Doppler ran. */
+  console: 'gpu' | 'cpu';
+  /**
+   * A colour field the GPU presented and nobody read back is estimated again by the CPU from the frame's own beat on its
+   * first frozen display (`ColorFieldDriver.reconstructCineColor`): the colour shown is that estimate from then on, and
+   * the frame says so. Only the newest frame, frozen with the port there, is read back as it was seen.
+   */
+  dopplerPipe: 'gpu-deferred' | 'gpu-deferred (reestimado en CPU)' | 'cpu' | 'off';
+  /** The heart and the image formation it was formed with, as the Dev panel names them («cargando…»: not yet there). */
+  anatomy: string;
+  imagen: string;
+  /**
+   * What forming it cost (ms): the whole formation, its console, the view analysis it carries and its copy to the cine;
+   * and the persistence its console blended with. The whole and the copy are known only once it is kept, so the step
+   * that formed it completes them (`SimulatorCore.step`).
+   */
+  renderFrameMs: number;
+  consoleMs: number;
+  analysisMs: number;
+  cineMs: number;
+  persistence: number;
+}
+
 export interface CineFrame {
   acquisition: FrameAcquisition;
+  formation: FrameFormation;
   /** Models are replaced, not mutated, by the core; retain the acquired pose and model references. */
   scene: Scene;
   /**

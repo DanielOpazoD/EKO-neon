@@ -5,14 +5,17 @@ import { createWebgl2Renderer, type Webgl2Renderer } from './webgl2Renderer';
  * reads do nothing), but the context lives and dies as a browser's does. Losing it sets isContextLost() at once and
  * dispatches 'webglcontextlost' (synchronously here, in a later task in a browser); it comes back only if a listener
  * called preventDefault() on the loss; while lost, getExtension returns null and shaders do not compile; and its objects
- * die with it: isTexture is false for an object of a lost context, even once the context is restored. Outside any
- * *.test.ts file so that importing it does not run another file's tests (as `core/baseInput.ts`).
+ * die with it: isTexture is false for an object of a lost context, even once the context is restored. Its listeners
+ * behave as an EventTarget's, `{ once: true }` included. Outside any *.test.ts file so that importing it does not run
+ * another file's tests (as `core/baseInput.ts`).
  */
 export class SimulatedCanvas {
   width = 4;
   height = 4;
   /** No WebGL2 on this canvas (getContext → null), as on a GPU the browser blocked. */
   refuse = false;
+  /** Shaders do not compile on this context, as on a restored context whose driver changed (a GPU process restart). */
+  failShaders = false;
   /** GL calls a test checks: what a dispose deletes, whether it released the context, and draws read back. */
   readonly calls = { createTexture: 0, deleteProgram: 0, deleteTexture: 0, loseContext: 0, readPixels: 0 };
   readonly gl: WebGL2RenderingContext;
@@ -20,7 +23,8 @@ export class SimulatedCanvas {
   private prevented = false;
   /** Bumped by every loss: an object made before it belongs to no context any more. */
   private generation = 0;
-  private readonly listeners = new Map<string, Set<(e: Event) => void>>();
+  /** By event type, each listener and whether it was added `{ once: true }`. */
+  private readonly listeners = new Map<string, Map<(e: Event) => void, boolean>>();
 
   constructor(options: { floatTargets?: boolean } = {}) {
     this.gl = simulatedContext(this, options.floatTargets ?? true);
@@ -34,14 +38,28 @@ export class SimulatedCanvas {
     return type === 'webgl2' && !this.refuse ? this.gl : null;
   }
 
-  addEventListener(type: string, fn: (e: Event) => void): void {
+  addEventListener(
+    type: string,
+    fn: (e: Event) => void,
+    options?: boolean | AddEventListenerOptions,
+  ): void {
     let set = this.listeners.get(type);
-    if (!set) this.listeners.set(type, (set = new Set()));
-    set.add(fn);
+    if (!set) this.listeners.set(type, (set = new Map()));
+    // as an EventTarget's: a listener added again is not added twice, nor does its `once` change
+    if (!set.has(fn)) set.set(fn, typeof options === 'object' && options.once === true);
   }
 
   removeEventListener(type: string, fn: (e: Event) => void): void {
     this.listeners.get(type)?.delete(fn);
+  }
+
+  /** Calls the listeners of `type` in order; a `once` one is removed first, as an EventTarget's. */
+  private dispatch(type: string, e: Event): void {
+    const set = this.listeners.get(type);
+    for (const [fn, once] of [...(set ?? [])]) {
+      if (once) set!.delete(fn);
+      fn(e);
+    }
   }
 
   /** Listeners on the canvas, of one event type or of all. */
@@ -74,7 +92,7 @@ export class SimulatedCanvas {
         prevented = true;
       },
     } as unknown as Event;
-    for (const fn of [...(this.listeners.get('webglcontextlost') ?? [])]) fn(e);
+    this.dispatch('webglcontextlost', e);
     this.prevented ||= prevented;
     return prevented;
   }
@@ -84,7 +102,7 @@ export class SimulatedCanvas {
     if (!this.lost || !this.prevented) return false;
     this.lost = false;
     this.prevented = false;
-    for (const fn of [...(this.listeners.get('webglcontextrestored') ?? [])]) fn({} as Event);
+    this.dispatch('webglcontextrestored', {} as Event);
     return true;
   }
 
@@ -142,7 +160,7 @@ function simulatedContext(canvas: SimulatedCanvas, floatTargets: boolean): WebGL
     deleteTexture: () => {
       canvas.calls.deleteTexture++;
     },
-    getShaderParameter: () => !canvas.contextLost,
+    getShaderParameter: () => !canvas.contextLost && !canvas.failShaders,
     getProgramParameter: () => !canvas.contextLost,
     checkFramebufferStatus: () => 0x8cd5,
     getUniformLocation: () => ({}),
@@ -182,4 +200,29 @@ export function simulatedGpuFactory() {
     },
   };
   return factory;
+}
+
+/**
+ * Runs `fn` with a global OffscreenCanvas whose instances are simulated canvases, so that `createWebgl2Renderer` makes
+ * its own canvas as in a worker; returns what `fn` returned and the canvases made. Only for building renderers: with it
+ * installed, `present` would take a simulated canvas for an OffscreenCanvas and transfer it.
+ */
+export function withSimulatedOffscreenCanvas<T>(
+  options: { floatTargets?: boolean },
+  fn: () => T,
+): { result: T; canvases: SimulatedCanvas[] } {
+  const g = globalThis as { OffscreenCanvas?: unknown };
+  const before = g.OffscreenCanvas;
+  const canvases: SimulatedCanvas[] = [];
+  g.OffscreenCanvas = function SimulatedOffscreenCanvas(): SimulatedCanvas {
+    const c = new SimulatedCanvas(options);
+    canvases.push(c);
+    return c;
+  };
+  try {
+    return { result: fn(), canvases };
+  } finally {
+    if (before === undefined) delete g.OffscreenCanvas;
+    else g.OffscreenCanvas = before;
+  }
 }

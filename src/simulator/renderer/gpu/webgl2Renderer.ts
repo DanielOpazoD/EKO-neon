@@ -381,7 +381,13 @@ export class Webgl2Renderer implements RendererBackend {
     return this.doppler.readbackBox(spec, scaleMps, baselineShiftMps, velOut, varOut, powOut);
   }
 
-  dispose(): void {
+  /**
+   * Lets go of the GPU: a live renderer deletes its objects and gives its context back (decision 172). A lost one took
+   * every object with it, and deleting them once the context is restored only raises INVALID_OPERATION ("object does not
+   * belong to this context"): it gives back the context alone, unless the recovery has built the next renderer on it,
+   * restored (`keepContext`).
+   */
+  dispose(keepContext = false): void {
     if (this.disposed) return;
     this.disposed = true;
     const gl = this.gl;
@@ -395,10 +401,10 @@ export class Webgl2Renderer implements RendererBackend {
     this.gbufferReady = false;
     this.histValid = false;
     this.packedFresh = false;
-    // A lost context took every object of this renderer with it. Deleting them once the context is restored only raises
-    // INVALID_OPERATION ("object does not belong to this context"), and releasing the context would lose the one the
-    // recovery is about to build a new renderer on: the renderer just lets go of its canvas.
-    if (this.lostByEvent || gl.isContextLost()) return;
+    if (this.lostByEvent || gl.isContextLost()) {
+      if (!keepContext) giveBackLostContext(gl);
+      return;
+    }
     for (const p of [
       ...this.passAVariants.values(),
       ...this.passASideVariants.values(),
@@ -880,6 +886,25 @@ export class Webgl2Renderer implements RendererBackend {
 }
 
 /**
+ * Gives back the context of a lost renderer nobody builds on again. The renderer had prevented the default of the loss,
+ * asking the browser to restore the context, and a restoration that came after it was let go revived the context with
+ * no owner until the GC: a drawing buffer of the canvas's size (3.4 MB at 1024×820, where `present` left it) and one of
+ * the contexts the browser allows a worker, which loses the oldest past its limit. Its canvas shrinks to 1×1, so a
+ * restoration allocates one pixel, and is released on it; a context restored already is released now.
+ */
+function giveBackLostContext(gl: WebGL2RenderingContext): void {
+  const canvas = gl.canvas as OffscreenCanvas | HTMLCanvasElement | undefined;
+  if (!canvas) return;
+  canvas.width = 1;
+  canvas.height = 1;
+  const release = (): void => gl.getExtension('WEBGL_lose_context')?.loseContext();
+  const target: EventTarget = canvas;
+  if (!gl.isContextLost()) release();
+  else if (typeof target.addEventListener === 'function')
+    target.addEventListener('webglcontextrestored', release, { once: true });
+}
+
+/**
  * Create the GPU renderer on an OffscreenCanvas (worker) or a canvas element (main thread).
  * Returns null when WebGL2 or float render targets are unavailable, and also on software WebGL
  * unless `allowSoftware` is set (decision 53).
@@ -888,6 +913,8 @@ export function createWebgl2Renderer(
   canvas?: OffscreenCanvas | HTMLCanvasElement,
   options: { allowSoftware?: boolean } = {},
 ): { renderer: Webgl2Renderer | null; reason: string } {
+  // the context of a canvas made here: a canvas the caller gave, and its context, stay the caller's
+  let made: WebGL2RenderingContext | null = null;
   try {
     const c =
       canvas ??
@@ -905,6 +932,7 @@ export function createWebgl2Renderer(
       premultipliedAlpha: false,
     });
     if (!gl) return { renderer: null, reason: 'WebGL2 unavailable' };
+    if (!canvas) made = gl;
     const name = webglRendererName(gl);
     if (!options.allowSoftware && SOFTWARE_GL.test(name)) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -913,6 +941,9 @@ export function createWebgl2Renderer(
     }
     return { renderer: new Webgl2Renderer(gl), reason: 'ok' };
   } catch (e) {
+    // the constructor threw (no float targets, a shader that does not compile) after the context was made: it is given
+    // back now, not left alive with no owner until the GC (one per failed attempt of the recovery)
+    made?.getExtension('WEBGL_lose_context')?.loseContext();
     return { renderer: null, reason: e instanceof Error ? e.message : String(e) };
   }
 }
