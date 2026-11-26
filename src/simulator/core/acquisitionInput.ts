@@ -1,4 +1,3 @@
-import { colorWallFilterCutoffMps } from '@/simulator/doppler/color/kasaiEstimator';
 import { DUPLEX_BMODE_SHARE, pulsedAcquisition } from '@/simulator/renderer/pulseTiming';
 import type { SimInput } from './protocol';
 
@@ -32,29 +31,26 @@ function clampBaselineShift(baselineShiftMps: number, scaleMps: number): number 
   return Math.max(-maxShift, Math.min(maxShift, baselineShiftMps));
 }
 
+/**
+ * The input as it can be acquired: Nyquist scales and baselines within what the PRF allows, the gate within the depth.
+ * The colour wall filter is kept as asked: what filters is that request bounded to what the packet allows at the
+ * acquired Nyquist, by each consumer (`colorWallFilterCutoffMps`). Bounded here, it went back to the store and stayed
+ * lowered after any drop of Nyquist (a lower scale, a deeper box, CMM at depth).
+ */
 export function constrainAcquisition<T extends AcquisitionInput>(input: T): T {
   const limits = acquisitionLimits(input);
   const pulsed = input.modality === 'pw' || input.modality === 'tdi';
   const colorScale = limits.color.scaleMps;
   const colorShift = clampBaselineShift(input.color.baselineShiftMps, colorScale);
-  // the wall filter keeps the cutoff the packet can give at this Nyquist: what every Doppler view then filters with
-  const colorWf = colorWallFilterCutoffMps(input.color.wallFilterMps, colorScale);
   const spectralScale = pulsed ? limits.spectral.scaleMps : input.spectral.scaleMps;
   const spectralShift = clampBaselineShift(input.spectral.baselineShiftMps, spectralScale);
   return {
     ...input,
     gateDepthCm: limits.gateDepthCm,
     color:
-      colorScale === input.color.scaleMps &&
-      colorShift === input.color.baselineShiftMps &&
-      colorWf === input.color.wallFilterMps
+      colorScale === input.color.scaleMps && colorShift === input.color.baselineShiftMps
         ? input.color
-        : {
-            ...input.color,
-            scaleMps: colorScale,
-            baselineShiftMps: colorShift,
-            wallFilterMps: colorWf,
-          },
+        : { ...input.color, scaleMps: colorScale, baselineShiftMps: colorShift },
     spectral:
       spectralScale === input.spectral.scaleMps &&
       spectralShift === input.spectral.baselineShiftMps

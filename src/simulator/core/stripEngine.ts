@@ -1,15 +1,14 @@
 import type { CaseDefinition } from '@/cases/schema';
-import { aliasVelocity, aseSweepDurationS } from '@/clinical/formulas';
+import { aseSweepDurationS } from '@/clinical/formulas';
 import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import { makeSample, Tissue } from '@/simulator/anatomy/tissue';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import {
-  COLOR_THRESHOLD,
   DOPPLER_SHADOW_TRANSMISSION,
   relativeTransmission,
-  wallFilterResponse,
   type ColorSettings,
 } from '@/simulator/doppler/color/colorDoppler';
+import { WallFilterResponseTable } from '@/simulator/doppler/color/kasaiEstimator';
 import {
   sampleFlow,
   type FlowFieldParams,
@@ -53,6 +52,7 @@ import {
 } from './mmodeStrip';
 import type { GateInfo, SimInput, SimRequest, SimResponse, StripInfo } from './protocol';
 import { autoTraceSpectralEnvelope, STRIP_MM_WIDTH } from './strip/autoTrace';
+import { writeCmmColumn } from './strip/cmmColumn';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
 import { PATH_STEP_CM, relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
 import {
@@ -114,6 +114,8 @@ export class StripEngine {
   private stripCmm: Float32Array | null = null;
   private stripCmmVar: Float32Array | null = null;
   private stripCmmPow: Float32Array | null = null;
+  /** The colour wall filter's response the colour M-mode columns are written with, kept for its request and Nyquist. */
+  private readonly cmmWallFilter = new WallFilterResponseTable();
   private stripMmode: Uint8ClampedArray | null = null;
   private stripCols = 0;
   private stripHead = 0;
@@ -762,39 +764,19 @@ export class StripEngine {
     const grey = this.mmodeGrey;
     for (let s = 0; s < S; s++) strip[s * cols + col] = grey[s]!;
     const effColor = this.acquired ? this.effectiveColor(this.acquired) : inp.color;
-    if (this.stripCmm) {
-      const lineSrc = t < 0.5 ? src.lo : src.hi;
-      const v = lineSrc.velocity;
-      const d = lineSrc.dispersion;
-      const tr = lineSrc.relTrans;
-      const cmm = this.stripCmm;
-      const cmmVar = this.stripCmmVar;
-      const cmmPow = this.stripCmmPow;
-      const gainLin = Math.pow(10, effColor.gainDb / 20);
-      for (let si = 0; si < spec.samples; si++) {
-        const idx = si * cols + col;
-        const x = v ? v[si]! : NaN;
-        const vx = effColor.invert ? -x : x;
-        const absV = Math.abs(vx);
-        if (Number.isNaN(vx) || absV < effColor.wallFilterMps) {
-          cmm[idx] = NaN;
-          if (cmmVar) cmmVar[idx] = 0;
-          if (cmmPow) cmmPow[idx] = 0;
-          continue;
-        }
-        const rel = tr ? tr[si]! : 1;
-        const pow = Math.min(1, gainLin * rel * wallFilterResponse(absV, effColor.wallFilterMps));
-        if (pow < COLOR_THRESHOLD) {
-          cmm[idx] = NaN;
-          if (cmmVar) cmmVar[idx] = 0;
-          if (cmmPow) cmmPow[idx] = 0;
-          continue;
-        }
-        cmm[idx] = aliasVelocity(vx, effColor.scaleMps, effColor.baselineShiftMps);
-        if (cmmVar) cmmVar[idx] = d ? d[si]! : 0;
-        if (cmmPow) cmmPow[idx] = pow;
-      }
-    }
+    // the colour from the nearer of the two traced lines, through the 2D colour's wall filter
+    if (this.stripCmm)
+      writeCmmColumn(
+        t < 0.5 ? src.lo : src.hi,
+        spec.samples,
+        effColor,
+        this.cmmWallFilter,
+        col,
+        cols,
+        this.stripCmm,
+        this.stripCmmVar,
+        this.stripCmmPow,
+      );
     this.stripPhase[col] = phase;
     this.stripSpan[col] = Math.min(65535, src.span);
     if (this.stripRgba && this.rowMap) {

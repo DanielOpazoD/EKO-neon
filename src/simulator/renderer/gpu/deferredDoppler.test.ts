@@ -16,6 +16,7 @@ import {
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
+  colorWallFilterCutoffMps,
   wallFilterShares,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { ATTEN_NP_PER_DB, SOFT_TISSUE_ATTEN_DB } from '../acoustic/acoustics';
@@ -58,6 +59,7 @@ interface GlCallLog {
   clearBufferCalls: number;
   drawCalls: number;
   uniform1i: Map<string, number>;
+  uniform1f: Map<string, number>;
   uniform3f: Map<string, [number, number, number]>;
   boundTexturesByUnit: Map<number, unknown>;
 }
@@ -81,6 +83,7 @@ function makeInstrumentedGl(readbackPixels?: Float32Array) {
     clearBufferCalls: 0,
     drawCalls: 0,
     uniform1i: new Map(),
+    uniform1f: new Map(),
     uniform3f: new Map(),
     boundTexturesByUnit: new Map(),
   };
@@ -142,6 +145,9 @@ function makeInstrumentedGl(readbackPixels?: Float32Array) {
     getUniformLocation: (_prog: unknown, name: string) => ({ name }),
     uniform1i: (loc: { name?: string } | null, v: number) => {
       if (loc?.name) log.uniform1i.set(loc.name, v);
+    },
+    uniform1f: (loc: { name?: string } | null, v: number) => {
+      if (loc?.name) log.uniform1f.set(loc.name, v);
     },
     uniform3f: (loc: { name?: string } | null, x: number, y: number, z: number) => {
       if (loc?.name) log.uniform3f.set(loc.name, [x, y, z]);
@@ -392,7 +398,7 @@ test('DeferredDopplerPipeline allocates lazily, clips to ROI scissor box, upload
   assert.equal(pipe.valid, false);
 });
 
-test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU estimator, bounded to what the packet allows', () => {
+test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU estimator and Pass D2 its cutoff, bounded to what the packet allows', () => {
   const mock = makeInstrumentedGl();
   const pipe = new DeferredDopplerPipeline(mock.gl);
   const gbuf: PolarGBuffer = {
@@ -428,6 +434,13 @@ test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU es
     const cpu = wallFilterShares(wallFilterMps, scaleMps);
     assert.ok(sent, 'Pass D1 must receive uWallShares');
     assert.deepEqual(sent, [cpu.mean, cpu.trend, cpu.quad], `WF ${wallFilterMps} at scale ${scaleMps}`);
+    // the expected field's cutoff (Pass D2 without an estimate) is the request bounded as computeColorField bounds it:
+    // the settings carry the request (the store keeps it), not a cutoff already bounded
+    assert.equal(
+      mock.log.uniform1f.get('uWallFilterMps'),
+      colorWallFilterCutoffMps(wallFilterMps, scaleMps),
+      `Pass D2 cutoff for WF ${wallFilterMps} at scale ${scaleMps}`,
+    );
   }
   assert.deepEqual(
     wallFilterShares(0.3, 0.4),

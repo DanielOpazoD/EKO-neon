@@ -715,7 +715,11 @@ export function compareDeferredDoppler(
 
     const acq = { frequencyMHz: settings.frequencyMHz, harmonics: settings.harmonics };
     const cpuDet = allocColorField(n);
-    const detCfg: ColorSettings = { ...baseColor, wallFilterMps: 0.06 };
+    // the expected field at the packet's lowest cutoff (its old 0.06 m/s is bounded to it): parity over the most blood
+    const detCfg: ColorSettings = {
+      ...baseColor,
+      wallFilterMps: colorWallFilterRangeMps(baseColor.scaleMps).min,
+    };
     computeColorField(frame, detCfg, null, sampleFromBox, cpuDet, acq, undefined);
 
     const shadedDet = gpu.shadeDoppler({

@@ -9,7 +9,11 @@ import {
   type Locations,
 } from './glHelpers';
 import { COLOR_THRESHOLD } from '@/simulator/doppler/color/colorDoppler';
-import { wallFilterShares, type WallFilterShares } from '@/simulator/doppler/color/kasaiEstimator';
+import {
+  colorWallFilterCutoffMps,
+  wallFilterShares,
+  type WallFilterShares,
+} from '@/simulator/doppler/color/kasaiEstimator';
 import {
   DEFAULT_COLOR_SMOOTHING,
   ST_HYSTERESIS_RATIO,
@@ -488,7 +492,8 @@ export class DeferredDopplerPipeline {
     gl.uniform4i(us.uBoxBounds, box.siMin, box.liMin, box.siMax, box.liMax);
     gl.uniform1f(us.uScaleMps, settings.scaleMps);
     gl.uniform1f(us.uBaselineMps, settings.baselineShiftMps);
-    gl.uniform1f(us.uWallFilterMps, settings.wallFilterMps);
+    // the expected field's cutoff (no estimate), bounded as the CPU's computeColorField bounds it
+    gl.uniform1f(us.uWallFilterMps, colorWallFilterCutoffMps(settings.wallFilterMps, settings.scaleMps));
     gl.uniform1f(us.uGainLin, gainLin);
     gl.uniform1f(us.uPersist, useHistory ? settings.persistence : 0);
     gl.uniform1f(us.uSmoothing, smoothing);

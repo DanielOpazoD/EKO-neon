@@ -307,7 +307,8 @@ test('computeColorField multi-frame Kasai flicker drops with spatiotemporal filt
     boxRMinCm: 2,
     boxRMaxCm: 14,
     scaleMps: 0.62,
-    wallFilterMps: 0.05,
+    // the default wall filter (its old 0.05 m/s meant one near it, and asks now for less than the packet's lowest)
+    wallFilterMps: DEFAULT_COLOR.wallFilterMps,
     gainDb: -1, // border-line gain that induces stochastic pixel flicker when unfiltered
   };
 
