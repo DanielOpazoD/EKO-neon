@@ -252,8 +252,12 @@ export function pisaRadiusCm(
 }
 
 /**
- * Equivalent circular vena contracta width (cm) for a regurgitant orifice area (cm²):
- * d = 2·√(EROA / π). Aligns physically with ASE/EACVI 2017 cutoffs (< 0.3 cm mild, ≥ 0.7 cm severe).
+ * Circular-equivalent vena contracta width (cm) of a regurgitant orifice of `eroaCm2` (cm²): d = 2·√(EROA / π), the
+ * diameter the model's round jet neck is built from (regurgitantJets.ts). It is the EROA in other units, an expected
+ * value to read a caliper against and never a criterion beside the EROA. Only the ASE 2017 severe cut-offs nearly
+ * coincide (0.7 cm is 0.385 cm², 0.40 cm² is 0.71 cm); the mild ones do not: VC < 0.3 cm is an EROA below 0.07 cm²,
+ * under trace, and a mild orifice of 0.10–0.20 cm² is 0.36–0.50 cm wide, the guideline's intermediate band. The
+ * guideline's VC cut-offs are empirical, set on real orifices, which are seldom round.
  */
 export function venaContractaFromEroaCm(eroaCm2: number): number {
   assertPositive(eroaCm2, 'eroaCm2');

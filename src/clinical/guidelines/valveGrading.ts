@@ -96,40 +96,38 @@ export function gradeAorticStenosis(a: AorticStenosisInput): AorticStenosisGrade
   return { grade: 'none', pattern: null, rationale: 'Sin estenosis aórtica significativa.' };
 }
 
+/** The three quantitative criteria of ASE 2017: the lesion, the volume it lets back and its share of the stroke volume. */
 export interface MitralRegurgitationInput {
+  /** Effective regurgitant orifice area (cm²). */
   eroaCm2: number;
   regurgitantVolumeMl: number;
   regurgitantFractionPct: number;
-  /** Optional vena contracta width (cm); ASE/EACVI 2017: < 0.3 cm mild, ≥ 0.7 cm severe. */
-  venaContractaCm?: number;
 }
 
 /**
- * ASE/EACVI 2017 quantitative criteria (`ase-scmr-regurgitation-2017`): severe with EROA ≥ 0.40 cm²,
- * regurgitant volume ≥ 60 mL, regurgitant fraction ≥ 50 % (and vena contracta ≥ 0.7 cm when provided);
- * mild below 0.20 cm², 30 mL, 30 % (and VC < 0.3 cm). A jet below 0.10 cm² is trace.
- * Integrative grading: the grade supported by at least half of available criteria (≥ 2 of 3, or ≥ 2 of 4
- * without conflicting majority) wins; moderate otherwise.
+ * The quantitative step of the ASE 2017 algorithm for chronic MR (`ase-scmr-regurgitation-2017`, Zoghbi: Table 8 and
+ * Figure 18): severe with EROA ≥ 0.40 cm², regurgitant volume ≥ 60 mL, regurgitant fraction ≥ 50 %; mild below
+ * 0.20 cm², 30 mL, 30 %; moderate between. The grade two of the three agree on wins, moderate otherwise; a jet below
+ * 0.10 cm² is trace.
+ *
+ * The vena contracta does not vote. The guideline reads it in the algorithm's first step, among the signs specific for
+ * mild (< 0.3 cm) or severe (≥ 0.7 cm) MR that settle the grade only four at a time, each measured on its own; the
+ * model's is the width of its round orifice, 2·√(EROA/π) (venaContractaFromEroaCm), the EROA a second time.
+ * Counted as a fourth criterion it raised the majority to 3 of 4 and gave the orifice two votes: 0.30 cm² / 62 mL / 52 %
+ * read moderate (a VC of 0.62 cm against the volume and the fraction) and 0.42 cm² / 45 mL / 40 % severe (the EROA and
+ * its own 0.73 cm); over EROA 0.10–0.60 cm², 10–100 mL and 10–80 % it changed the grade of one combination in four.
+ * Its mild cut-off was out of reach: VC < 0.3 cm is an EROA below 0.07 cm², under trace.
  */
 export function gradeMitralRegurgitation(m: MitralRegurgitationInput): ValveGrade {
   if (m.eroaCm2 < 0.1) return 'none';
-  const hasVc = m.venaContractaCm !== undefined && Number.isFinite(m.venaContractaCm);
   const severe =
     Number(m.eroaCm2 >= 0.4) +
     Number(m.regurgitantVolumeMl >= 60) +
-    Number(m.regurgitantFractionPct >= 50) +
-    (hasVc ? Number(m.venaContractaCm! >= 0.7) : 0);
+    Number(m.regurgitantFractionPct >= 50);
+  if (severe >= 2) return 'severe';
   const mild =
-    Number(m.eroaCm2 < 0.2) +
-    Number(m.regurgitantVolumeMl < 30) +
-    Number(m.regurgitantFractionPct < 30) +
-    (hasVc ? Number(m.venaContractaCm! < 0.3) : 0);
-  const need = hasVc ? 3 : 2;
-  if (severe >= need || (!hasVc && severe >= 2) || (hasVc && severe === 2 && mild === 0 && m.eroaCm2 >= 0.4))
-    return 'severe';
-  if (mild >= need || (!hasVc && mild >= 2) || (hasVc && mild === 2 && severe === 0 && m.eroaCm2 < 0.2))
-    return 'mild';
-  return 'moderate';
+    Number(m.eroaCm2 < 0.2) + Number(m.regurgitantVolumeMl < 30) + Number(m.regurgitantFractionPct < 30);
+  return mild >= 2 ? 'mild' : 'moderate';
 }
 
 /** EF categories of ASE/EACVI 2015 chamber quantification, which put the lower normal limit at 52 % in men and 54 % in women. */
