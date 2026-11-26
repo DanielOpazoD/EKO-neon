@@ -26,6 +26,7 @@ import { loadCaseById } from '@/cases';
 import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
 import { aorticVelocityProfile } from '@/simulator/doppler/flow-primitives/aorticNetwork';
 import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
+import { colorWallFilterRangeMps } from './kasaiEstimator';
 import { computeHeartPose } from '@/simulator/anatomy/heartModel';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 
@@ -55,6 +56,8 @@ function makeBloodFrame(lines = 16, samples = 32, depthCm = 16): ReturnType<type
   return frame;
 }
 
+// the default wall filter (DEFAULT_COLOR's, bounded to 0.32 Nyquist at 0.6 m/s): its old 0.05 m/s meant a filter near
+// it and, read as the −3 dB cutoff it now is, asks for less than the packet's lowest
 const FULL_BOX: ColorSettings = {
   ...DEFAULT_COLOR,
   boxThetaMinRad: -0.6,
@@ -63,7 +66,6 @@ const FULL_BOX: ColorSettings = {
   boxRMaxCm: 15,
   scaleMps: 0.6,
   baselineShiftMps: 0,
-  wallFilterMps: 0.05,
   gainDb: 0,
   persistence: 0,
   invert: false,
@@ -136,6 +138,30 @@ test('colorDoppler rejects wall-filtered slow flow and shadowed samples', () => 
     ACQ,
   );
   assert.ok(Number.isNaN(out.vel[centerIdx]), 'slow flow below wall filter should be suppressed');
+
+  // the expected field cuts at the request bounded to what the packet allows at this scale, as the estimator and Pass
+  // D2 do: asked under the lowest cutoff (the mean removal, 0.11 Nyquist) at that lowest, asked over the highest (0.32
+  // Nyquist) at that highest. Taking the request as its cutoff, 0.02 m/s coloured 5 cm/s flow at 0.6 m/s
+  const { min, max } = colorWallFilterRangeMps(FULL_BOX.scaleMps);
+  const coloured = (wallFilterMps: number, v: number) => {
+    computeColorField(
+      frame,
+      { ...FULL_BOX, wallFilterMps },
+      null,
+      (_idx, _li, _si, res) => {
+        res.v = v;
+        res.disp = 0.02;
+        res.present = 1;
+      },
+      out,
+      ACQ,
+    );
+    return Number.isFinite(out.vel[centerIdx]);
+  };
+  assert.ok(!coloured(0.02, 0.8 * min), 'asked under the lowest cutoff, flow under that lowest is dark');
+  assert.ok(coloured(0.02, 1.2 * min), 'asked under the lowest cutoff, flow over that lowest is coloured');
+  assert.ok(!coloured(0.5, 0.9 * max), 'asked over the highest cutoff, flow under that highest is dark');
+  assert.ok(coloured(0.5, 1.2 * max), 'asked over the highest cutoff, flow over that highest is coloured');
 
   // Deep acoustic shadow -> no color even for fast flow
   frame.transmission[centerIdx] =
@@ -679,7 +705,10 @@ test('overlayColorField circularly re-wraps stored velocities on frozen baseline
 });
 
 test('Color Doppler 90° black-band regression and transverse aperture geometric broadening (v_perp)', () => {
-  // 1. 90° black-band regression: horizontal flow 0.80 m/s crossing sector center at θ = 90°
+  // 1. 90° black-band regression: horizontal flow 0.80 m/s crossing sector center at θ = 90°. Its axial velocity
+  //    0.8·sin θ falls under the wall filter within a band whose half-width follows the cutoff: about 4° at the packet's
+  //    lowest (7.6 cm/s), 12–13° at the default (20 cm/s), as main's default drew it (the old 0.06 m/s these checks ran
+  //    at asks now for the lowest)
   const lines = 64;
   const samples = 40;
   const frame = makeBloodFrame(lines, samples, 16);
@@ -691,58 +720,69 @@ test('Color Doppler 90° black-band regression and transverse aperture geometric
     boxRMaxCm: 12,
     scaleMps: 0.68,
     baselineShiftMps: 0,
-    wallFilterMps: 0.06,
     gainDb: 0,
     persistence: 0,
     smoothing: 0,
   };
-  const outBand = allocColorField(lines * samples);
   const vTotal = 0.8;
-  computeColorField(
-    frame,
-    box,
-    null,
-    (_idx, li, _si, res) => {
-      // Beam angle relative to vertical axis: theta=0 is perpendicular (90°) to horizontal vessel
-      const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
-      res.v = vTotal * Math.sin(theta);
-      res.vPerp = Math.abs(vTotal * Math.cos(theta));
-      res.disp = 0.04;
-      res.present = 1;
-    },
-    outBand,
-    ACQ,
-    { realization: 7, seed: 202 },
-  );
-
-  let perpTotal = 0;
-  let perpFilled = 0;
-  let lobeTotal = 0;
-  let lobeFilled = 0;
-  for (let li = 0; li < lines; li++) {
-    const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
-    const degFromPerp = Math.abs((theta * 180) / Math.PI);
-    for (let si = 12; si < 28; si++) {
-      const colored = Number.isFinite(outBand.vel[li * samples + si]);
-      if (degFromPerp <= 2.0) {
-        perpTotal++;
-        if (colored) perpFilled++;
-      } else if (degFromPerp >= 20.0 && degFromPerp <= 30.0) {
-        lobeTotal++;
-        if (colored) lobeFilled++;
+  /** Share of the samples coloured (%) at |θ − 90°| within [d0, d1] degrees, with this wall filter. */
+  const bandFill = (wallFilterMps: number) => {
+    const outBand = allocColorField(lines * samples);
+    computeColorField(
+      frame,
+      { ...box, wallFilterMps },
+      null,
+      (_idx, li, _si, res) => {
+        // Beam angle relative to vertical axis: theta=0 is perpendicular (90°) to horizontal vessel
+        const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
+        res.v = vTotal * Math.sin(theta);
+        res.vPerp = Math.abs(vTotal * Math.cos(theta));
+        res.disp = 0.04;
+        res.present = 1;
+      },
+      outBand,
+      ACQ,
+      { realization: 7, seed: 202 },
+    );
+    return (d0: number, d1: number) => {
+      let total = 0;
+      let filled = 0;
+      for (let li = 0; li < lines; li++) {
+        const theta = -frame.spec.sectorRad / 2 + (frame.spec.sectorRad * (li + 0.5)) / lines;
+        const degFromPerp = Math.abs((theta * 180) / Math.PI);
+        if (degFromPerp < d0 || degFromPerp > d1) continue;
+        for (let si = 12; si < 28; si++) {
+          total++;
+          if (Number.isFinite(outBand.vel[li * samples + si])) filled++;
+        }
       }
-    }
-  }
-  assert.ok(perpTotal > 0 && lobeTotal > 0);
-  const perpFillPct = (perpFilled / perpTotal) * 100;
-  const lobeFillPct = (lobeFilled / lobeTotal) * 100;
+      assert.ok(total > 0);
+      return (filled / total) * 100;
+    };
+  };
+  const lowest = bandFill(colorWallFilterRangeMps(box.scaleMps).min);
+  const byDefault = bandFill(DEFAULT_COLOR.wallFilterMps);
   assert.ok(
-    perpFillPct <= 5,
-    `Expected 90° black band (|θ-90°| ≤ 2°) to stay ≤ 5% filled, got ${perpFillPct.toFixed(1)}%`,
+    lowest(0, 2) <= 5,
+    `Expected 90° black band (|θ-90°| ≤ 2°) to stay ≤ 5% filled at the lowest wall filter, got ${lowest(0, 2).toFixed(1)}%`,
   );
   assert.ok(
-    lobeFillPct >= 70,
-    `Expected off-90° lobes (20°–30° off perpendicular) to fill strongly, got ${lobeFillPct.toFixed(1)}%`,
+    lowest(20, 30) >= 70,
+    `Expected off-90° lobes (20°–30° off perpendicular) to fill strongly, got ${lowest(20, 30).toFixed(1)}%`,
+  );
+  // the default filter: the band is dark out to 10° (measured 1 %; 6–10° fill 97–100 % at the lowest cutoff), and the
+  // lobes beyond its 20 cm/s cutoff (14.5°) fill as before
+  assert.ok(
+    byDefault(0, 10) <= 5,
+    `Expected the default wall filter to keep |θ-90°| ≤ 10° dark (≤ 5%), got ${byDefault(0, 10).toFixed(1)}%`,
+  );
+  assert.ok(
+    lowest(6, 10) >= 90,
+    `Expected the lowest wall filter to colour 6°–10° off perpendicular (≥ 90%), got ${lowest(6, 10).toFixed(1)}%`,
+  );
+  assert.ok(
+    byDefault(20, 30) >= 70,
+    `Expected off-90° lobes to fill strongly at the default wall filter, got ${byDefault(20, 30).toFixed(1)}%`,
   );
 
   // 2. Transverse aperture broadening via absolute sigmaVMps: >3× width at θ=80° and elevated Kasai variance
@@ -762,7 +802,8 @@ test('Color Doppler 90° black-band regression and transverse aperture geometric
     boxRMinCm: 5,
     boxRMaxCm: 9,
     scaleMps: 0.68,
-    wallFilterMps: 0.04,
+    // the packet's lowest cutoff (7.6 cm/s): the 14 cm/s axial flow below must pass for its variance to be measured
+    wallFilterMps: colorWallFilterRangeMps(0.68).min,
     gainDb: 6,
     persistence: 0,
     smoothing: 0,
@@ -931,13 +972,14 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
     `Expected clean blood fill near +0.38 m/s at the default wall filter, got frac=${bloodWfDefault.frac.toFixed(2)} v=${bloodWfDefault.meanVel.toFixed(3)}`,
   );
 
-  // 2. Low wall filter (2 cm/s asked, the packet's lowest given: 7.6 cm/s at 0.68 m/s): moving myocardium produces real
-  //    wall flash with breakthrough power > 1.0 while adjacent blood velocity stays uncontaminated and rawVel/rawPower
+  // 2. The packet's lowest wall filter (the mean removal: 7.6 cm/s at 0.68 m/s): moving myocardium produces real wall
+  //    flash with breakthrough power > 1.0 while adjacent blood velocity stays uncontaminated and rawVel/rawPower
   //    clutter history stays cleared
+  const wfMin = colorWallFilterRangeMps(baseCfg.scaleMps).min;
   const outWf2 = allocColorField(lines * samples);
   computeColorField(
     frame,
-    { ...baseCfg, wallFilterMps: 0.02 },
+    { ...baseCfg, wallFilterMps: wfMin },
     null,
     (_idx, li, _si, res) => {
       if (li < 10) {
@@ -960,7 +1002,7 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
   const outWf2Still = allocColorField(lines * samples);
   computeColorField(
     frame,
-    { ...baseCfg, wallFilterMps: 0.02 },
+    { ...baseCfg, wallFilterMps: wfMin },
     null,
     (_idx, li, _si, res) => {
       if (li < 10) {
@@ -976,7 +1018,7 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
   const bloodBoundaryStill = countRegion(outWf2Still, 8, 10);
   assert.ok(
     myoWf2.frac >= 0.6,
-    `Expected >= 60% myocardial clutter flash at WF=2 cm/s, got ${(myoWf2.frac * 100).toFixed(1)}%`,
+    `Expected >= 60% myocardial clutter flash at the lowest WF, got ${(myoWf2.frac * 100).toFixed(1)}%`,
   );
   assert.ok(
     myoWf2.maxPow > 1.05,
@@ -1036,7 +1078,7 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
   const outPinhole = allocColorField(16 * 32);
   computeColorField(
     pinholeFrame,
-    { ...baseCfg, wallFilterMps: 0.06, smoothing: 0.8 },
+    { ...baseCfg, wallFilterMps: DEFAULT_COLOR.wallFilterMps, smoothing: 0.8 },
     null,
     (idx, _li, _si, res) => {
       if (idx === pIdx) {

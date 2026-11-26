@@ -146,19 +146,57 @@ function legendreTonePower(w: number, out: Float64Array): Float64Array {
 
 const TONE_POWER = new Float64Array(3);
 
-/** −3 dB cutoff, as a fraction of Nyquist, of the regression that removes P0…P`order` whole (bisection, once). */
-function fullRegressionCutoff(order: number): number {
-  const residual = (c: number) => {
-    const a = legendreTonePower(Math.PI * c, TONE_POWER);
-    let h = 1;
-    for (let k = 0; k <= order; k++) h -= a[k]!;
-    return h;
-  };
-  let lo = 1e-4;
-  let hi = 0.6;
+/** Shares of the packet's mean (P0), linear trend (P1) and quadratic (P2) a regression wall filter removes. */
+export interface WallFilterShares {
+  mean: number;
+  trend: number;
+  quad: number;
+}
+
+/** What a tone with Legendre powers `a` keeps through a filter removing these shares: 1 − Σ (2·s_k − s_k²)·a_k. */
+function keptPower(a: Float64Array, s: WallFilterShares): number {
+  return Math.max(
+    0,
+    1 -
+      (2 * s.mean - s.mean * s.mean) * a[0]! -
+      (2 * s.trend - s.trend * s.trend) * a[1]! -
+      (2 * s.quad - s.quad * s.quad) * a[2]!,
+  );
+}
+
+/**
+ * Expected share of its power a laminar flow at `vMps` keeps through the regression wall filter with these shares: the
+ * response of the 8-pulse packet to a tone turning by π·v/Nyquist per pulse. It acts on the sampled phase, so it is
+ * periodic in the PRF (a flow aliasing to near zero is rejected as a slow one) and even in v. The estimator's power
+ * follows it above the cutoff; below, the transit jitter keeps a floor near −9 dB (`TRANSIT_JITTER_RAD`). The colour
+ * M-mode paints with it, tabulated (`WallFilterResponseTable`), so the strip and the 2D colour cut at the same −3 dB
+ * point.
+ */
+export function wallFilterPowerResponse(
+  vMps: number,
+  scaleMps: number,
+  shares: WallFilterShares,
+): number {
+  return keptPower(legendreTonePower((Math.PI * vMps) / Math.max(1e-3, scaleMps), TONE_POWER), shares);
+}
+
+/**
+ * −3 dB cutoff, as a fraction of Nyquist, of the regression wall filter with these shares: the first speed at which a
+ * tone keeps half its power (scanned by 0.01 Nyquist, then bisected). 0 when a tone at rest keeps half already, a
+ * filter that by this measure cuts nothing (a partial mean removal under 1 − √½ = 29 %).
+ */
+export function wallFilterCutoffNyquist(shares: WallFilterShares): number {
+  const kept = (c: number) => keptPower(legendreTonePower(Math.PI * c, TONE_POWER), shares);
+  if (kept(0) >= 0.5) return 0;
+  let lo = 0;
+  let hi = 0.01;
+  while (hi < 1 && kept(hi) < 0.5) {
+    lo = hi;
+    hi += 0.01;
+  }
   for (let it = 0; it < 60; it++) {
     const mid = 0.5 * (lo + hi);
-    if (residual(mid) < 0.5) lo = mid;
+    if (kept(mid) < 0.5) lo = mid;
     else hi = mid;
   }
   return 0.5 * (lo + hi);
@@ -169,10 +207,10 @@ function fullRegressionCutoff(order: number): number {
  * is physics: a filter that cancels stationary echo and amplifies nothing passes at most what the mean removal passes
  * (|F·x|² = |F·(x − x̄)|² ≤ |x − x̄|²), so no such filter cuts below the mean removal's −3 dB, 0.1115 Nyquist. The upper
  * bound is the steepest filter here, mean + trend + quadratic removed, 0.321 Nyquist; a higher cutoff would need a longer
- * packet or a higher-order regression. The control is bounded to this range (`colorWallFilterCutoffMps`).
+ * packet or a higher-order regression. What filters is bounded to this range (`colorWallFilterCutoffMps`).
  */
-export const WF_MIN_NYQUIST = fullRegressionCutoff(0);
-export const WF_MAX_NYQUIST = fullRegressionCutoff(2);
+export const WF_MIN_NYQUIST = wallFilterCutoffNyquist({ mean: 1, trend: 0, quad: 0 });
+export const WF_MAX_NYQUIST = wallFilterCutoffNyquist({ mean: 1, trend: 1, quad: 1 });
 
 /** The −3 dB cutoffs (m/s) the colour wall filter can have at a Nyquist scale: 7.6 to 21.8 cm/s at 0.68 m/s. */
 export function colorWallFilterRangeMps(scaleMps: number): { min: number; max: number } {
@@ -180,17 +218,18 @@ export function colorWallFilterRangeMps(scaleMps: number): { min: number; max: n
   return { min: WF_MIN_NYQUIST * scale, max: WF_MAX_NYQUIST * scale };
 }
 
-/** The −3 dB cutoff (m/s) the colour wall filter has for a requested one: bounded to what the packet allows, 0 = off. */
+/**
+ * The −3 dB cutoff (m/s) the colour wall filter has for a requested one at the Nyquist it acquires with: bounded to what
+ * the packet allows, 0 = off. The request is what the store and the review reports keep (`ColorSettings.wallFilterMps`);
+ * each consumer bounds it here: the estimator's shares (CPU and GPU, `wallFilterShares`), the colour M-mode, the
+ * expected field and the console's readout. Bounded where it was kept, a lowered scale lowered it for good: back at
+ * 0.68 m/s after 0.35 the 20 cm/s default stayed 11.2 cm/s, and the moving myocardium of an A4C (CPU, 44 frames) went
+ * from 112 coloured samples to 7073.
+ */
 export function colorWallFilterCutoffMps(wallFilterMps: number, scaleMps: number): number {
   if (!(wallFilterMps > 0)) return 0;
   const scale = Math.max(1e-3, scaleMps);
   return Math.min(WF_MAX_NYQUIST * scale, Math.max(WF_MIN_NYQUIST * scale, wallFilterMps));
-}
-
-export interface WallFilterShares {
-  mean: number;
-  trend: number;
-  quad: number;
 }
 
 /** Share s of a component holding power `ak` at the cutoff whose removal takes `taken` of it: (2s − s²)·ak = taken. */
@@ -200,14 +239,14 @@ function shareTaking(taken: number, ak: number): number {
 
 /**
  * Shares of the packet's mean, linear trend and quadratic the regression wall filter removes so that its −3 dB point
- * falls on the requested cutoff: the mean always whole, then the trend, then the quadratic, each solved in
- * closed form from the tone powers at the cutoff. One function for the CPU estimator and the GPU pass (a uniform), so both
- * filter alike. Through the estimator (jitter and noise included; uniform laminar flow, 16×16 cells, 6 updates, scales
- * 0.3–1 m/s) the power is −2.4 to −2.9 dB at the cutoff and the velocity reads +4 to +8 % fast at twice it: the edge of
- * any filter reads fast, the more so over the jitter's floor (`TRANSIT_JITTER_RAD`). The shares used to be ramps in
- * WF/Nyquist never checked against the response: the default 6 cm/s at 0.68 m/s removed mean + trend + 55 % of the
- * quadratic and cut at 0.205 m/s, 3.4 times the label, read 0.15 m/s as 0.32, and every setting from 8 cm/s up gave the
- * same filter.
+ * falls on the requested cutoff, bounded to what the packet allows (`colorWallFilterCutoffMps`): the mean always whole,
+ * then the trend, then the quadratic, each solved in closed form from the tone powers at the cutoff. One function for the
+ * CPU estimator, the GPU pass (a uniform) and the colour M-mode, so all three filter alike. Through the estimator
+ * (jitter and noise included; uniform laminar flow, 16×16 cells, 6 updates, scales 0.3–1 m/s) the power is −2.4 to
+ * −2.9 dB at the cutoff and the velocity reads +4 to +8 % fast at twice it: the edge of any filter reads fast, the more
+ * so over the jitter's floor (`TRANSIT_JITTER_RAD`). The shares used to be ramps in WF/Nyquist never checked against
+ * the response: the default 6 cm/s at 0.68 m/s removed mean + trend + 55 % of the quadratic and cut at 0.205 m/s, 3.4
+ * times the label, read 0.15 m/s as 0.32, and every setting from 8 cm/s up gave the same filter.
  */
 export function wallFilterShares(
   wallFilterMps: number,
@@ -229,6 +268,53 @@ export function wallFilterShares(
     out.quad = shareTaking(0.5 - a[0]! - a[1]!, a[2]!);
   }
   return out;
+}
+
+/** Intervals of |v|/Nyquist over [0, 1] that `WallFilterResponseTable` samples the response on. */
+const WF_TABLE_STEPS = 1024;
+
+/**
+ * `wallFilterPowerResponse` for one request at one Nyquist, tabulated for a loop that filters many velocities alike:
+ * the colour M-mode reads it for every blood sample of its columns. Even and periodic in 2·Nyquist, the response is a
+ * function of |v|/Nyquist folded into [0, 1], sampled here at 1025 points and read by linear interpolation. That errs
+ * by at most Δ²/8·max|h''| with Δ = 1/1024: the response is a trigonometric polynomial of degree 7 in π·v/Nyquist
+ * with values in [0, 1], so |h''| ≤ 7²·π²/2 (Bernstein), at most 2.9e-5 of the power; over every cutoff the packet
+ * allows |h''| peaks at (8² − 1)·π²/6 ≈ 104, next to zero with the mean removal, and the error at 1.24e-5. The table
+ * is refilled only when the request or the Nyquist changes (1025 responses, 0.1 ms). Per sample, the response's 16
+ * sin/cos took ~0.1 µs: with A4C through the crux at high quality, 1600 px and 100 mm/s (27 columns of 118 blood
+ * samples a frame) the strip's colour loop took 0.30 ms a frame, 11 µs from the table (6 µs with the old hard cut).
+ */
+export class WallFilterResponseTable {
+  private readonly power = new Float64Array(WF_TABLE_STEPS + 1);
+  private readonly shares: WallFilterShares = { mean: 0, trend: 0, quad: 0 };
+  private wallFilterMps = NaN;
+  private scaleMps = NaN;
+  /** Table steps per m/s of |v|. */
+  private stepsPerMps = 0;
+
+  /** The response for this request at this acquired Nyquist; refilled only when either changes. */
+  set(wallFilterMps: number, scaleMps: number): this {
+    if (wallFilterMps === this.wallFilterMps && scaleMps === this.scaleMps) return this;
+    this.wallFilterMps = wallFilterMps;
+    this.scaleMps = scaleMps;
+    const scale = Math.max(1e-3, scaleMps);
+    wallFilterShares(wallFilterMps, scale, this.shares);
+    for (let i = 0; i <= WF_TABLE_STEPS; i++)
+      this.power[i] = wallFilterPowerResponse((i / WF_TABLE_STEPS) * scale, scale, this.shares);
+    this.stepsPerMps = WF_TABLE_STEPS / scale;
+    return this;
+  }
+
+  /** Share of its power a laminar flow at `vMps` keeps (`wallFilterPowerResponse`), from the table. */
+  at(vMps: number): number {
+    // |v| in table steps, folded into [0, 1] Nyquist: the response is even and periodic in 2·Nyquist
+    let x = Math.abs(vMps) * this.stepsPerMps;
+    x -= 2 * WF_TABLE_STEPS * Math.floor(x / (2 * WF_TABLE_STEPS));
+    if (x > WF_TABLE_STEPS) x = 2 * WF_TABLE_STEPS - x;
+    const i = Math.min(WF_TABLE_STEPS - 1, Math.floor(x));
+    const lo = this.power[i]!;
+    return lo + (this.power[i + 1]! - lo) * (x - i);
+  }
 }
 
 const WF_SHARES: WallFilterShares = { mean: 0, trend: 0, quad: 0 };
