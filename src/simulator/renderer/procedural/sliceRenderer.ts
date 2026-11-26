@@ -9,7 +9,7 @@ import {
   Structure,
   type TissueSample,
 } from '@/simulator/anatomy/tissue';
-import { latticeNoise3, noiseLattice } from '@/core/noise';
+import { latticeNoise3, sceneLattice } from '@/core/noise';
 import { hash3 } from '@/core/random';
 import { contactQuality } from '@/simulator/probe/pose';
 import {
@@ -95,6 +95,14 @@ const [CAL_X, CAL_Y, CAL_Z] = CALCIUM_OFFSET;
 const [CRB_X, CRB_Y] = CLUTTER_RE_B;
 const [CIA_X, CIA_Y, CIA_Z] = CLUTTER_IM_A;
 const [CIB_X, CIB_Y, CIB_Z] = CLUTTER_IM_B;
+
+/**
+ * The speckle lattices A, B and C a scene's seed gives the slice renderer: the scene's lattices 0-2 (core/noise.ts
+ * sceneLattice), which the GPU uploads as channels 0-2 of its noise texture (glHelpers.ts noiseLatticeTexels).
+ */
+export function speckleLattices(seed: number): Pick<LineContext, 'latA' | 'latB' | 'latC'> {
+  return { latA: sceneLattice(seed, 0), latB: sceneLattice(seed, 1), latC: sceneLattice(seed, 2) };
+}
 
 /**
  * Procedural slice renderer: marches every scanline through the parametric thorax + heart model and forms
@@ -325,9 +333,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
       nrmH: torsoToHeartDir(hf, beam.normal),
       bloodShift: bloodShiftCells(physics.bloodFrame ?? 0),
       spatialCompound: Math.max(0, Math.min(1, physics.spatialCompound ?? 0)),
-      latA: noiseLattice(physics.seed),
-      latB: noiseLattice(physics.seed ^ 0x2545f491),
-      latC: noiseLattice(physics.seed ^ 0x51),
+      ...speckleLattices(physics.seed),
       line: null,
     };
   }

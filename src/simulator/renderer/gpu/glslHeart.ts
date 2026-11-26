@@ -25,6 +25,9 @@ bool classifyHeart(vec3 p0, out Sample s) {
   if (classifyAorticExtension(p0, s)) return true;
 #endif
   float vascularDistance = s.sdf;
+  // the point after the swing, the bounding sphere and the posterior column, which classify.ts computes before its
+  // blocks (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify.ts: classifyChambers
   vec3 p = vec3(p0.x - SWING_X, p0.y, p0.z);
   float x = p.x, y = p.y, z = p.z;
   vec3 bd = p - vec3(BOUND_CX, BOUND_CY, BOUND_CZ);
@@ -32,8 +35,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // the descending aorta and the vertebral body, which the heart yields to (decision 273)
   float colDist = posteriorColumnDistance(p0.x, p0.y, p0.z, COL_UX, COL_UY, COL_UZ, COL_AX, COL_AY, COL_AZ, COL_SX, COL_SY, COL_SZ);
   float zAnn = ZANN;
+  // end of classifyChambers
 
   // ---------- aortic root coordinates ----------
+  // src/simulator/anatomy/classify/root.ts: rootCoordinates
   float rootT = -99.0, rootRr = 0.0, rootR = 0.0, rootPhi = 0.0;
   vec3 rootQ = vec3(0.0);
   vec3 avC = vec3(AV_CX, AV_CY, AV_CZ);
@@ -53,6 +58,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
   }
   bool inRootLumen = rootT >= -0.05 && rootRr < rootR;
   bool inOutflowLumen = rootT > -1.6 && rootRr < rootR;
+  // end of rootCoordinates
 
   // ---------- valves ----------
   {
@@ -147,7 +153,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // over a volume heart only the valve apparatus above is asked for: the chambers below stay out of that variant, whose
   // pass A SwiftShader leaves empty past its size (decisions 375 and 381)
   // ---------- LV cavity & wall ----------
+  // the azimuth exactly, where the CPU reads it with fastAtan2 (0.005 rad at most): what follows it mirrors
+  // classify/leftVentricle.ts from the azimuth on (cpuGpuParity.test.ts runs both at the CPU's)
   float az = atan(y, x);
+  // src/simulator/anatomy/classify/leftVentricle.ts: classifyLeftVentricle
   float levelFrac = clamp((z - zAnn) / max(LENGTH_NOW, 1.0), 0.0, 1.0);
   float septalShift = septalShiftAt(SEPTAL_SHIFT, az, levelFrac);
   float xs = x - septalShift;
@@ -208,8 +217,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyLeftVentricle
 
   // ---------- aortic root / LVOT ----------
+  // src/simulator/anatomy/classify/aorticRoot.ts: classifyAorticRoot
   if (rootT > -1.6) {
     float wall = 0.2;
     if (rootRr < rootR) {
@@ -236,7 +247,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyAorticRoot
 
+  // the atria and what they leave the pericardium (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify/atria.ts: classifyAtria
   // the base the ventricle vacated as the annulus descended, atrium now (decision 133); read again by the pericardium
   float raSleeve = 1e3;
   float raBody = 1e3;
@@ -536,8 +550,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyAtria
 
   // ---------- RV ----------
+  // src/simulator/anatomy/classify/rightVentricle.ts: classifyRightVentricle
   vec3 rvc = rvCrescent(p, az);
   float dRv = rvc.x;
   // decision 243: the inflow column inside the free wall below the hinges (rv.ts rvInflowSdf)
@@ -604,8 +620,11 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyRightVentricle
 
   // ---------- pericardium & effusion ----------
+  // the block classify/pericardium.ts mirrors, given what the earlier blocks leave (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify/pericardium.ts: classifyPericardium
   {
     float dLvEpi = dEllR - wallT - crestLoss;
     // decision 380: the ventricle's epicardium ends at its base, but around the root
@@ -619,7 +638,6 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // the sac around the outflow tract and the trunk stays where the pericardium is anchored (decision 111)
     vec3 rvotA = vec3(RVOT_AX, RVOT_AY, RVOT_AZ);
     vec3 rvotB = vec3(RVOT_BX, RVOT_BY, RVOT_BZ);
-    vec3 paEnd = vec3(PA_EX, PA_EY, PA_EZ);
     float dRvotEpi = sdCapsule(p, rvotA, rvotB, RVOT_RA + fw);
     float dPaEpi = pulmonaryTrunkEpiDist(p);
     // decision 387: the atrioventricular groove's blend narrows above the groove

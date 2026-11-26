@@ -54,6 +54,21 @@ export function noiseLattice(seed: number): Uint8Array {
   return l;
 }
 
+/**
+ * What each of a scene's four lattices XORs the scene's seed with (lattice 0 takes the seed itself): the slice
+ * renderer's speckle lattices A, B and C (sliceRenderer.ts speckleLattices) and the heart's wall lattice (heartModel.ts
+ * wallNoise). The GPU uploads them as the four channels of one texture (glHelpers.ts noiseLatticeTexels), which its
+ * shaders read as lat(p, 0…3): one table of seeds for both, so that the speckle and the wall texture are one on each.
+ */
+export const NOISE_LATTICE_SEED_XOR = [0, 0x2545f491, 0x51, 0x5157] as const;
+
+/** Lattice k (0-3, NOISE_LATTICE_SEED_XOR) of a scene's seed. */
+export function sceneLattice(seed: number, k: 0 | 1 | 2 | 3): Uint8Array {
+  const xor = NOISE_LATTICE_SEED_XOR[k];
+  // the seed itself, not seed ^ 0, which would take a seed beyond 32 bits or with a fraction to another lattice
+  return noiseLattice(xor ? seed ^ xor : seed);
+}
+
 export function latticeNoise3(x: number, y: number, z: number, lattice: Uint8Array): number {
   const x0 = Math.floor(x),
     y0 = Math.floor(y),
