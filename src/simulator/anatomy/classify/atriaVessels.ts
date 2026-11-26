@@ -6,6 +6,9 @@ import { setSample, type ClassifyCtx } from './context';
 import { LA_WALL_CM, LAA_WALL_CM } from './pericardium';
 import { IVC_HEPATIC_SEGMENT_CM, type AnchorsCached } from '../anchors';
 import { PV_RADIUS, PV_WALL_CM, pulmonaryVeinSegment } from '../pulmonaryVeins';
+import { leftAppendageDistance, rightAppendageLumen } from '../atrialAppendages';
+
+export { RAA_BASE_R_CM, RAA_TIP_FROM_AV, RAA_TIP_R_CM } from '../atrialAppendages';
 
 /** Scratch for the pulmonary vein segment of the sample being classified (no allocation per sample). */
 const PV_SEG = new Float64Array(6);
@@ -126,18 +129,15 @@ export function leftAtrialMouthLumen(
   bo: number,
   czL: number,
 ): number {
-  let d = sdCapsule(
+  let d = leftAppendageDistance(
+    la,
+    lr,
+    czL,
+    bo,
+    0.12 * (latticeNoise3(x * 2.3 + 1.7, y * 2.3 + 4.2, z * 2.3 + 8.8, c.m.wallNoise) - 0.5),
     x,
     y,
     z,
-    la.x + lr.x * 0.55,
-    la.y + lr.y * 0.55,
-    czL + 0.4,
-    la.x + lr.x * 0.95,
-    la.y + lr.y * 0.55 + 2.0,
-    czL + 0.9,
-    0.55 * bo +
-      0.12 * (latticeNoise3(x * 2.3 + 1.7, y * 2.3 + 4.2, z * 2.3 + 8.8, c.m.wallNoise) - 0.5),
   );
   const g = c.veinSeg;
   for (let i = 0; i < 24; i += 6) {
@@ -316,13 +316,8 @@ export function coronarySinusDistance(c: ClassifyCtx, x: number, y: number, z: n
 }
 
 /**
- * The right atrial appendage (decisions 323, 388, 389).
- */
-export const RAA_TIP_FROM_AV: readonly [number, number, number] = [-2.7, 1.6, -2.4];
-export const RAA_BASE_R_CM = 1.1;
-export const RAA_TIP_R_CM = 1;
-/**
- * Height (cm) over the atrial floor below which the appendage does not reach (decision 324).
+ * Height (cm) over the atrial floor below which the right atrial appendage does not reach (decision 324); its tip and
+ * radii are in atrialAppendages.ts (decisions 323, 388, 389).
  */
 export const RAA_ABOVE_FLOOR_CM = 0.5;
 
@@ -346,22 +341,7 @@ export function rightAppendageDistance(
   y: number,
   z: number,
 ): number {
-  const A = c.A,
-    b = A.raaBase,
-    av = A.avCenter;
-  return sdRoundCone(
-    x,
-    y,
-    z,
-    b.x,
-    b.y,
-    b.z,
-    av.x + RAA_TIP_FROM_AV[0],
-    av.y + RAA_TIP_FROM_AV[1],
-    av.z + RAA_TIP_FROM_AV[2],
-    RAA_BASE_R_CM * bo,
-    RAA_TIP_R_CM * bo,
-  );
+  return rightAppendageLumen(c.A.raaBase, c.A.avCenter, bo, x, y, z);
 }
 
 /** Radial scale of the atria: reservoir/conduit/booster with the LV contraction, shrunk by the atrial kick and its hold. */
@@ -391,15 +371,9 @@ export function classifyAtrialVessels(
   const { m, A, x, y, z, out } = c;
   // left atrial appendage: lobulated pouch on the anterolateral LA, pointing anteriorly (A2C/PSAX-AV)
   {
-    const ax0 = la.x + lr.x * 0.55,
-      ay0 = la.y + lr.y * 0.55,
-      az0 = czL + 0.4;
-    const ax1 = la.x + lr.x * 0.95,
-      ay1 = ay0 + 2.0,
-      az1 = czL + 0.9;
     const lob =
       0.12 * (latticeNoise3(x * 2.3 + 1.7, y * 2.3 + 4.2, z * 2.3 + 8.8, m.wallNoise) - 0.5);
-    const dApp = sdCapsule(x, y, z, ax0, ay0, az0, ax1, ay1, az1, 0.55 * bo + lob);
+    const dApp = leftAppendageDistance(la, lr, czL, bo, lob, x, y, z);
     if (dApp < 0) {
       setSample(out, Tissue.Blood, dApp, 0, 1, 0, x, y, z, 0, Structure.LaAppendage);
       return true;

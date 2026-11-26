@@ -36,6 +36,7 @@ import {
   sampleFlow,
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
+import { colorWallFilterRangeMps } from '@/simulator/doppler/color/kasaiEstimator';
 import { computeDopplerBoxBounds } from '@/simulator/renderer/gpu/deferredDoppler';
 import { Tissue } from '@/simulator/anatomy/tissue';
 import {
@@ -538,8 +539,12 @@ export interface DeferredDopplerComparison {
   /** Deterministic deferred present RGBA parity (CPU overlayColorField vs GPU deferred present). */
   detPresentMaxDiff: number;
   detPresentFracOver1: number;
-  /** Stochastic Kasai (8-pulse 3-basis Legendre): blood & clutter parity at WF=6 cm/s vs WF=2 cm/s. */
-  kasaiWf6: {
+  /**
+   * Stochastic Kasai (8-pulse 3-basis Legendre): blood & clutter parity at the box's wall filter (the default 20 cm/s,
+   * which keeps the myocardium out, unless `colorOverrides` sets one) vs the lowest cutoff the packet allows at that scale
+   * (0.11 Nyquist, where the moving wall flashes).
+   */
+  kasaiWf: {
     cpuBloodFill: number;
     gpuBloodFill: number;
     cpuBloodMeanV: number;
@@ -547,7 +552,7 @@ export interface DeferredDopplerComparison {
     cpuClutterFill: number;
     gpuClutterFill: number;
   };
-  kasaiWf2: {
+  kasaiMinWf: {
     cpuBloodFill: number;
     gpuBloodFill: number;
     cpuBloodMeanV: number;
@@ -588,8 +593,8 @@ export function compareDeferredDoppler(
     detVarMaxDiff: 1,
     detPresentMaxDiff: 255,
     detPresentFracOver1: 1,
-    kasaiWf6: { ...emptyStats },
-    kasaiWf2: { ...emptyStats },
+    kasaiWf: { ...emptyStats },
+    kasaiMinWf: { ...emptyStats },
   };
   const g = createWebgl2Renderer(undefined, { allowSoftware: true });
   if (!g.renderer) return { ...empty, error: g.reason };
@@ -710,7 +715,11 @@ export function compareDeferredDoppler(
 
     const acq = { frequencyMHz: settings.frequencyMHz, harmonics: settings.harmonics };
     const cpuDet = allocColorField(n);
-    const detCfg: ColorSettings = { ...baseColor, wallFilterMps: 0.06 };
+    // the expected field at the packet's lowest cutoff (its old 0.06 m/s is bounded to it): parity over the most blood
+    const detCfg: ColorSettings = {
+      ...baseColor,
+      wallFilterMps: colorWallFilterRangeMps(baseColor.scaleMps).min,
+    };
     computeColorField(frame, detCfg, null, sampleFromBox, cpuDet, acq, undefined);
 
     const shadedDet = gpu.shadeDoppler({
@@ -785,7 +794,7 @@ export function compareDeferredDoppler(
       if (d > 1) detPresentOver1++;
     }
 
-    // Stochastic 8-pulse Kasai + 3-basis Legendre clutter check at WF = 6 cm/s vs WF = 2 cm/s
+    // Stochastic 8-pulse Kasai + 3-basis Legendre clutter check: the box's wall filter vs the packet's lowest cutoff
     const runKasai = (wfMps: number) => {
       const cfg: ColorSettings = { ...baseColor, wallFilterMps: wfMps };
       const cpuOut = allocColorField(n);
@@ -843,8 +852,8 @@ export function compareDeferredDoppler(
       };
     };
 
-    const kasaiWf6 = runKasai(0.06);
-    const kasaiWf2 = runKasai(0.02);
+    const kasaiWf = runKasai(baseColor.wallFilterMps);
+    const kasaiMinWf = runKasai(colorWallFilterRangeMps(baseColor.scaleMps).min);
 
     return {
       boxW: box.boxW,
@@ -856,8 +865,8 @@ export function compareDeferredDoppler(
       detVarMaxDiff: varMaxDiff,
       detPresentMaxDiff,
       detPresentFracOver1: inside ? detPresentOver1 / inside : 0,
-      kasaiWf6,
-      kasaiWf2,
+      kasaiWf,
+      kasaiMinWf,
     };
   } finally {
     gpu.dispose();

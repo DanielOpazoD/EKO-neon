@@ -295,6 +295,7 @@ float lat(vec3 p, int ch) {
   return mix(y0, y1, u.z);
 }
 
+// src/simulator/anatomy/sdf.ts: sdEllipsoid
 float sdEllipsoid(vec3 p, vec3 c, vec3 r) {
   vec3 d = (p - c) / r;
   float k0 = length(d);
@@ -302,12 +303,14 @@ float sdEllipsoid(vec3 p, vec3 c, vec3 r) {
   if (k1 < 1e-9) return -min(r.x, min(r.y, r.z));
   return k0 * (k0 - 1.0) / k1;
 }
+// src/simulator/anatomy/sdf.ts: sdCapsule
 float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
   vec3 pa = p - a, ba = b - a;
   float bb = dot(ba, ba);
   float h = bb > 0.0 ? clamp(dot(pa, ba) / bb, 0.0, 1.0) : 0.0;
   return length(pa - ba * h) - r;
 }
+// src/simulator/anatomy/sdf.ts: sdRoundCone
 float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
   vec3 ba = b - a;
   float l2 = dot(ba, ba);
@@ -326,15 +329,18 @@ float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
   if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
   return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
 }
+// src/simulator/anatomy/sdf.ts: sdTorusZ
 float sdTorusZ(vec3 p, vec3 c, float R, float r) {
   float q = length(p.xy - c.xy) - R;
   float dz = p.z - c.z;
   return sqrt(q * q + dz * dz) - r;
 }
+// src/simulator/anatomy/sdf.ts: smin
 float smin(float a, float b, float k) {
   float h = max(k - abs(a - b), 0.0) / k;
   return min(a, b) - h * h * k * 0.25;
 }
+// src/simulator/anatomy/sdf.ts: smax
 float smax(float a, float b, float k) { return -smin(-a, -b, k); }
 ${GLSL_GENERATED}
 `;

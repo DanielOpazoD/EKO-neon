@@ -25,6 +25,9 @@ bool classifyHeart(vec3 p0, out Sample s) {
   if (classifyAorticExtension(p0, s)) return true;
 #endif
   float vascularDistance = s.sdf;
+  // the point after the swing, the bounding sphere and the posterior column, which classify.ts computes before its
+  // blocks (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify.ts: classifyChambers
   vec3 p = vec3(p0.x - SWING_X, p0.y, p0.z);
   float x = p.x, y = p.y, z = p.z;
   vec3 bd = p - vec3(BOUND_CX, BOUND_CY, BOUND_CZ);
@@ -32,8 +35,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // the descending aorta and the vertebral body, which the heart yields to (decision 273)
   float colDist = posteriorColumnDistance(p0.x, p0.y, p0.z, COL_UX, COL_UY, COL_UZ, COL_AX, COL_AY, COL_AZ, COL_SX, COL_SY, COL_SZ);
   float zAnn = ZANN;
+  // end of classifyChambers
 
   // ---------- aortic root coordinates ----------
+  // src/simulator/anatomy/classify/root.ts: rootCoordinates
   float rootT = -99.0, rootRr = 0.0, rootR = 0.0, rootPhi = 0.0;
   vec3 rootQ = vec3(0.0);
   vec3 avC = vec3(AV_CX, AV_CY, AV_CZ);
@@ -53,6 +58,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
   }
   bool inRootLumen = rootT >= -0.05 && rootRr < rootR;
   bool inOutflowLumen = rootT > -1.6 && rootRr < rootR;
+  // end of rootCoordinates
 
   // ---------- valves ----------
   {
@@ -147,20 +153,25 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // over a volume heart only the valve apparatus above is asked for: the chambers below stay out of that variant, whose
   // pass A SwiftShader leaves empty past its size (decisions 375 and 381)
   // ---------- LV cavity & wall ----------
+  // the azimuth exactly, where the CPU reads it with fastAtan2 (0.005 rad at most): what follows it mirrors
+  // classify/leftVentricle.ts from the azimuth on (cpuGpuParity.test.ts runs both at the CPU's)
   float az = atan(y, x);
+  // src/simulator/anatomy/classify/leftVentricle.ts: classifyLeftVentricle
   float levelFrac = clamp((z - zAnn) / max(LENGTH_NOW, 1.0), 0.0, 1.0);
   float septalShift = septalShiftAt(SEPTAL_SHIFT, az, levelFrac);
   float xs = x - septalShift;
   vec3 n0;
   float dProf = lvCavitySdf(xs, y, z, n0);
-  int seg = ahaSegment(az, levelFrac);
-  float amp = P(SEG_AMP_BASE + seg);
-  // an akinetic segment keeps its end-diastolic radius; a hyperkinetic one (amp > 1) adds nothing, as on the CPU
-  float regional = amp < 1.0 ? (1.0 - amp) * (LV_RMAX_ED - LV_RMAX) * lvProfileG(levelFrac) : 0.0;
+  // regional wall motion, continuous across the segment borders (lvRegionalMotion, as on the CPU): an akinetic wall keeps
+  // its end-diastolic radius and thickness
+  float motion = lvMotionAt(az, levelFrac);
+  float regional = regionalCavityOffset(az, levelFrac, motion);
   float rs = RADIAL_SCALE, ls = LONG_SCALE;
-  float trab = levelFrac > 0.45 ? 0.2 * min(1.0, (levelFrac - 0.45) / 0.35) * (lat(vec3((x / rs) * 2.6 + 11.3, (y / rs) * 2.6 + 2.9, ((z - LV_LEN) / ls) * 1.1 + 6.1), 3) - 0.5) : 0.0;
+  // the wall's own radial scale, so that its speckle and trabeculae stay with the tissue (leftVentricle.ts)
+  float rsWall = rs + (1.0 - motion) * (1.0 - rs);
+  float trab = levelFrac > 0.45 ? 0.2 * min(1.0, (levelFrac - 0.45) / 0.35) * (lat(vec3((x / rsWall) * 2.6 + 11.3, (y / rsWall) * 2.6 + 2.9, ((z - LV_LEN) / ls) * 1.1 + 6.1), 3) - 0.5) : 0.0;
   float dCavR = smax(dProf - regional + trab, zAnn - z, 0.6);
-  float tFull = wallThicknessAt(az, levelFrac, amp);
+  float tFull = wallThicknessAt(az, levelFrac, motion);
   // decision 223
   float tNow = tFull * septalCrestFactor(az, z - zAnn);
   float crestLoss = tFull - tNow;
@@ -181,7 +192,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
     return true;
   }
   float wallT = tNow;
-  float dEllR = smin(dProf, dInflow, 0.3) - regional;
+  // the regional offset moves the profile, not the inflow column, as in the cavity (leftVentricle.ts)
+  float dEllR = smin(dProf - regional, dInflow, 0.3);
   // apical to the hinge at this azimuth, not to the mean annular plane (decision 327)
   if (dEllR + trab >= 0.0 && dEllR < wallT && z >= zHinge - LV_WALL_BASAL_OVERHANG_CM && !inOutflowLumen) {
     // the wall label follows the AHA wall of the segment, bounded by the RV insertions (lvSegments.ts, decision 154)
@@ -193,7 +205,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // only the smooth epicardium reflects coherently; the trabeculated endocardium scatters (decision 144)
     float dIn = nearEpi ? -(wallT - dEllR) : -wallT;
     float sg = nearEpi ? 1.0 : -1.0;
-    setSample(s, T_MYO, dIn, sg * n0, vec3(x / rs, y / rs, (z - LV_LEN) / ls), 0.0, structure);
+    setSample(s, T_MYO, dIn, sg * n0, vec3(x / rsWall, y / rsWall, (z - LV_LEN) / ls), 0.0, structure);
     s.transmural = clamp(dEllR / wallT, 0.0, 1.0);
     s.segment = int(segCode + 0.5);
     return true;
@@ -205,8 +217,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyLeftVentricle
 
   // ---------- aortic root / LVOT ----------
+  // src/simulator/anatomy/classify/aorticRoot.ts: classifyAorticRoot
   if (rootT > -1.6) {
     float wall = 0.2;
     if (rootRr < rootR) {
@@ -233,7 +247,10 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyAorticRoot
 
+  // the atria and what they leave the pericardium (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify/atria.ts: classifyAtria
   // the base the ventricle vacated as the annulus descended, atrium now (decision 133); read again by the pericardium
   float raSleeve = 1e3;
   float raBody = 1e3;
@@ -533,13 +550,17 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyAtria
 
   // ---------- RV ----------
+  // src/simulator/anatomy/classify/rightVentricle.ts: classifyRightVentricle
   vec3 rvc = rvCrescent(p, az);
   float dRv = rvc.x;
   // decision 243: the inflow column inside the free wall below the hinges (rv.ts rvInflowSdf)
   float dIn = max(tvInflowSdf(p), length(p.xy) - rvc.z - rvInflowSlack(p.z - (TVS_CZ + tvOffsetAt(p.xy))));
   float dRvU = smin(dRv, dIn, 0.3);
+  // the cavity the RV wall is drawn around, with the outflow tract: read again by the pericardium (rightVentricle.ts)
+  float dCavRv = dRvU;
   {
     float sc = CONTRACTION;
     float fw = rvFreeWallNow(RV_FW, sc);
@@ -559,7 +580,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
       setSample(s, T_VESSEL, -min(dTrunk, PA_WALL_CM - dTrunk), v, p, 0.0, S_PA);
       return true;
     }
-    float dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
+    dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
     float sc3 = 1.0 - 0.3 * sc;
     if (dCavRv < 0.0) {
       if (dRv < 0.0) {
@@ -599,27 +620,31 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
   }
+  // end of classifyRightVentricle
 
   // ---------- pericardium & effusion ----------
+  // the block classify/pericardium.ts mirrors, given what the earlier blocks leave (cpuGpuParity.test.ts runs both)
+  // src/simulator/anatomy/classify/pericardium.ts: classifyPericardium
   {
     float dLvEpi = dEllR - wallT - crestLoss;
     // decision 380: the ventricle's epicardium ends at its base, but around the root
     float rootGap = rootT > -90.0 ? rootRr - rootR : 1e3;
     float dLvSac = smax(dLvEpi, min(zHinge - LV_SAC_ABOVE_HINGE_CM - z, rootGap - LV_SAC_ROOT_KEEP_CM), 0.2);
     float fw = RV_FW;
-    float dRvEpi = dRvU - fw;
+    // the outer face of the free wall as the RV block draws it now (pericardium.ts)
+    float dRvEpi = dCavRv - rvFreeWallNow(fw, CONTRACTION);
     float dLaEpi = laEpi;
     float dRaEpi = min(min(min(raSleeve + 0.22, raBody - 0.22), raaEpi), raColumn - 0.22); // the atrium's own wall (decision 378), and the vestibule's column (decision 379)
     // the sac around the outflow tract and the trunk stays where the pericardium is anchored (decision 111)
     vec3 rvotA = vec3(RVOT_AX, RVOT_AY, RVOT_AZ);
     vec3 rvotB = vec3(RVOT_BX, RVOT_BY, RVOT_BZ);
-    vec3 paEnd = vec3(PA_EX, PA_EY, PA_EZ);
     float dRvotEpi = sdCapsule(p, rvotA, rvotB, RVOT_RA + fw);
     float dPaEpi = pulmonaryTrunkEpiDist(p);
     // decision 387: the atrioventricular groove's blend narrows above the groove
     float dEpi = smax(smin(smin(smin(dLvSac, dRvEpi, 0.8), smin(dLaEpi, dRaEpi, 0.8), avGrooveBlend(zHinge - z)), smin(dRvotEpi, dPaEpi, 0.8), 0.8), PERICARDIUM_CM - colDist, 0.2);
-    // decision 383: over an effusion the parietal layer is a smooth envelope, thin behind the left atrium (decision 255)
-    float par = EFFUSION > 0.0 ? parietalSdf(EFFUSION, smin(smin(smin(dLvEpi, dRvEpi, 0.8), smin(sdEllipsoid(p, la, lr + 0.25), sdEllipsoid(p, ra, rar + 0.22), 0.8), 0.8), smin(dRvotEpi, dPaEpi, 0.8), 0.8), (la.y - y) / lr.y, ((x - la.x) / lr.x) * ((x - la.x) / lr.x) + ((z - la.z) / lr.z) * ((z - la.z) / lr.z), colDist) : 1e3;
+    // over an effusion the parietal layer is the fixed sac (pericardium.ts ParietalSac), read before the swing, thin
+    // behind the left atrium (decision 255), where it rests on the heart of the moment (parietalSdf)
+    float par = EFFUSION > 0.0 ? parietalSdf(EFFUSION, parietalSacDistance(p0.x, p0.y, p0.z), dEpi, (la.y - y) / lr.y, ((p0.x - la.x) / lr.x) * ((p0.x - la.x) / lr.x) + ((z - la.z) / lr.z) * ((z - la.z) / lr.z), colDist) : 1e3;
     vec3 nEpi = n0;
     if (dEpi < 0.0) {
       setSample(s, T_FAT, dEpi, nEpi, p, 0.0, S_EPI_FAT);

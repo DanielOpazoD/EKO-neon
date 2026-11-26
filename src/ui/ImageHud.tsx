@@ -7,8 +7,7 @@ import { listCases } from '@/cases';
 import { isStripModality } from '@/simulator/renderer/modality';
 import type { ProductMode } from '@/app/modePolicy';
 import { formatMHz } from './format';
-
-const TIER_LABEL: Record<string, string> = { low: 'baja', medium: 'media', high: 'alta' };
+import { gpuNotice } from './gpuNotice';
 
 const RHYTHM_LABEL: Record<string, string> = {
   sinus: 'Sinusal',
@@ -32,14 +31,16 @@ export function ImageHud() {
   const frequencyMHz = useSimStore((s) => s.settings.frequencyMHz);
   const harmonics = useSimStore((s) => s.settings.harmonics);
   const strip = useSimStore((s) => isStripModality(s.modality));
-  const { hrBpm, fps, gpuReason, tier } = useHudStore(
+  const { hrBpm, fps, gpu, tier, gpuLive } = useHudStore(
     useShallow((h) => ({
       hrBpm: h.hud ? Math.round(h.hud.heartRateBpm) : null,
       fps: h.hud ? Math.round(h.hud.simulatedFps) : null,
-      gpuReason: typeof h.hud?.stats?.['gpu'] === 'string' ? h.hud.stats['gpu'] : null,
-      tier: typeof h.hud?.stats?.['tier'] === 'string' ? h.hud.stats['tier'] : null,
+      gpu: h.hud?.stats?.['gpu'] ?? null,
+      tier: h.hud?.stats?.['tier'] ?? null,
+      gpuLive: h.hud?.stats?.['gpuLive'] ?? null,
     })),
   );
+  const notice = gpuNotice({ gpu, tier, gpuLive });
   // the title wraps to two lines on a narrow image: the segment chip below it reads its height (--hud-tl-h) to keep clear
   const titleBoxRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -88,10 +89,11 @@ export function ImageHud() {
         {/* in colour the frame rate already is the colour one: «· color N» repeated it (decision 195) */}
         <span>FR {fps !== null ? fps : '—'} Hz</span>
         {strip ? viewLine : null}
-        {gpuReason && gpuReason !== 'ok' ? (
-          // the image is formed by the CPU tracer (no WebGL2, or the context was lost): slower and, on «auto», coarser
-          <span className="hud-warn" data-tip={gpuReason}>
-            Sin GPU · trazador CPU{tier ? `, calidad ${TIER_LABEL[tier] ?? tier}` : ''}
+        {notice ? (
+          // the frame shown was formed by the CPU tracer (its tip: why, and the port now); or, frozen over one the GPU
+          // formed, the port is lost since
+          <span className="hud-warn" data-tip={notice.tip}>
+            {notice.text}
           </span>
         ) : null}
       </div>

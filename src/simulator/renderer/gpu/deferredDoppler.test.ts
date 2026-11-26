@@ -16,8 +16,8 @@ import {
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
-  WF_MEAN_SPAN,
-  WF_QUAD_START,
+  colorWallFilterCutoffMps,
+  wallFilterShares,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { ATTEN_NP_PER_DB, SOFT_TISSUE_ATTEN_DB } from '../acoustic/acoustics';
 import { buildScanLut, computeSectorMapping } from '../scanConvert';
@@ -59,6 +59,8 @@ interface GlCallLog {
   clearBufferCalls: number;
   drawCalls: number;
   uniform1i: Map<string, number>;
+  uniform1f: Map<string, number>;
+  uniform3f: Map<string, [number, number, number]>;
   boundTexturesByUnit: Map<number, unknown>;
 }
 
@@ -81,6 +83,8 @@ function makeInstrumentedGl(readbackPixels?: Float32Array) {
     clearBufferCalls: 0,
     drawCalls: 0,
     uniform1i: new Map(),
+    uniform1f: new Map(),
+    uniform3f: new Map(),
     boundTexturesByUnit: new Map(),
   };
 
@@ -141,6 +145,12 @@ function makeInstrumentedGl(readbackPixels?: Float32Array) {
     getUniformLocation: (_prog: unknown, name: string) => ({ name }),
     uniform1i: (loc: { name?: string } | null, v: number) => {
       if (loc?.name) log.uniform1i.set(loc.name, v);
+    },
+    uniform1f: (loc: { name?: string } | null, v: number) => {
+      if (loc?.name) log.uniform1f.set(loc.name, v);
+    },
+    uniform3f: (loc: { name?: string } | null, x: number, y: number, z: number) => {
+      if (loc?.name) log.uniform3f.set(loc.name, [x, y, z]);
     },
     activeTexture: (unit: number) => {
       activeUnit = unit - 0x84c0;
@@ -263,8 +273,12 @@ test('GLSL deferred Doppler shaders synchronize all physical constants with Type
   assert.ok(defs.includes(`#define CLUTTER_BLOOD_RATIO_POW ${CLUTTER_BLOOD_RATIO_POW}`));
   assert.ok(defs.includes(`#define CLUTTER_SIGMA_V_MPS ${CLUTTER_SIGMA_V_MPS}`));
   assert.ok(defs.includes(`#define CLUTTER_JITTER_RAD ${CLUTTER_JITTER_RAD}`));
-  assert.ok(defs.includes(`#define WF_MEAN_SPAN ${WF_MEAN_SPAN}`));
-  assert.ok(defs.includes(`#define WF_QUAD_START ${WF_QUAD_START}`));
+  // the wall filter reaches Pass D1 as the shares the CPU estimator uses (one uniform), not re-derived in GLSL
+  assert.ok(GLSL_DOPPLER_AUTOCORR_FRAG.includes('uniform vec3 uWallShares;'));
+  assert.ok(
+    !GLSL_DOPPLER_AUTOCORR_FRAG.includes('uWallFilterMps'),
+    'Pass D1 must filter with uWallShares, not a second derivation from uWallFilterMps',
+  );
   assert.ok(defs.includes(`#define DOPPLER_SHADOW_TRANSMISSION ${DOPPLER_SHADOW_TRANSMISSION}`));
   assert.ok(defs.includes(`#define COLOR_THRESHOLD ${COLOR_THRESHOLD}`));
   assert.ok(defs.includes(`#define COLOR_PACKET ${COLOR_PACKET}`));
@@ -382,6 +396,62 @@ test('DeferredDopplerPipeline allocates lazily, clips to ROI scissor box, upload
   assert.equal(mock.log.texturesDeleted, createdTex);
   assert.equal(mock.log.fbosDeleted, createdFbos);
   assert.equal(pipe.valid, false);
+});
+
+test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU estimator and Pass D2 its cutoff, bounded to what the packet allows', () => {
+  const mock = makeInstrumentedGl();
+  const pipe = new DeferredDopplerPipeline(mock.gl);
+  const gbuf: PolarGBuffer = {
+    ready: true,
+    w: TEST_SPEC.samples,
+    h: TEST_SPEC.lines,
+    version: 1,
+    envTex: {} as WebGLTexture,
+    idsTex: {} as WebGLTexture,
+    packedTex: {} as WebGLTexture,
+  };
+  const box = computeDopplerBoxBounds(TEST_SPEC, TEST_DOPPLER);
+  // default (mean + trend + part of the quadratic), a mid cutoff (part of the trend), one above what 8 pulses allow
+  // (every share whole) and one below it (the mean alone)
+  for (const [wallFilterMps, scaleMps] of [
+    [DEFAULT_COLOR.wallFilterMps, 0.68],
+    [0.12, 0.68],
+    [0.3, 0.4],
+    [0.02, 0.68],
+  ] as const) {
+    const settings = { ...TEST_DOPPLER, wallFilterMps, scaleMps };
+    assert.ok(
+      pipe.shade(gbuf, {} as WebGLVertexArrayObject, {
+        spec: TEST_SPEC,
+        settings,
+        frequencyMHz: 2.5,
+        harmonics: true,
+        rawFlowBox: new Float32Array(box.boxW * box.boxH * 4),
+        estimate: { realization: 1, seed: 3 },
+      }),
+    );
+    const sent = mock.log.uniform3f.get('uWallShares');
+    const cpu = wallFilterShares(wallFilterMps, scaleMps);
+    assert.ok(sent, 'Pass D1 must receive uWallShares');
+    assert.deepEqual(sent, [cpu.mean, cpu.trend, cpu.quad], `WF ${wallFilterMps} at scale ${scaleMps}`);
+    // the expected field's cutoff (Pass D2 without an estimate) is the request bounded as computeColorField bounds it:
+    // the settings carry the request (the store keeps it), not a cutoff already bounded
+    assert.equal(
+      mock.log.uniform1f.get('uWallFilterMps'),
+      colorWallFilterCutoffMps(wallFilterMps, scaleMps),
+      `Pass D2 cutoff for WF ${wallFilterMps} at scale ${scaleMps}`,
+    );
+  }
+  assert.deepEqual(
+    wallFilterShares(0.3, 0.4),
+    { mean: 1, trend: 1, quad: 1 },
+    'above 0.32 Nyquist every share is whole',
+  );
+  assert.deepEqual(
+    mock.log.uniform3f.get('uWallShares'),
+    [1, 0, 0],
+    'below 0.11 Nyquist the mean removal, the lowest cutoff that still cancels stationary tissue',
+  );
 });
 
 test('DeferredDopplerPipeline.readbackBox decodes complex phasors back into aliased CPU velocities', () => {

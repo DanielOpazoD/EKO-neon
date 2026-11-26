@@ -70,8 +70,8 @@ export interface ClassifyCtx {
   /** Normal written by `lvCavitySdf` (leftVentricle.ts), copied into nx0/ny0/nz0. */
   lvNormal: Float64Array;
   /**
-   * RV crescent query (rightVentricle.ts): [0] signed distance to the RV cavity united with its inflow — the
-   * pericardium reads it as the RV epicardium reference —, [1] inner radius, [2] outer radius.
+   * RV crescent query (rightVentricle.ts): [0] signed distance to the RV cavity united with its inflow and outflow
+   * tract — the pericardium reads it as the RV epicardium reference —, [1] inner radius, [2] outer radius.
    */
   rvSdf: Float64Array;
   /** Distance to the base the ventricle vacated as the annulus descended, atrium now (atria.ts, decision 133); 1e3 when none. */
@@ -87,6 +87,12 @@ export interface ClassifyCtx {
   aaOuter: number;
   /** Distance (cm) to the vestibule's column over the tricuspid ring, short of the annulus (decision 379), for the sac. */
   raColumn: number;
+  /**
+   * Signed distance (cm) to the inner face of the parietal pericardium the sac was drawn from (parietalSdf), 1e3 without
+   * an effusion: left by the pericardium's block at the last point it reached, which over the oblique sinus depends on
+   * the heart of the moment. Nothing after the block reads it; pericardium.test.ts does, to find the face in each phase.
+   */
+  parietal: number;
   /** Scratch of the sleeve's end-diastolic radii. */
   sleeveRad: Float64Array;
 }
@@ -133,6 +139,7 @@ export const ctx: ClassifyCtx = {
   raaEpi: 1e3,
   aaOuter: 99,
   raColumn: 1e3,
+  parietal: 1e3,
   sleeveRad: new Float64Array(4),
 };
 

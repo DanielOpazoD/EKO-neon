@@ -28,7 +28,6 @@ export const aorticStenosisSevereCase: CaseDefinitionInput = {
     la: { apDiameterCm: 4.2, volumeMl: 78 },
     aorta: { lvotDiameterCm: 2.1, annulusCm: 2.4, sinusCm: 3.4, ascendingCm: 3.8 },
     aorticValve: {
-      maxOpeningFraction: 0.3,
       calcification: 0.85,
       cuspThicknessCm: 0.25,
       bicuspid: false,

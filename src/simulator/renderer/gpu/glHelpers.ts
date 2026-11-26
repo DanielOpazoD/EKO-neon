@@ -1,4 +1,4 @@
-import { noiseLattice } from '@/core/noise';
+import { sceneLattice } from '@/core/noise';
 import { TISSUE_PROPS } from '@/simulator/anatomy/tissue';
 import {
   buildNoiseKernels,
@@ -148,16 +148,14 @@ export function uploadKernelTable(
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, LATERAL_TAPS, rows, 0, gl.RGBA, gl.FLOAT, data);
 }
 
-/** Upload the 4-channel 128^3 3D speckle/scatter noise lattice texture for a given seed. */
-export function uploadNoiseLattice3D(
-  gl: WebGL2RenderingContext,
-  tex: WebGLTexture,
-  seed: number,
-): void {
-  const a = noiseLattice(seed),
-    b = noiseLattice(seed ^ 0x2545f491),
-    c = noiseLattice(seed ^ 0x51),
-    w = noiseLattice(seed ^ 0x5157);
+/**
+ * The RGBA8 texels of the 128³ noise lattice texture for a seed, as uploadNoiseLattice3D uploads them: texel (x, y, z)
+ * at ((z·128 + y)·128 + x)·4, channel k holding the byte there of the scene's lattice k (core/noise.ts sceneLattice:
+ * the CPU's speckle lattices A, B and C, then the heart's wall lattice), which the shaders read as lat(p, k).
+ * cpuGpuParity.test.ts reads the shaders' texelFetch from this array.
+ */
+export function noiseLatticeTexels(seed: number): Uint8Array {
+  const [a, b, c, w] = [sceneLattice(seed, 0), sceneLattice(seed, 1), sceneLattice(seed, 2), sceneLattice(seed, 3)];
   const n = 128 * 128 * 128;
   const data = new Uint8Array(n * 4);
   for (let i = 0; i < n; i++) {
@@ -166,6 +164,16 @@ export function uploadNoiseLattice3D(
     data[i * 4 + 2] = c[i]!;
     data[i * 4 + 3] = w[i]!;
   }
+  return data;
+}
+
+/** Upload the 4-channel 128^3 3D speckle/scatter noise lattice texture for a given seed. */
+export function uploadNoiseLattice3D(
+  gl: WebGL2RenderingContext,
+  tex: WebGLTexture,
+  seed: number,
+): void {
+  const data = noiseLatticeTexels(seed);
   gl.bindTexture(gl.TEXTURE_3D, tex);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);

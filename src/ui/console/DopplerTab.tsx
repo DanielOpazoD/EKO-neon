@@ -22,6 +22,36 @@ import { useShallow } from 'zustand/shallow';
 import { Section, Segmented, Slider, Toggle } from '../controls';
 import { IconDoppler } from '../icons';
 import { useTip } from './useTip';
+import { wallFilterControl, wallFilterRequestFor, wallFilterText } from './wallFilterControl';
+
+/** The colour wall filter's slider (`wallFilterControl`): it shows the cutoff that filters and sets the request. */
+function WallFilterSlider(props: {
+  requestMps: number;
+  scaleMps: number;
+  onChange: (v: number) => void;
+  title?: string;
+}) {
+  const c = wallFilterControl(props.requestMps, props.scaleMps);
+  return (
+    <>
+      <Slider
+        label="Filtro de pared"
+        value={c.cutMps}
+        min={c.min}
+        max={c.max}
+        step={c.step}
+        format={wallFilterText}
+        onChange={(v) => props.onChange(wallFilterRequestFor(v, props.requestMps, props.scaleMps))}
+        title={props.title}
+      />
+      {c.limited && (
+        <p className="small" aria-live="polite">
+          Corte pedido {wallFilterText(props.requestMps)}: la escala lo limita a {wallFilterText(c.cutMps)}.
+        </p>
+      )}
+    </>
+  );
+}
 
 /** The contextual Doppler family, or an empty state with quick activators while in 2D. */
 export function DopplerTab() {
@@ -166,14 +196,13 @@ export function DopplerTab() {
           />
           <details className="adv">
             <summary>Ajustes finos</summary>
-            <Slider
-              label="Filtro de pared"
-              value={s.color.wallFilterMps}
-              min={0}
-              max={0.3}
-              step={0.01}
-              format={(v) => `${Math.round(v * 100)} cm/s`}
+            <WallFilterSlider
+              requestMps={s.color.wallFilterMps}
+              scaleMps={limits.color.scaleMps}
               onChange={(v) => s.setColor({ wallFilterMps: v })}
+              title={tip(
+                'Velocidad de corte a −3 dB. Con 8 pulsos va de 0,11 a 0,32 × Nyquist: para ver flujo más lento, baja la escala.',
+              )}
             />
           </details>
         </Section>
@@ -455,14 +484,13 @@ export function DopplerTab() {
           />
           <details className="adv">
             <summary>Ajustes finos</summary>
-            <Slider
-              label="Filtro de pared"
-              value={s.color.wallFilterMps}
-              min={0}
-              max={0.3}
-              step={0.01}
-              format={(v) => `${Math.round(v * 100)} cm/s`}
+            <WallFilterSlider
+              requestMps={s.color.wallFilterMps}
+              scaleMps={limits.color.scaleMps}
               onChange={(v) => s.setColor({ wallFilterMps: v })}
+              title={tip(
+                'Velocidad de corte a −3 dB: la tira aplica a la velocidad de cada muestra la respuesta del filtro de 8 pulsos del color 2D, sin el ruido de su estimación. Va de 0,11 a 0,32 × Nyquist.',
+              )}
             />
           </details>
         </Section>

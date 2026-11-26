@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -27,6 +28,7 @@ import { isReportSection, ReportSections, type ReportSectionId } from '@/ui/Repo
 import type { SimOutput } from '@/simulator/core/protocol';
 import type { DopplerAudio } from '@/simulator/doppler/audio/dopplerAudio';
 import { frameBus } from './frameBus';
+import { throttleLatest } from './throttleLatest';
 import { isSpectralModality } from '@/simulator/renderer/modality';
 
 // Loaded on demand (engineering audit, B4): the 3D navigator carries three.js (540 kB) and the secondary
@@ -70,7 +72,7 @@ export function App() {
   const [mobilePanel, setMobilePanel] = useState<'navigation' | 'console' | null>('console');
   const audioRef = useRef<DopplerAudio | null>(null);
   const setHud = useHudStore((s) => s.setHud);
-  const lastHudRef = useRef(0);
+  const lastFrameRef = useRef<SimOutput | null>(null);
   const ui = useSimStore(
     useShallow((s) => ({
       screen: s.ui.screen,
@@ -101,13 +103,11 @@ export function App() {
   const pageVisible = usePageVisible();
   useShortcuts();
 
-  const onFrame = useCallback(
-    (out: SimOutput) => {
-      frameBus.latest = out;
-      frameBus.emit(out);
-      const now = performance.now();
-      if (now - lastHudRef.current > 120) {
-        lastHudRef.current = now;
+  // the HUD, the view score and the curriculum's checks follow the newest frame at ≈ 8 Hz; frozen, the worker sends a
+  // frame only when it changes, so the newest is published when the interval ends rather than skipped
+  const hudPublisher = useMemo(
+    () =>
+      throttleLatest<SimOutput>(120, (out) => {
         setHud(out);
         const st = useSimStore.getState();
         // only a frame acquired for this case in this session is scored, and a view is judged at the pose it was
@@ -146,7 +146,26 @@ export function App() {
           const done = evaluateTasks(snapshot, st.progress.completedTasks);
           if (done.length) st.completeTasks(done);
         }
-      }
+      }),
+    [setHud],
+  );
+  useEffect(() => () => hudPublisher.cancel(), [hudPublisher]);
+  // a measurement taken on a frozen image is judged at once: no frame comes until the image changes
+  useEffect(
+    () =>
+      useSimStore.subscribe((next, prev) => {
+        if (next.measurements !== prev.measurements && lastFrameRef.current)
+          hudPublisher.push(lastFrameRef.current);
+      }),
+    [hudPublisher],
+  );
+
+  const onFrame = useCallback(
+    (out: SimOutput) => {
+      frameBus.latest = out;
+      frameBus.emit(out);
+      lastFrameRef.current = out;
+      hudPublisher.push(out);
       const audio = audioRef.current;
       if (audio && isSpectralModality(modality))
         audio.update(
@@ -161,7 +180,7 @@ export function App() {
           },
         );
     },
-    [setHud, modality],
+    [hudPublisher, modality],
   );
   useSimulation(size, onFrame);
 

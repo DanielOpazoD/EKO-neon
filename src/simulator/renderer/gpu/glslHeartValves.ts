@@ -144,6 +144,7 @@ float mvAnnulusDistance(vec3 p, float tube) {
   return sqrt(dPlane * dPlane + dzz * dzz) - tube;
 }
 // share of the SAM a fibre takes at fan fraction q: the chordae hold the commissures (samShare, mitralValve.ts)
+// src/simulator/anatomy/mitralValve.ts: samShare
 float mvSamShare(float q) { return 1.0 - q * q; }
 // one leaflet (fan of fibres from its focus): updates the nearest hit
 void mvLeaflet(float v, float u, float zr0, int tab, int prof, float focusV, float axisSign, float halfSpan, int leaflet, float opening, float samBlend,

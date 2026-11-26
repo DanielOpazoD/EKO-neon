@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { StripTimeGrid } from './stripTimeGrid';
 import {
@@ -14,8 +14,23 @@ import { SimulatorCore } from './simulatorCore';
 import type { StripCtx } from './stripEngine';
 import { loadCaseById } from '@/cases';
 import { Tissue } from '@/simulator/anatomy/tissue';
-import { DEFAULT_ACQUISITION, type Scene } from '@/simulator/renderer/types';
-import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
+import { allocPolarFrame, DEFAULT_ACQUISITION, type Scene } from '@/simulator/renderer/types';
+import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
+import {
+  allocColorField,
+  COLOR_THRESHOLD,
+  computeColorField,
+  DEFAULT_COLOR,
+  type ColorAcquisition,
+  type ColorSettings,
+} from '@/simulator/doppler/color/colorDoppler';
+import {
+  colorWallFilterCutoffMps,
+  wallFilterPowerResponse,
+  wallFilterShares,
+  WF_MAX_NYQUIST,
+  WF_MIN_NYQUIST,
+} from '@/simulator/doppler/color/kasaiEstimator';
 import {
   DEFAULT_SPECTRAL,
   envelopeThreshold,
@@ -220,6 +235,280 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
     assert.equal(img[leafO], 220, 'Bright mitral leaflet line in CMM should not be overwritten by color');
     assert.equal(img[leafO + 1], 220);
     assert.equal(img[leafO + 2], 220);
+  });
+
+  it('keeps the colour wall filter asked for; what filters is it bounded to what 8 pulses allow at the acquired Nyquist', () => {
+    const base = {
+      modality: 'color' as const,
+      gateDepthCm: 8,
+      settings: { ...DEFAULT_ACQUISITION },
+      spectral: { ...DEFAULT_SPECTRAL },
+    };
+    const color = { ...DEFAULT_COLOR };
+    const kept = constrainAcquisition({ ...base, color });
+    assert.equal(kept.color, color, 'a request within the PRF is kept as it is');
+    const effective = (c: { color: { wallFilterMps: number; scaleMps: number } }) =>
+      colorWallFilterCutoffMps(c.color.wallFilterMps, c.color.scaleMps);
+    // below 0.11 Nyquist the mean removal is the lowest cutoff that cancels stationary tissue; above 0.32 nothing here
+    // cuts. The request stays as it was: written back bounded, it stayed lowered after any drop of Nyquist
+    const low = constrainAcquisition({ ...base, color: { ...DEFAULT_COLOR, wallFilterMps: 0.02 } });
+    assert.equal(low.color.wallFilterMps, 0.02);
+    assert.ok(Math.abs(effective(low) - WF_MIN_NYQUIST * low.color.scaleMps) < 1e-12);
+    const high = constrainAcquisition({
+      ...base,
+      color: { ...DEFAULT_COLOR, scaleMps: 0.4, wallFilterMps: 0.3 },
+    });
+    assert.equal(high.color.wallFilterMps, 0.3);
+    assert.ok(Math.abs(effective(high) - WF_MAX_NYQUIST * 0.4) < 1e-12);
+    // a depth-limited PRF lowers Nyquist, and the cutoff that filters comes down with it
+    const deep = constrainAcquisition({
+      ...base,
+      settings: { ...DEFAULT_ACQUISITION, depthCm: 24 },
+      color: { ...DEFAULT_COLOR, scaleMps: 1.2, boxRMaxCm: 22, wallFilterMps: 0.3 },
+    });
+    assert.ok(deep.color.scaleMps < 1.2, `Nyquist ${deep.color.scaleMps} should be PRF-limited at 22 cm`);
+    assert.equal(deep.color.wallFilterMps, 0.3);
+    assert.ok(Math.abs(effective(deep) - WF_MAX_NYQUIST * deep.color.scaleMps) < 1e-12);
+    // off stays off
+    const off = constrainAcquisition({ ...base, color: { ...DEFAULT_COLOR, wallFilterMps: 0 } });
+    assert.equal(effective(off), 0);
+  });
+
+  describe('colour M-mode wall filter, on the mitral inflow of an A4C through the crux', () => {
+    // requests at 0.68 m/s (0.676 acquired at this depth): under the packet's lowest cutoff (bounded up to 7.5 cm/s),
+    // inside the range far from both bounds, and the default near its top (21.7 cm/s); at 0.35 m/s, where the inflow
+    // aliases: inside the range, and the default bounded down to 0.32 Nyquist (11.2 cm/s). Checked at the default alone,
+    // a strip that always filtered with the steepest regression passed
+    const CASES: Array<[number, number]> = [
+      [0.68, 0.02],
+      [0.68, 0.12],
+      [0.68, DEFAULT_COLOR.wallFilterMps],
+      [0.35, 0.06],
+      [0.35, DEFAULT_COLOR.wallFilterMps],
+    ];
+    /** A traced line as a colour M-mode column reads it: true axial velocity, dispersion and relative transmission. */
+    type CmmLine = {
+      velocity: Float32Array | null;
+      dispersion?: Float32Array | null;
+      relTrans?: Float32Array | null;
+    };
+    type CmmInternals = {
+      input: SimInput;
+      strips: {
+        stripCmm: Float32Array | null;
+        stripCmmPow: Float32Array | null;
+        stripCols: number;
+        writeMmodeColumn(
+          col: number,
+          src: { lo: CmmLine; hi: CmmLine; t: number },
+          phase: number,
+          pulses: number,
+          spec: { depthCm: number },
+          ctx: unknown,
+        ): void;
+      };
+    };
+    interface CmmRun {
+      request: number;
+      /** The Nyquist acquired and the wall filter the core holds. */
+      scaleMps: number;
+      wallFilterMps: number;
+      /** Each column written, with the line its colour was formed from (its last write). */
+      lines: Map<number, CmmLine>;
+      cmm: Float32Array;
+      pow: Float32Array;
+      cols: number;
+      depthCm: number;
+      acquisition: ColorAcquisition;
+    }
+    const runs: CmmRun[] = [];
+
+    before(() => {
+      const inp = baseInput({ modality: 'cmm', display: { width: 128, height: 256 } });
+      const core = new SimulatorCore(loadCaseById('normal-excellent-window'), inp);
+      try {
+        const probe = controlThroughCrux(getViewTarget('a4c'), core.models.heart, core.models.thorax, null);
+        const { strips } = core as unknown as CmmInternals;
+        let lines = new Map<number, CmmLine>();
+        let depthCm = 0;
+        const write = strips.writeMmodeColumn;
+        strips.writeMmodeColumn = function (col, src, phase, pulses, spec, ctx) {
+          write.call(this, col, src, phase, pulses, spec, ctx);
+          // the strip reads the flow of the nearer of the two traced lines (writeMmodeColumn: t < 0.5 ? lo : hi)
+          lines.set(col, src.t < 0.5 ? src.lo : src.hi);
+          depthCm = spec.depthCm;
+        };
+        // a beat first: its traced lines stay cached (the colour is not in their key), so the lines the cases' columns
+        // are formed from no longer depend on how many a step's time budget traced
+        core.setInput({ ...inp, probe });
+        for (let i = 0; i < 30; i++) core.step(1 / 30);
+        for (const [scaleMps, request] of CASES) {
+          // a new colour acquisition restarts the strip: only the columns written under it are kept
+          lines = new Map();
+          core.setInput({ ...inp, probe, color: { ...DEFAULT_COLOR, scaleMps, wallFilterMps: request } });
+          for (let i = 0; i < 30; i++) core.step(1 / 30);
+          const { input } = core as unknown as CmmInternals;
+          runs.push({
+            request,
+            scaleMps: input.color.scaleMps,
+            wallFilterMps: input.color.wallFilterMps,
+            lines,
+            cmm: strips.stripCmm!.slice(),
+            pow: strips.stripCmmPow!.slice(),
+            cols: strips.stripCols,
+            depthCm,
+            acquisition: {
+              frequencyMHz: input.settings.frequencyMHz,
+              harmonics: input.settings.harmonics,
+            },
+          });
+        }
+      } finally {
+        core.dispose();
+      }
+    });
+
+    it('paints with the 2D colour’s regression wall filter, on the request bounded at the acquired Nyquist', () => {
+      // It was a hard cut at the request on the true velocity with a second-order response above it: with the 20 cm/s
+      // default nothing under 20 cm/s while the 2D colours half the 15–20 cm/s flow on the same line, and a flow
+      // aliasing to near zero was painted. The strip reads the response from a table of 1024 steps of |v|/Nyquist
+      // (WallFilterResponseTable), within 1.24e-5 of the power: the oracle is the response itself, to that error
+      const TABLE_ERROR = 1.3e-5;
+      for (const run of runs) {
+        const { scaleMps, wallFilterMps } = run;
+        const label = `WF ${run.request} m/s at ${scaleMps.toFixed(3)} m/s`;
+        assert.equal(wallFilterMps, run.request, `${label}: the core keeps the request`);
+        const shares = wallFilterShares(wallFilterMps, scaleMps);
+        let painted = 0;
+        for (const [col, line] of run.lines) {
+          const v = line.velocity!;
+          const rel = line.relTrans!;
+          for (let si = 0; si < v.length; si++) {
+            const i = si * run.cols + col;
+            const on = Number.isFinite(run.cmm[i]!);
+            if (!Number.isFinite(v[si]!)) {
+              assert.ok(!on, `${label}: colour without flow at sample ${si}`);
+              continue;
+            }
+            // gain 0 dB: what the filter leaves the sample is its relative transmission times the response at its
+            // sampled phase, even and periodic in the PRF (a flow aliasing to near zero is rejected as a slow one)
+            const kept = rel[si]! * wallFilterPowerResponse(v[si]!, scaleMps, shares);
+            const at = `${label}: ${v[si]!.toFixed(3)} m/s, transmission ${rel[si]!.toFixed(3)}`;
+            if (Math.abs(kept - COLOR_THRESHOLD) > TABLE_ERROR)
+              assert.equal(on, kept >= COLOR_THRESHOLD, `${at}: the filter leaves ${kept.toFixed(4)}`);
+            if (!on) continue;
+            assert.ok(
+              Math.abs(run.pow[i]! - kept) < TABLE_ERROR,
+              `${at}: painted with ${run.pow[i]!.toFixed(4)}, the filter leaves ${kept.toFixed(4)}`,
+            );
+            painted++;
+          }
+        }
+        assert.ok(painted > 500, `${label}: ${painted} samples painted`);
+      }
+    });
+
+    it('colours the same line as the 2D colour: as much of the blood, from about the same speed', () => {
+      // each column's line, replicated over 8 lines, through the 2D colour itself (computeColorField and its Kasai
+      // estimate, a new realization per column; persistence and spatial smoothing off, as the strip has neither), over
+      // the default box's depths. The colour's onset is the speed that best splits the blood into dark below and
+      // coloured above, within 0.8 Nyquist. The 2D's comes a little later: its noise gate rejects the weak incoherent
+      // echo the filter leaves of flow just under the cutoff, which the strip, with no estimate, does not have (without
+      // the gate the jitter's floor puts it 0.03–0.16 × the cutoff before the strip's). Measured, strip against 2D:
+      // 67/62, 58/55, 42/41, 69/67 and 54/51 % of the blood coloured, the strip's onset 0.05–0.22 × the cutoff earlier.
+      // The hard cut at the request began 0.04–0.27 × the cutoff later than the 2D and coloured up to 7.5 points less
+      const NL = 8;
+      for (const run of runs) {
+        const settings: ColorSettings = {
+          ...DEFAULT_COLOR,
+          scaleMps: run.scaleMps,
+          wallFilterMps: run.wallFilterMps,
+          boxThetaMinRad: -0.02,
+          boxThetaMaxRad: 0.02,
+          persistence: 0,
+          smoothing: 0,
+        };
+        const { frequencyMHz, harmonics } = run.acquisition;
+        /** Blood samples in the box: speed, coloured in the strip (0/1), share of the 2D's inner lines coloured. */
+        const blood: Array<[number, number, number]> = [];
+        let realization = 0;
+        for (const [col, line] of run.lines) {
+          const v = line.velocity!;
+          const disp = line.dispersion!;
+          const rel = line.relTrans!;
+          const F = v.length;
+          const frame = allocPolarFrame({
+            lines: NL,
+            samples: F,
+            sectorRad: 0.04,
+            depthCm: run.depthCm,
+            focusCm: 8,
+            elevationSamples: 1,
+          });
+          for (let si = 0; si < F; si++) {
+            if (!Number.isFinite(v[si]!)) continue;
+            const r = ((si + 0.5) / F) * run.depthCm;
+            for (let l = 0; l < NL; l++) {
+              frame.tissue[l * F + si] = Tissue.Blood;
+              frame.transmission[l * F + si] = rel[si]! * softTissueTransmission(r, frequencyMHz, harmonics);
+            }
+          }
+          const field = allocColorField(NL * F);
+          computeColorField(
+            frame,
+            settings,
+            null,
+            (_idx, _li, si, res) => {
+              res.v = v[si]!;
+              res.disp = disp[si]! / 1.6; // the strip keeps 1.6 × the flow's dispersion
+              res.vPerp = 0; // the strip's line keeps no transverse speed
+              res.present = 1;
+            },
+            field,
+            run.acquisition,
+            { realization: ++realization, seed: 4242 },
+          );
+          for (let si = 0; si < F; si++) {
+            const r = ((si + 0.5) / F) * run.depthCm;
+            if (!Number.isFinite(v[si]!) || r < settings.boxRMinCm || r > settings.boxRMaxCm) continue;
+            // the inner lines, away from the edges of the estimator's 3 × 3 cells
+            let coloured2d = 0;
+            for (let l = 2; l < NL - 2; l++) if (Number.isFinite(field.vel[l * F + si]!)) coloured2d++;
+            const strip = Number.isFinite(run.cmm[si * run.cols + col]!) ? 1 : 0;
+            blood.push([Math.abs(v[si]!), strip, coloured2d / (NL - 4)]);
+          }
+        }
+        const cut = colorWallFilterCutoffMps(run.wallFilterMps, run.scaleMps);
+        const label = `WF ${run.request} m/s at ${run.scaleMps.toFixed(3)} m/s (cutoff ${(cut * 100).toFixed(1)} cm/s)`;
+        assert.ok(blood.length > 1000, `${label}: ${blood.length} blood samples`);
+        const share = (k: 1 | 2) => blood.reduce((s, b) => s + b[k], 0) / blood.length;
+        assert.ok(
+          Math.abs(share(1) - share(2)) < 0.06,
+          `${label}: the strip colours ${(100 * share(1)).toFixed(1)} % of the blood, the 2D ${(100 * share(2)).toFixed(1)} %`,
+        );
+        const principal = blood.filter((b) => b[0] < 0.8 * run.scaleMps).sort((a, b) => a[0] - b[0]);
+        const onset = (k: 1 | 2) => {
+          // all called coloured, the dark ones are the errors; each sample moved below the onset swaps its error
+          let errors = principal.reduce((s, b) => s + 1 - b[k], 0);
+          let best = errors;
+          let at = 0;
+          for (let i = 0; i < principal.length; i++) {
+            errors += 2 * principal[i]![k] - 1;
+            if (errors < best) {
+              best = errors;
+              at = principal[i + 1]?.[0] ?? Infinity;
+            }
+          }
+          return at;
+        };
+        // without the gate the strip begins no later than the 2D, and not far before it
+        const early = (onset(2) - onset(1)) / cut;
+        assert.ok(
+          early > -0.05 && early < 0.3,
+          `${label}: the strip's colour begins at ${(onset(1) * 100).toFixed(1)} cm/s, the 2D's at ${(onset(2) * 100).toFixed(1)} (the strip's within 0.3 × the cutoff before it, not after)`,
+        );
+      }
+    });
   });
 
   it('clamps baselineShiftMps under depth-limited PRF and guards renderSpectralStripRgba against B-mode bleed', () => {

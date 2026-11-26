@@ -72,8 +72,8 @@ export const AnatomySchema = z.object({
     /** Leaflet body displacement beyond the annulus into the LA in systole (prolapse), 0 = none. */
     prolapse: unit01.default(0),
   }),
+  // how far the cusps open is not typed here: it follows from hemodynamics.avEffectiveAreaCm2 (aorticOpeningForEoa)
   aorticValve: z.object({
-    maxOpeningFraction: unit01, // 1 = normal full opening
     calcification: unit01,
     cuspThicknessCm: z.number().min(0.05).max(0.5),
     bicuspid: z.boolean().default(false),
@@ -255,17 +255,45 @@ export interface CaseValidationResult {
   errors: string[];
 }
 
+/**
+ * Keys an older schema declared that the model now derives, and where from. The schema drops the keys it does not know,
+ * so a case written for the older one would load without them and draw something else in silence: an aortic valve
+ * declared to open 0.3 of the way, over an effective orifice of 3.0 cm², opened 0.99 of it.
+ */
+const RETIRED_KEYS: readonly { path: readonly string[]; message: string }[] = [
+  {
+    path: ['anatomy', 'aorticValve', 'maxOpeningFraction'],
+    message: 'ya no se usa: la apertura de las cúspides sale de hemodynamics.avEffectiveAreaCm2',
+  },
+];
+
+function retiredKeyErrors(input: unknown): string[] {
+  const errors: string[] = [];
+  for (const { path, message } of RETIRED_KEYS) {
+    let node: unknown = input;
+    for (const key of path.slice(0, -1))
+      node = typeof node === 'object' && node !== null ? (node as Record<string, unknown>)[key] : undefined;
+    if (typeof node === 'object' && node !== null && Object.hasOwn(node, path[path.length - 1]!))
+      errors.push(`${path.join('.')}: ${message}`);
+  }
+  return errors;
+}
+
 /** Validate untrusted JSON (never executes anything). Returns readable errors (spec 43). */
 export function validateCase(input: unknown): CaseValidationResult {
+  const retired = retiredKeyErrors(input);
   const parsed = CaseDefinitionSchema.safeParse(input);
   if (!parsed.success) {
     return {
       ok: false,
-      errors: parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`),
+      errors: [
+        ...retired,
+        ...parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`),
+      ],
     };
   }
   const c = parsed.data;
-  const errors: string[] = [];
+  const errors: string[] = [...retired];
   if (c.physiology.esvMl >= c.physiology.edvMl) errors.push('physiology.esvMl must be < edvMl');
   if (c.hemodynamics.diastolicBpMmHg >= c.hemodynamics.systolicBpMmHg)
     errors.push('diastolic BP must be < systolic BP');

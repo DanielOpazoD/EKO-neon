@@ -1,6 +1,8 @@
 // Pure scalar geometry/acoustic helper functions mirrored from TypeScript for WebGL2 GLSL shaders.
-// Every annotated `// src/...: fnName` entry is audited for existence and parameter arity by
-// `src/simulator/renderer/gpu/cpuGpuParity.test.ts` and verified numerically via `npm run test:gpu`.
+// Despite the file's name nothing generates them: each is written by hand after the TypeScript export its
+// `// src/...: fnName` line names, and must keep that line. `cpuGpuParity.test.ts` translates every annotated
+// function back to JavaScript (shaderMirrors.ts) and evaluates it against its original on sampled inputs, so a
+// coefficient, branch or constant changed on one side only fails `npm test`.
 
 /** Pure scalar functions shared by the CPU tracer and the WebGL2 shaders. */
 export const GLSL_GENERATED = /* glsl */ `
@@ -331,12 +333,15 @@ float laRootHold(float rootT, float rootOuter, float lateralCm) {
   return ((1.0 - q * q * (3.0 - 2.0 * q)) * a * a * (3.0 - 2.0 * a) * b * b * (3.0 - 2.0 * b) * sx * sx * (3.0 - 2.0 * sx));
 }
 // src/simulator/anatomy/classify/pericardium.ts: parietalSdf
-float parietalSdf(float eff, float dHeart, float behind, float footprint, float colDist) {
+float parietalSdf(float eff, float dFull, float dEpi, float behind, float footprint, float colDist) {
   float thin = min(eff, OBLIQUE_SINUS_EFFUSION_CM);
   float tb = min(1.0, max(0.0, behind / OBLIQUE_SINUS_BEHIND));
   float tf = min(1.0, max(0.0, (footprint - OBLIQUE_SINUS_FOOTPRINT_FROM) / (OBLIQUE_SINUS_FOOTPRINT_TO - OBLIQUE_SINUS_FOOTPRINT_FROM)));
   float w = tb * tb * (3.0 - 2.0 * tb) * (1.0 - tf * tf * (3.0 - 2.0 * tf));
-  return smax(dHeart - PERICARDIUM_CM - (eff - (eff - thin) * w), 2.0 * PERICARDIUM_CM - colDist, PARIETAL_COLUMN_BLEND_CM);
+  float col = 2.0 * PERICARDIUM_CM - colDist;
+  float full = smax(dFull, col, PARIETAL_COLUMN_BLEND_CM);
+  float thinned = smax(dFull + (eff - thin) * w, col, PARIETAL_COLUMN_BLEND_CM);
+  return max(full, min(thinned, dEpi - PERICARDIUM_CM - thin));
 }
 // src/simulator/anatomy/classify/pericardium.ts: posteriorColumnDistance
 float posteriorColumnDistance(float x, float y, float z, float ux, float uy, float uz, float ax, float ay, float az, float sx, float sy, float sz) {
@@ -434,6 +439,3 @@ float sliceHalfWidthCm(float rCm) {
   return SLICE_HALF_BASE_CM + SLICE_HALF_SLOPE * abs(rCm - ELEVATION_FOCUS_CM);
 }
 `;
-
-/** Shader constants the generated functions read (must be #defines or constants of the including shader). */
-export const GLSL_GENERATED_FREE_IDENTIFIERS: readonly string[] = ["ATTEN_NP_PER_DB","AV_GROOVE_BLEND_CM","AV_GROOVE_BLEND_FADE_CM","AV_GROOVE_BLEND_MIN_CM","AV_GROOVE_BLEND_TOP_CM","CALCIUM_ATTEN_DB","CALCIUM_ATTEN_THRESHOLD","CORD_CM","DESC_AORTA_MAX_OUTER_R","DESC_AORTA_R","DESC_AORTA_SLEEVE","DESC_AORTA_SLEEVE_REACH","DESC_AORTA_WALL","DESC_AORTA_X","DESC_AORTA_Z","ELEVATION_FOCUS_CM","FOCUS_HALF_APERTURE_MM","FOCUS_HALF_ELEVATION_MM","FOCUS_WAIST_ELEVATION_MM","FOCUS_WAIST_LATERAL_MM","IAS_BOW_CM","IAS_BOW_REACH","IAS_FOSSA_CM","IAS_FOSSA_EDGE_FROM","IAS_FOSSA_EDGE_TO","IAS_MUSCULAR_CM","LA_BASE_FLARE","LA_BASE_FLARE_RELEASE_CM","LA_BASE_SECTION_SLACK_CM","LA_BASE_SHELF_CM","LA_BASE_SHELF_FULL_CM","LA_BASE_SHELF_RISE_CM","LA_LATERAL_WALL_BLEND_CM","LA_LATERAL_WALL_BLEND_MIN_CM","LA_LATERAL_WALL_FRONT_RAMP_CM","LA_LATERAL_WALL_HALF_AP_CM","LA_LATERAL_WALL_ROUND_CM","LA_ROOT_HOLD_FAR_CM","LA_ROOT_HOLD_NEAR_CM","LA_ROOT_HOLD_SEPTAL_CM","LA_ROOT_HOLD_T_FADE_CM","LA_ROOT_HOLD_T_MAX_CM","LA_SEPTAL_TAPER_CM","LA_SHELF_COS_FROM","LA_SHELF_COS_FULL","LV_NECK_ZETA","MEMBRANE_CM","MYO_ANISO_FLOOR","MYO_HELIX_ENDO_DEG","MYO_HELIX_EPI_DEG","OBLIQUE_SINUS_BEHIND","OBLIQUE_SINUS_EFFUSION_CM","OBLIQUE_SINUS_FOOTPRINT_FROM","OBLIQUE_SINUS_FOOTPRINT_TO","PARIETAL_COLUMN_BLEND_CM","PERICARDIUM_CM","POSTERIOR_MEDIASTINUM_Z","RAA_BOOSTER_GAIN","RAA_PASSIVE_SHARE","REVERB_DECAY","REVERB_DIFFUSE","REVERB_DIFFUSE_DECAY_CM","REVERB_GAIN","REVERB_PERIOD_MIN_CM","REVERB_WIDTH_CM","RV_BODY_RADIAL_CONTRACTION","RV_HINGE_CM","RV_HINGE_FADE_RAD","RV_HINGE_PLATEAU_CM","RV_INFLOW_REACH_CM","SEPTAL_CREST_AZ","SEPTAL_CREST_HALF_WIDTH","SEPTAL_CREST_Z_CM","SLICE_HALF_BASE_CM","SLICE_HALF_SLOPE","SOFT_TISSUE_ATTEN_DB","SPINE_R","SUPERIOR_MEDIASTINUM_FADE_CM","SUPERIOR_MEDIASTINUM_FADE_FROM_Y","SUPERIOR_MEDIASTINUM_FROM_Y","SUPERIOR_MEDIASTINUM_RISE_CM","TV_SYSTOLIC_SHORTENING"];

@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { frameBus } from '@/app/frameBus';
 import { STRUCTURE_LABELS } from '@/app/review';
-import { segmentLayerOn, useSegmentHover, useSimStore, useStructureHover } from '@/app/store';
+import {
+  segmentLayerOn,
+  useHudStore,
+  useSegmentHover,
+  useSimStore,
+  useStructureHover,
+} from '@/app/store';
 import type { SimOutput } from '@/simulator/core/protocol';
 import { computeSectorMapping, type SectorMapping } from '@/simulator/renderer/scanConvert';
 import { nearestSampleLut, paintCutMap, placeLabels, withoutOverlaps } from './cutMap';
@@ -57,7 +63,9 @@ export function CutMapView() {
     const back = document.createElement('canvas');
     const backCtx = back.getContext('2d');
     if (!backCtx) return;
-    let latest: SimOutput | null = null;
+    // the frame the HUD holds until the next one comes: frozen, a frame comes only when the image changes, and a map
+    // opened on a frozen image stayed empty
+    let latest: SimOutput | null = useHudStore.getState().hud;
     let lut: Int32Array | null = null;
     let lutKey = '';
     let mapping: SectorMapping | null = null;

@@ -17,6 +17,7 @@ import {
   COLOR_TURBULENT_WIDTH_K,
   colorScratch,
   colorSpectralWidthMps,
+  colorWallFilterCutoffMps,
   KASAI_QUAD_BASIS,
   kasaiEstimate,
   NOISE_COHERENCE,
@@ -52,6 +53,10 @@ export interface ColorSettings {
   boxRMaxCm: number;
   scaleMps: number; // Nyquist
   baselineShiftMps: number;
+  /**
+   * Wall filter −3 dB cutoff as asked (m/s). What filters is this request bounded to what the 8-pulse packet allows at
+   * the acquired scale (`colorWallFilterCutoffMps`), so a scale lowered and raised again gives the asked filter back.
+   */
   wallFilterMps: number;
   gainDb: number;
   persistence: number;
@@ -70,7 +75,9 @@ export const DEFAULT_COLOR: ColorSettings = {
   boxRMaxCm: 13,
   scaleMps: 0.68,
   baselineShiftMps: 0,
-  wallFilterMps: 0.06,
+  // the filter the default always had, now labelled with its real cutoff: the old "6 cm/s" removed mean + trend + 55 % of
+  // the quadratic and cut at 0.205 m/s, which keeps 6–8 cm/s myocardium out of the colour at 0 dB
+  wallFilterMps: 0.2,
   gainDb: 0,
   persistence: 0.35,
   smoothing: DEFAULT_COLOR_SMOOTHING,
@@ -282,6 +289,10 @@ export function computeColorField(
         )
       : null;
 
+  // the expected field (no estimate: tests and debugCompare's deterministic CPU/GPU parity, never a frame shown) keeps
+  // its second-order shape, on the cutoff the estimator filters with, the request bounded at this scale; Pass D2 receives
+  // the same bounded cutoff (deferredDoppler.ts), so its mirror is unchanged
+  const wfCutMps = colorWallFilterCutoffMps(s.wallFilterMps, s.scaleMps);
   const tIn: TemporalStepInput = {
     isBloodValid: false,
     hasCurr: false,
@@ -330,10 +341,10 @@ export function computeColorField(
         }
       } else {
         // the expected field: the wall filter's response on the true velocity, its spectral spread as variance
-        if (Math.abs(vTrue) >= s.wallFilterMps) {
+        if (Math.abs(vTrue) >= wfCutMps) {
           power = Math.min(
             1,
-            gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), s.wallFilterMps),
+            gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), wfCutMps),
           );
           vEstimate = vTrue;
           const effDisp = Math.min(

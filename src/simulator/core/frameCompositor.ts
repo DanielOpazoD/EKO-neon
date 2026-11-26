@@ -2,7 +2,7 @@ import { overlayColorField, type ColorField } from '@/simulator/doppler/color/co
 import { spectralRange } from '@/simulator/doppler/spectral/spectrum';
 import type { BeamFrame } from '@/simulator/probe/pose';
 import type { Webgl2Renderer } from '@/simulator/renderer/gpu/webgl2Renderer';
-import { isStripModality } from '@/simulator/renderer/modality';
+import { isSpectralModality, isStripModality } from '@/simulator/renderer/modality';
 import {
   buildScanLut,
   computeSectorMapping,
@@ -11,21 +11,17 @@ import {
   type ScanLut,
   type SectorMapping,
 } from '@/simulator/renderer/scanConvert';
-import type { PolarFrame, PolarFrameSpec, RendererBackend } from '@/simulator/renderer/types';
+import type { PolarFrame, PolarFrameSpec, TintMapId } from '@/simulator/renderer/types';
 import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
-import type { CineBuffer, CineFrame } from './cineBuffer';
+import type { CineBuffer, CineFrame, FrameFormation } from './cineBuffer';
 import type { EcgRing } from './ecgRing';
-import type { ExperimentalLoaders } from './experimentalLoaders';
-import type { QualityTier, SimInput, SimOutput, StripInfo } from './protocol';
+import type { SimInput, SimOutput, StripInfo } from './protocol';
 import type { StripCtx, StripEngine } from './stripEngine';
 import { resolveFrozenColorSettings } from './acquisitionKeys';
 
+/** What composing and presenting an output cost (ms): the last composite's, and this one's present and colour overlay. */
 export interface CompositeTiming {
-  renderFrameMs: number;
   compositeMs: number;
-  analysisMs: number;
-  consoleMs: number;
-  cineMs: number;
   presentMs: number;
   overlayColorMs?: number;
 }
@@ -41,8 +37,11 @@ export interface CompositeContext {
   displayOnGpu: boolean;
   dopplerOnGpu: boolean;
   gpu: Webgl2Renderer | null;
-  gpuReason: string;
-  onGpuContextLost: (reason: string) => void;
+  onGpuContextLost: () => void;
+  /** How the frame shown was formed: a frozen one's own (`CineFrame.formation`), the pipeline's now when live. */
+  formation: FrameFormation;
+  /** The GPU port's state now, apart from the frame's: 'ok', lost (`GpuRecovery.status`), or why there is none. */
+  gpuLive: string;
   colorCurrent: ColorField | null;
   colorVersion: number;
   colorFps: number;
@@ -56,11 +55,7 @@ export interface CompositeContext {
   acquisitionFps: number;
   ecgRing: EcgRing;
   cine: CineBuffer;
-  backend: RendererBackend;
-  isProceduralBackend: boolean;
-  experimental: ExperimentalLoaders;
-  tier: QualityTier;
-  lastPersistence: number;
+  /** This output's composition and presentation; what forming the frame cost is its `formation`'s. */
   timing: CompositeTiming;
 }
 
@@ -77,21 +72,39 @@ export interface CompositeResult {
  */
 export class FrameCompositor {
   private rgbaPool: ArrayBuffer[] = [];
+  /**
+   * Byte size of the frames formed now: the pool keeps buffers of this size only. Buffers of an earlier display size
+   * were kept as well, and three of them filled the pool for good; from then on every buffer of the current size that
+   * came back was refused and each CPU frame allocated a new one, up to 3.4 MB at 30 Hz (700 MB in 12 s of PW across
+   * six window sizes; 2 buffers per size now).
+   */
+  private rgbaBytes = 0;
   private lut: ScanLut | null = null;
+  /**
+   * The sector above a spectral strip, scan-converted once per 2D frame. The sweep moves at 30 Hz while PW, CW and TDI
+   * keep a quarter of the 2D frame rate (17 Hz), and each tick converted the same frame again: 0.77 of the 1.11 ms of a
+   * PW composite at 1024×820. A new frame, LUT (size, zoom, inversion) or tint map converts it again. M-mode keeps the
+   * full 2D rate, a new frame nearly every tick, and converts directly.
+   */
+  private stripSector: {
+    frameId: number;
+    lut: ScanLut;
+    tintMap: TintMapId | undefined;
+    rgba: Uint8ClampedArray;
+  } | null = null;
 
   recycle(buffer: ArrayBuffer): void {
-    if (buffer.byteLength > 0 && this.rgbaPool.length < 3) this.rgbaPool.push(buffer);
+    if (buffer.byteLength > 0 && buffer.byteLength === this.rgbaBytes && this.rgbaPool.length < 3)
+      this.rgbaPool.push(buffer);
   }
 
   takeBuffer(size: number): ArrayBuffer {
-    for (let i = 0; i < this.rgbaPool.length; i++) {
-      const b = this.rgbaPool[i]!;
-      if (b.byteLength === size) {
-        this.rgbaPool.splice(i, 1);
-        return b;
-      }
+    if (size !== this.rgbaBytes) {
+      // the display was resized: the pooled buffers will never be asked for again
+      this.rgbaPool.length = 0;
+      this.rgbaBytes = size;
     }
-    return new ArrayBuffer(size);
+    return this.rgbaPool.pop() ?? new ArrayBuffer(size);
   }
 
   get poolSize(): number {
@@ -100,7 +113,25 @@ export class FrameCompositor {
 
   clear(): void {
     this.rgbaPool.length = 0;
+    this.rgbaBytes = 0;
     this.lut = null;
+    this.stripSector = null;
+  }
+
+  /** The sector of frame `frameId` above a spectral strip, converted only when the frame, LUT or tint map changed. */
+  private sectorAboveStrip(
+    display: Uint8ClampedArray,
+    frameId: number,
+    lut: ScanLut,
+    tintMap: TintMapId | undefined,
+    bytes: number,
+  ): Uint8ClampedArray {
+    const s = this.stripSector;
+    if (s && s.frameId === frameId && s.lut === lut && s.tintMap === tintMap) return s.rgba;
+    const rgba = s && s.rgba.length === bytes ? s.rgba : new Uint8ClampedArray(bytes);
+    scanConvertLut(display, lut, rgba, tintMap);
+    this.stripSector = { frameId, lut, tintMap, rgba };
+    return rgba;
   }
 
   composite(ctx: CompositeContext): CompositeResult | null {
@@ -116,6 +147,7 @@ export class FrameCompositor {
     const sectorH = isStrip ? Math.round(H * 0.42) : H;
     const display = cf ? cf.display : ctx.display;
     const fspec = cf ? cf.spec : spec;
+    const frameId = cf ? cf.frameId : ctx.frameId;
     if (!display) return null;
 
     const mapping = computeSectorMapping(
@@ -161,7 +193,7 @@ export class FrameCompositor {
               }
             : null;
       bitmap = ctx.gpu.present({ lut: this.lut, width: W, height: sectorH, color, tintMap });
-      if (ctx.gpu.contextLost) ctx.onGpuContextLost('WebGL context lost: CPU tracer');
+      if (ctx.gpu.contextLost) ctx.onGpuContextLost();
     }
     ctx.timing.presentMs = bitmap ? performance.now() - tp : 0;
 
@@ -170,7 +202,9 @@ export class FrameCompositor {
     ctx.timing.overlayColorMs = 0;
     if (!bitmap) {
       const sectorRgba = new Uint8ClampedArray(buffer, 0, W * sectorH * 4);
-      scanConvertLut(display, this.lut, sectorRgba, tintMap);
+      if (isSpectralModality(modality) && !(colorVel && colorVar))
+        sectorRgba.set(this.sectorAboveStrip(display, frameId, this.lut, tintMap, sectorRgba.length));
+      else scanConvertLut(display, this.lut, sectorRgba, tintMap);
       if (colorVel && colorVar) {
         const tOv = performance.now();
         overlayColorField(sectorRgba, this.lut, colorVel, colorVar, colorSettings, colorPower);
@@ -209,10 +243,11 @@ export class FrameCompositor {
     const ecgTail = ctx.ecgRing.extractTail(frozen, ctx.timeS, ctx.cine.oldest?.timeS);
     const sector = { ...mapping, x: 0, y: 0 };
     const displayedFrame = cf ?? ctx.cine.newest;
+    const f = ctx.formation;
 
     const output: SimOutput = {
       acquisition: cf?.acquisition,
-      frameId: cf ? cf.frameId : ctx.frameId,
+      frameId,
       width: W,
       height: H,
       rgba: buffer,
@@ -253,23 +288,26 @@ export class FrameCompositor {
         endS: ctx.cine.newest?.timeS ?? ctx.timeS,
         frameS: cf ? cf.timeS : ctx.timeS,
       },
+      // the stats speak of the frame shown, frozen as it was formed (`FrameFormation`); only the port's state now and
+      // what composes and presents this output are live
       stats: {
-        ...ctx.backend.stats(),
-        backend: ctx.backend.id,
-        anatomy: ctx.experimental.anatomyStatus(inp.anatomy, ctx.isProceduralBackend),
-        imagen: ctx.experimental.imageFormationStatus(inp.imageFormation),
-        gpu: ctx.gpuReason,
-        tier: ctx.tier,
+        ...f.backendStats,
+        backend: f.backend,
+        anatomy: f.anatomy,
+        imagen: f.imagen,
+        gpu: f.gpu,
+        gpuLive: ctx.gpuLive,
+        tier: f.tier,
         lines: spec.lines,
         samples: spec.samples,
-        renderFrameMs: Number(ctx.timing.renderFrameMs.toFixed(1)),
-        consoleMs: Number(ctx.timing.consoleMs.toFixed(1)),
-        persistence: Number(ctx.lastPersistence.toFixed(3)),
-        analysisMs: Number(ctx.timing.analysisMs.toFixed(1)),
+        renderFrameMs: Number(f.renderFrameMs.toFixed(1)),
+        consoleMs: Number(f.consoleMs.toFixed(1)),
+        persistence: Number(f.persistence.toFixed(3)),
+        analysisMs: Number(f.analysisMs.toFixed(1)),
         compositeMs: Number(ctx.timing.compositeMs.toFixed(1)),
-        cineMs: Number(ctx.timing.cineMs.toFixed(2)),
-        console: ctx.displayOnGpu ? 'gpu' : 'cpu',
-        dopplerPipe: modality === 'color' ? (ctx.dopplerOnGpu ? 'gpu-deferred' : 'cpu') : 'off',
+        cineMs: Number(f.cineMs.toFixed(2)),
+        console: f.console,
+        dopplerPipe: f.dopplerPipe,
         present: bitmap ? 'gpu' : 'cpu',
         presentMs: Number(ctx.timing.presentMs.toFixed(2)),
       },

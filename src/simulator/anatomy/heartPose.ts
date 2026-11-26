@@ -49,7 +49,7 @@ import {
   tvShortening,
 } from './valveSkirt';
 import { meanWallThicknessCm, septalCrestFactor, septalShiftAt, wallThicknessAt } from './lvWall';
-import { ahaSegment } from './lvGeometry';
+import { lvRegionalMotion, regionalCavityOffset } from './lvGeometry';
 import { rvFloorZ, rvInflowSdf, rvRadii } from './rv';
 import { anchorsCached } from './anchors';
 import type { HeartModel } from './heartModel';
@@ -123,7 +123,6 @@ export interface ChamberPose {
   rvPap: Float64Array;
   mvAngleAnt: number; // anterior leaflet angle (rad) in y–z plane from +z toward −y
   mvAnglePost: number;
-  avOpenAngle: number; // rad from perpendicular (closed) toward axis (open)
   tvAngleAnt: number;
   tvAnglePost: number;
   rvScale: number;
@@ -218,6 +217,39 @@ export function computeHeartPose(m: HeartModel, state: CycleState): HeartPose {
   return { ...pose, aorta: buildAorticExtension(m, pose) };
 }
 
+/** Cavity radius (cm) of the volume over the length, every wall normal: V = π·ratio·R0²·L·∫g² over the bullet profile. */
+function lvVolumeRadius(m: HeartModel, volumeMl: number, lengthNow: number): number {
+  const sh = m.lv.shape;
+  return Math.sqrt(Math.max(volumeMl, 5) / (Math.PI * sh.ratio * Math.max(lengthNow, 1) * sh.I));
+}
+
+/**
+ * Radius (cm) of the walls that move normally when the cavity of every wall normal would have radius `r0`: regional
+ * wall-motion abnormalities hold their walls toward the end-diastolic radius, and the remaining segments contract more
+ * (compensatory hyperkinesia) so that the cavity volume still follows the tables, R²·(1 − F) + F·R_ED² = R0², F the
+ * area-weighted share of the excursion withheld (regionalMeanFraction). `r0` itself when there is none.
+ */
+function compensatedLvRadius(m: HeartModel, r0: number): number {
+  const F = Math.min(0.6, m.regionalMeanFrac);
+  const rEd = m.lv.rMax;
+  return r0 < rEd && F > 0
+    ? Math.max(0.5, Math.sqrt(Math.max(0.25, (r0 * r0 - F * rEd * rEd) / (1 - F))))
+    : r0;
+}
+
+/**
+ * How much faster the walls that move normally go than they would with every wall normal, at the volume and length of
+ * the moment: dR/dR0 of the compensation above (R0 / ((1 − F)·R) between its bounds), 1 without regional abnormalities.
+ * The tissue velocity of TDI and Color clutter scales its radial rate by it (regurgitantJets.ts), so the remote walls
+ * move as fast as the classifier draws them. Without it, in the inferior infarction the drawn mid-wall of the remote
+ * walls went 1.16-1.44 times faster than the TDI at mid-ejection (0.80-1.02 in the normal heart).
+ */
+export function lvCompensationGain(m: HeartModel, volumeMl: number, lengthNow: number): number {
+  const r0 = lvVolumeRadius(m, volumeMl, lengthNow);
+  const h = 1e-3;
+  return (compensatedLvRadius(m, r0 + h) - compensatedLvRadius(m, r0 - h)) / (2 * h);
+}
+
 export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPose {
   const { lv } = m;
   const sh = lv.shape;
@@ -225,19 +257,8 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
   const long = state.longitudinal;
   const zAnn = m.physiology.mapseCm * long;
   const lengthNow = lv.lengthCm - zAnn; // apex fixed at z = L
-  const volNow = state.lvVolumeMl;
-  // cavity radius from the volume tables: V = π·ratio·R²·L·∫g² over the bullet profile
-  const rMax0 = Math.sqrt(
-    Math.max(volNow, 5) / (Math.PI * sh.ratio * Math.max(lengthNow, 1) * sh.I),
-  );
-  // regional wall-motion abnormalities keep their segments at the end-diastolic radius; the remaining
-  // segments contract more (compensatory hyperkinesia) so that the surface-averaged radius — and the
-  // cavity volume — still follow the tables: R²·(1 − F) + F·R_ED² = R0²
-  const F = Math.min(0.6, m.regionalMeanFrac);
-  const unflattenedRadius =
-    rMax0 < lv.rMax && F > 0
-      ? Math.max(0.5, Math.sqrt(Math.max(0.25, (rMax0 * rMax0 - F * lv.rMax * lv.rMax) / (1 - F))))
-      : rMax0;
+  // the normal walls' radius from the volume tables, compensating for the excursion regional abnormalities withhold
+  const unflattenedRadius = compensatedLvRadius(m, lvVolumeRadius(m, state.lvVolumeMl, lengthNow));
   const septalShiftCm = m.anatomy.rv.septalFlattening * 0.9;
   const annulusRadius =
     (m.anatomy.mitral.annulusDiameterCm / 2) * (1 - MV_SYSTOLIC_SHORTENING * state.contraction);
@@ -294,8 +315,6 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
   const postOpen = [-0.61 * openScale, -0.79 * openScale, -0.96 * openScale];
   const mvAngleAnt = antClosed[1]! + (antOpen[1]! - antClosed[1]!) * open;
   const mvAnglePost = postClosed[1]! + (postOpen[1]! - postClosed[1]!) * open;
-  const avOpenAngle =
-    0.15 + (1.35 * m.anatomy.aorticValve.maxOpeningFraction - 0.15) * state.avOpen;
   const tvAngleAnt = -1.0 + (0.6 + 1.0) * state.tvOpen;
   const tvAnglePost = 0.8 + (-0.7 - 0.8) * state.tvOpen;
   const A = anchorsCached(m);
@@ -447,11 +466,11 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
       const px = tv.cx + (tv.R + t) * ca,
         py = tv.cy + (tv.R + t) * sa;
       const az = Math.atan2(py, px);
-      const amp = m.segAmp[ahaSegment(az, levelFrac)] ?? 1;
+      const motion = m.regionalMeanFrac > 0 ? lvRegionalMotion(m.segAmp, az, levelFrac) : 1;
       const rIn =
         lvCavityRadius(sh, prof, az, zb) +
-        wallThicknessAt(m, thickK, az, levelFrac, amp) *
-          septalCrestFactor(az, zb - zAnn) *
+        (regionalCavityOffset(lv, rMax, az, levelFrac, motion) +
+          wallThicknessAt(m, thickK, az, levelFrac, motion) * septalCrestFactor(az, zb - zAnn)) *
           lvRadialOffsetFactor(sh, prof, az, zb) -
         septalShiftAt(septalShiftCm, az, levelFrac) +
         0.05;
@@ -588,10 +607,11 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
       );
     }
   }
-  // aortic cusps: pockets on the sinus wall opening by the cycle's opening times the case's maximum (decision 79)
+  // aortic cusps: pockets on the sinus wall (decision 79) opening by the cycle's opening times the case's peak, the one
+  // whose orifice gives the Doppler's effective area
   const aortic = buildAorticValve(
     cusps,
-    Math.max(0, Math.min(1, state.avOpen)) * m.anatomy.aorticValve.maxOpeningFraction,
+    Math.max(0, Math.min(1, state.avOpen)) * m.aorticOpening,
     m.anatomy.aorticValve.cuspThicknessCm,
   );
   // pulmonary valve: three cusps hinged at the outflow–trunk junction on the trunk axis, opening with RV ejection
@@ -715,7 +735,6 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
     rvPap,
     mvAngleAnt,
     mvAnglePost,
-    avOpenAngle,
     tvAngleAnt,
     tvAnglePost,
     rvScale: 1 - 0.3 * state.contraction,

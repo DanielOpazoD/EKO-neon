@@ -31,6 +31,12 @@ function clampBaselineShift(baselineShiftMps: number, scaleMps: number): number 
   return Math.max(-maxShift, Math.min(maxShift, baselineShiftMps));
 }
 
+/**
+ * The input as it can be acquired: Nyquist scales and baselines within what the PRF allows, the gate within the depth.
+ * The colour wall filter is kept as asked: what filters is that request bounded to what the packet allows at the
+ * acquired Nyquist, by each consumer (`colorWallFilterCutoffMps`). Bounded here, it went back to the store and stayed
+ * lowered after any drop of Nyquist (a lower scale, a deeper box, CMM at depth).
+ */
 export function constrainAcquisition<T extends AcquisitionInput>(input: T): T {
   const limits = acquisitionLimits(input);
   const pulsed = input.modality === 'pw' || input.modality === 'tdi';

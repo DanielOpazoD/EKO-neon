@@ -10,6 +10,12 @@ import type { LassoPoint, RegionSummary } from './reviewRegion';
 import type { ImagingModality } from '@/simulator/renderer/types';
 import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import { Structure, Tissue } from '@/simulator/anatomy/tissue';
+import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
+import {
+  colorWallFilterCutoffMps,
+  colorWallFilterRangeMps,
+  wallFilterCutoffNyquist,
+} from '@/simulator/doppler/color/kasaiEstimator';
 
 /**
  * Review mode (decision 134): the exchange format between whoever looks at the image and whoever changes
@@ -69,7 +75,11 @@ export interface ReviewMarker {
 
 export interface ReviewReport {
   format: 'echotwin-review';
-  version: 1;
+  /**
+   * 2 since `input.color.wallFilterMps` is the −3 dB cutoff asked for (bounded where it filters); a version 1 report is
+   * read with the request that replays the filter main's 2D colour gave its label (`legacyColorWallFilterMps`).
+   */
+  version: 2;
   createdAt: string;
   author: 'usuario' | 'claude';
   app: { url: string };
@@ -349,7 +359,7 @@ export function buildReviewReport(s: ReviewSnapshot): ReviewReport {
   const hud = s.hud;
   return {
     format: 'echotwin-review',
-    version: 1,
+    version: 2,
     createdAt: new Date().toISOString(),
     author: s.author ?? 'usuario',
     app: { url: s.url ?? '' },
@@ -417,11 +427,20 @@ export function reportToMarkdown(r: ReviewReport): string {
   lines.push(
     `Modalidad ${i.modality.toUpperCase()} · profundidad ${s.depthCm} cm · sector ${s.sectorDeg}° · ganancia ${s.gainDb} dB · ${s.frequencyMHz} MHz${s.harmonics ? ' THI' : ''} · foco ${s.focusCm} cm · zoom ${s.zoom} · rango ${s.dynamicRangeDb} dB · mapa ${s.grayMap} · persistencia ${s.persistence} · calidad ${i.quality}${r.frame?.tier && r.frame.tier !== i.quality ? ` (${r.frame.tier})` : ''} · backend ${i.rendererBackend}${r.frame?.backend ? ` (${r.frame.backend})` : ''}${s.invertLR ? ' · izq/der invertido' : ''}`,
   );
+  // the colour's Nyquist as acquired (the strip's is set by the depth) and the wall filter's cutoff there: the request
+  // the report keeps, bounded as the simulator bounds it
+  const colorScale = acquisitionLimits(i).color.scaleMps;
+  const wallFilter = `filtro de pared ${f1(100 * colorWallFilterCutoffMps(i.color.wallFilterMps, colorScale))} cm/s`;
   if (i.modality === 'color')
     lines.push(
-      `Color: escala ${f2(i.color.scaleMps)} m/s · caja r ${f1(i.color.boxRMinCm)}–${f1(i.color.boxRMaxCm)} cm, θ ${deg(i.color.boxThetaMinRad)}…${deg(i.color.boxThetaMaxRad)}`,
+      `Color: escala ${f2(i.color.scaleMps)} m/s · caja r ${f1(i.color.boxRMinCm)}–${f1(i.color.boxRMaxCm)} cm, θ ${deg(i.color.boxThetaMinRad)}…${deg(i.color.boxThetaMaxRad)} · ${wallFilter}`,
     );
-  if (i.modality !== '2d' && i.modality !== 'color')
+  // the colour M-mode has no gate and no spectral scale: its line used to give PW's
+  if (i.modality === 'cmm')
+    lines.push(
+      `Cursor ${deg(i.cursorThetaRad)} · escala color ${f2(colorScale)} m/s · ${wallFilter} · barrido ${i.spectral.sweepSpeedMmPerS} mm/s`,
+    );
+  else if (i.modality !== '2d' && i.modality !== 'color')
     lines.push(
       `Cursor ${deg(i.cursorThetaRad)} · compuerta ${f1(i.gateDepthCm)} cm (${f1(i.spectral.gateLengthCm)} cm) · escala ${f2(i.spectral.scaleMps)} m/s · barrido ${i.spectral.sweepSpeedMmPerS} mm/s`,
     );
@@ -463,7 +482,77 @@ export function reportToMarkdown(r: ReviewReport): string {
   return lines.join('\n');
 }
 
-/** Reads a report back from raw JSON or from a pasted markdown that carries it in a ```json block. */
+/** Main's default colour scale (m/s), the Nyquist a learner comes back to after any other. */
+const MAIN_DEFAULT_COLOR_SCALE_MPS = 0.68;
+
+/**
+ * The −3 dB cutoff (m/s) main's 2D colour had for a wall filter label at a Nyquist scale. Until version 2
+ * `wallFilterMps` was a label that set the shares of the packet regression by ramps in WF/Nyquist (the mean over
+ * 0–0.03 Nyquist, the trend over 0.02–0.06, the quadratic over 0.055–0.115; kasaiEstimator.ts before c6a213d), whose
+ * −3 dB point lay well above it: the default 0.06 at 0.68 m/s cut at 0.205 m/s.
+ */
+function mainColorWallFilterCutoffMps(labelMps: number, scaleMps: number): number {
+  const cut = labelMps / scaleMps;
+  const ramp = (start: number, span: number) => Math.min(1, Math.max(0, (cut - start) / span));
+  return (
+    wallFilterCutoffNyquist({ mean: ramp(0, 0.03), trend: ramp(0.02, 0.04), quad: ramp(0.055, 0.06) }) *
+    scaleMps
+  );
+}
+
+/**
+ * The colour wall filter a version 1 report asks for in version 2. Replayed as a request, main's default label 0.06
+ * gave the 7.6 cm/s mean removal, under which the moving myocardium flashed (A4C, CPU, 44 frames: 9317 coloured
+ * myocardial samples, 70 in main and in this migration). But the label was relative to the scale and the request is
+ * absolute: no one request filters as main did at every scale. Of the requests that replay the report's image at the
+ * scale its replay acquires with (`acquisitionLimits`), it is the nearest to main's cutoff for the label at main's
+ * default 0.68 m/s, the scale the learner comes back to:
+ * - main's cutoff at the report's scale (`mainColorWallFilterCutoffMps`) inside the range the packet allows there: that
+ *   cutoff, the only request that replays it. From 0.06 Nyquist up (mean and trend whole, the default among them) it
+ *   gives back main's very shares.
+ * - at the steepest filter, where the ramps saturate (from 0.115 Nyquist): every request from it up replays the image,
+ *   and the request is the larger of the two cutoffs. A 2D colour at 0.35 m/s with 0.06 (the task colour-low-scale) cut
+ *   at 11.2 cm/s; asked as 11.2, it went on filtering at 11.2 once the scale was back at 0.68 (A4C, CPU, 44 frames:
+ *   7073 coloured myocardial samples, 70 in main). It now asks for 20.5: 11.2 at 0.35, 20.5 at 0.68 (70 samples).
+ * - under the mean removal, the lowest filter (main's partial mean removal is bounded to it): every request up to it
+ *   but off replays the image, and the request is the smaller of that bound and the cutoff at 0.68 (or the cutoff at
+ *   the report's scale, if main's filter cut nothing at 0.68). A filter that cut nothing at the report's scale (a mean
+ *   removal under 29 %) stays off.
+ * Over main's controls (labels 0.01–0.30 m/s, scales 0.15–1.2 m/s), against the cutoff at the report's scale alone, no
+ * image at that scale changes and none at 0.68 filters farther from main's; that cutoff missed it by up to 14.2 cm/s
+ * (0.08 at 0.15 m/s asked for 4.8, where main cut at 21.8 at 0.68). What remains is what one absolute request cannot
+ * do: up to 5.0 cm/s at 0.68 inside the range (0.03 at 0.27 m/s asks for 8.7, main cut at 13.7), and 7.6 where the
+ * replay stays off (0.01 from 1.14 m/s). A colour M-mode at 20 cm acquires at 0.551 m/s, where 0.06 cuts at 17.6
+ * cm/s, just inside the 17.7 the packet allows: the 2D colour at 0.68 after it filters at 17.6 where main's cut at
+ * 20.5 (445 coloured myocardial samples, 70 in main).
+ * One rule for every version 1, colour M-mode included. Main's strip cut at the label itself, a hard cut on the true
+ * velocity, but the request is one for the strip and for the 2D colour of the rest of the session: a colour M-mode
+ * report that kept its label left the 2D colour after it on the mean removal (7.5 cm/s at 0.676 m/s: 9339 coloured
+ * myocardial samples). Migrated at 16 cm, the 2D colour filters where main's did, at 20.4 cm/s (74 samples, as in
+ * main), and the strip paints with that filter's response (A4C through the crux: 11.0 % of the strip coloured, 17.7 %
+ * in main). That difference is the strip's physics, not the migration: main's strip cut at 6 cm/s where its 2D colour,
+ * on the same line and with the same label, cut at 20.4.
+ */
+export function legacyColorWallFilterMps(input: SimInput): number {
+  const label = input.color.wallFilterMps;
+  if (!(label > 0)) return 0;
+  const scale = Math.max(1e-3, acquisitionLimits(input).color.scaleMps);
+  const cut = mainColorWallFilterCutoffMps(label, scale);
+  const { min, max } = colorWallFilterRangeMps(scale);
+  const atDefault = mainColorWallFilterCutoffMps(label, MAIN_DEFAULT_COLOR_SCALE_MPS);
+  // the steepest filter: every request from it up replays the image
+  if (cut >= max) return Math.max(cut, atDefault);
+  // the mean removal: every request up to it but off replays the image
+  if (cut > 0 && cut <= min && atDefault > 0) return Math.min(min, atDefault);
+  // inside the range the only request that replays it, and off what cut nothing
+  return cut;
+}
+
+/**
+ * Reads a report back from raw JSON or from a pasted markdown that carries it in a ```json block. A version 1 report is
+ * migrated to version 2: its colour wall filter becomes the request that replays the filter main's 2D colour gave its
+ * label (`legacyColorWallFilterMps`).
+ */
 export function parseReviewReport(text: string): ReviewReport | null {
   const candidates: string[] = [text.trim()];
   const fenced = /```json\s*([\s\S]*?)```/g;
@@ -490,7 +579,15 @@ export function parseReviewReport(text: string): ReviewReport | null {
           region: mk.region ?? null,
           explain: mk.explain ?? null,
         }));
-        return { ...obj, markers, note: obj.note ?? '', version: 1 } as ReviewReport;
+        // version 1, or no version at all: the wall filter was a label
+        const legacy = ((obj.version as number | undefined) ?? 1) < 2;
+        const input = legacy
+          ? {
+              ...obj.input,
+              color: { ...obj.input.color, wallFilterMps: legacyColorWallFilterMps(obj.input) },
+            }
+          : obj.input;
+        return { ...obj, input, markers, note: obj.note ?? '', version: 2 } as ReviewReport;
       }
     } catch {
       /* not this candidate */

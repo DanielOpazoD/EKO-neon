@@ -34,8 +34,8 @@ export function rvOutflowScale(contraction: number): number {
 
 /**
  * RV: crescent around the septum, infundibulum, outflow, pulmonary trunk and branches. Leaves c.rvSdf[0] as the
- * distance to the RV cavity united with the tricuspid inflow, which the pericardium reads. True when the point is
- * one of these.
+ * distance to the RV cavity united with the tricuspid inflow and the outflow tract, the cavity its wall is drawn around,
+ * which the pericardium reads. True when the point is one of these.
  */
 export function classifyRightVentricle(c: ClassifyCtx): boolean {
   const { m, hp, A, x, y, z, out, az } = c;
@@ -107,8 +107,10 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
   // tricuspid inflow: the RV cavity and its wall reach the whole annulus. The crescent is closed at the tricuspid
   // plane, so its wall ran as a floor 0.5-1.5 cm thick across the orifice, and in systole its free wall pulled in
   // while the annulus stayed put: the lateral hinge sat outside the heart in 6-10 of 10 frames of eleven cases.
-  rvTmp[0] = dRvU;
   const dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
+  // the pericardium wraps the wall drawn around this cavity: with the crescent and the inflow alone, the wall of the
+  // outflow tract, which descends with the base, stood out of the sac in end-systole
+  rvTmp[0] = dCavRv;
   if (dCavRv < 0) {
     if (dRv < 0) {
       // moderator band: from the lower septum to the anterior free wall at the base of the anterior papillary muscle

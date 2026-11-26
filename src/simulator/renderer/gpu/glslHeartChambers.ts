@@ -7,6 +7,7 @@ import { VASCULAR_JOIN_EPS_CM } from '@/simulator/anatomy/vascularTube';
 import { ROOT_TUBE_END_T } from '@/simulator/anatomy/classify/root';
 import { PA_WALL_CM } from '@/simulator/anatomy/greatVessels';
 import { WALL_MODULATION_GAIN } from '@/simulator/anatomy/lvWall';
+import { WALL_MOTION_BORDER_DEG, WALL_MOTION_BORDER_LEVEL } from '@/simulator/anatomy/lvGeometry';
 
 /**
  * GLSL chamber & great-vessel geometry helpers (LV bullet profile, wall thickness, RV crescent
@@ -15,6 +16,7 @@ import { WALL_MODULATION_GAIN } from '@/simulator/anatomy/lvWall';
  */
 export const GLSL_HEART_CHAMBERS = /* glsl */ `
 // ---- LV bullet profile (lvShape.ts) ----
+// src/simulator/anatomy/lvShape.ts: lvProfileGExact
 float lvProfileG(float zeta) {
   if (zeta < 0.0) {
     float v = zeta / LV_ZETATOP;
@@ -28,6 +30,7 @@ float lvProfileG(float zeta) {
   float s = (zeta - LV_ZETAMAX) / (1.0 - LV_ZETAMAX);
   return sqrt(max(0.0, 1.0 - pow(s, LV_N)));
 }
+// src/simulator/anatomy/lvShape.ts: lvProfileDGExact
 float lvProfileDG(float zeta) {
   if (zeta < 0.0) {
     float v = zeta / LV_ZETATOP;
@@ -44,6 +47,7 @@ float lvProfileDG(float zeta) {
   float d = -((LV_N / 2.0) * pow(s, LV_N - 1.0)) / sqrt(max(1e-9, 1.0 - sn)) / (1.0 - LV_ZETAMAX);
   return max(-6.0, d);
 }
+// src/simulator/anatomy/lvShape.ts: lvCavityRadius
 float lvCavityRadius(float az, float z) {
   float zeta = (z - ZANN) / max(LENGTH_NOW, 1e-3);
   // decision 226
@@ -54,12 +58,14 @@ float lvCavityRadius(float az, float z) {
   float a = c * c * S * S + sn * sn, b = c * ox * S * S;
   return (b + sqrt(max(0.0, b * b - a * (ox * ox * S * S - rho * rho)))) / a;
 }
+// src/simulator/anatomy/lvShape.ts: lvRadialOffsetFactor
 float lvRadialOffsetFactor(float az, float z) {
   float zeta = (z - ZANN) / max(LENGTH_NOW, 1e-3);
   float drdz = LV_RMAX * lvProfileDG(zeta) * ellipseFactor(LV_RATIO, az) / max(LENGTH_NOW, 1e-3);
   return sqrt(1.0 + min(9.0, drdz * drdz));
 }
 // signed distance to the tabulated cavity surface (polar table from the centre LV_PZC); writes the normal
+// src/simulator/anatomy/lvShape.ts: lvCavitySdf
 float lvCavitySdf(float xs, float y, float z, out vec3 n) {
   // decision 226
   float w = lvNeckWeight((z - ZANN) / max(LENGTH_NOW, 1e-3));
@@ -73,7 +79,9 @@ float lvCavitySdf(float xs, float y, float z, out vec3 n) {
   float phi = rho > 1e-9 ? atan(rho, dz) : (dz >= 0.0 ? 0.0 : PI);
   float rad = sqrt(rho2 + dz * dz);
   float nb = float(LV_PROF_BINS - 1);
-  float fk = clamp(phi / PI * nb, 0.0, nb - 1.0001);
+  // up to the table's last interval, as lvShape.ts (N − 1.0001 for N bins): nb − 1.0001 stopped one bin short and held
+  // the last 1.9° about the basal pole (the axis through the mitral orifice) at the second-to-last bin, 0.09-0.16 mm off
+  float fk = clamp(phi / PI * nb, 0.0, nb - 0.0001);
   int k = int(floor(fk));
   float t = fk - float(k);
   float R = P(LV_PROF_R_BASE + k) + (P(LV_PROF_R_BASE + k + 1) - P(LV_PROF_R_BASE + k)) * t;
@@ -89,25 +97,87 @@ float lvCavitySdf(float xs, float y, float z, out vec3 n) {
   return (rad - R) * f * corr;
 }
 
-// lvWall.ts wallThicknessAt: ivsd between the RV insertions, lvpwd on the free wall (septalShare)
-float wallThicknessAt(float az, float levelFrac, float amp) {
+// ---- regional wall motion (lvGeometry.ts), continuous across the AHA segment borders ----
+// a segment's share of the normal motion: its amplitude, no more than normal
+float wallMotionSegment(float id) {
+  return min(1.0, P(SEG_AMP_BASE + int(id + 0.5)));
+}
+// lvGeometry.ts ringMotion: n segments from id first, blended by a smoothstep over the borders
+float wallMotionRing(float deg, float n, float offsetDeg, float first) {
+  float span = 360.0 / n;
+  float u = (deg + offsetDeg) / span;
+  float k = floor(u);
+  float f = u - k;
+  float hw = ${WALL_MOTION_BORDER_DEG.toFixed(8)} / span;
+  float here = wallMotionSegment(first + (k - 1.0 - n * floor((k - 1.0) / n)));
+  if (f < hw) {
+    float prev = wallMotionSegment(first + (k - 2.0 - n * floor((k - 2.0) / n)));
+    return prev + (here - prev) * smoothstep(-hw, hw, f);
+  }
+  if (f > 1.0 - hw) {
+    float next = wallMotionSegment(first + (k - n * floor(k / n)));
+    return here + (next - here) * smoothstep(1.0 - hw, 1.0 + hw, f);
+  }
+  return here;
+}
+// lvGeometry.ts lvRegionalMotion: basal, mid and apical rings blended across the level borders, the cap (17) at the end
+// src/simulator/anatomy/lvGeometry.ts: lvRegionalMotion
+float lvRegionalMotion(float az, float levelFrac) {
+  float raw = (az - (RV_AZA + RV_AZP) * 0.5) * 180.0 / PI + 180.0;
+  float deg = raw - 360.0 * floor(raw / 360.0);
+  float h = ${WALL_MOTION_BORDER_LEVEL.toFixed(8)};
+  if (levelFrac < 1.0 / 3.0 + h) {
+    float basal = wallMotionRing(deg, 6.0, 0.0, 1.0);
+    if (levelFrac <= 1.0 / 3.0 - h) return basal;
+    float mid = wallMotionRing(deg, 6.0, 0.0, 7.0);
+    return basal + (mid - basal) * smoothstep(1.0 / 3.0 - h, 1.0 / 3.0 + h, levelFrac);
+  }
+  if (levelFrac < 2.0 / 3.0 + h) {
+    float mid = wallMotionRing(deg, 6.0, 0.0, 7.0);
+    if (levelFrac <= 2.0 / 3.0 - h) return mid;
+    float apical = wallMotionRing(deg, 4.0, 45.0, 13.0);
+    return mid + (apical - mid) * smoothstep(2.0 / 3.0 - h, 2.0 / 3.0 + h, levelFrac);
+  }
+  float apical = wallMotionRing(deg, 4.0, 45.0, 13.0);
+  if (levelFrac <= 1.0 - h) return apical;
+  float t = smoothstep(1.0 - h, 1.0, levelFrac);
+  return apical * (1.0 - t) + wallMotionSegment(17.0) * t;
+}
+// the field, or 1 without reading it when the case has no regional abnormality: SEG_AMP[0], which no AHA id uses, holds
+// the heart's regionalMeanFrac (paramLayout.ts), 0 exactly when the field is 1 everywhere
+float lvMotionAt(float az, float levelFrac) {
+  return P(SEG_AMP_BASE) > 0.0 ? lvRegionalMotion(az, levelFrac) : 1.0;
+}
+// lvGeometry.ts regionalCavityOffset: an akinetic wall keeps its end-diastolic radius, a dyskinetic one bulges past it
+// src/simulator/anatomy/lvGeometry.ts: regionalCavityOffset
+float regionalCavityOffset(float az, float levelFrac, float motion) {
+  return motion < 1.0 ? (1.0 - motion) * (LV_RMAX_ED - LV_RMAX) * lvProfileG(levelFrac) * ellipseFactor(LV_RATIO, az) : 0.0;
+}
+
+// lvWall.ts wallThicknessAt: ivsd between the RV insertions, lvpwd on the free wall (septalShare); the wall gains the share
+// of the normal thickening that it makes of the normal excursion (motion)
+// src/simulator/anatomy/lvWall.ts: wallThicknessAt
+float wallThicknessAt(float az, float levelFrac, float motion) {
   float tBase = LV_LVPWD + (LV_IVSD - LV_LVPWD) * septalShare(az, RV_AZA, RV_AZP);
   float tED = tBase * axialWallFactor(levelFrac, APEX_T / tBase);
   float wallMod = 1.0 + ${WALL_MODULATION_GAIN.toFixed(8)} * (lat(vec3(cos(az) * 1.6 + 7.3, sin(az) * 1.6 + 2.1, levelFrac * 2.4), 3) - 0.5) * (1.0 - levelFrac * levelFrac);
-  return tED * max(0.6, 1.0 + (LV_THICK_K - 1.0) * (0.35 + 0.65 * amp)) * wallMod;
+  return tED * max(0.6, 1.0 + (LV_THICK_K - 1.0) * motion) * wallMod;
 }
 
 
 // [rIn, u, rOut, t] without trabecular noise
+// src/simulator/anatomy/rv.ts: rvRadii
 vec4 rvRadii(float az, float z, float contraction, float tvZ, float rvCollapse) {
   float L = LV_LEN;
   float azN = az < 0.0 ? az + TWO_PI : az;
   float u = (azN - RV_AZA) / (RV_AZP - RV_AZA);
-  float rCav = lvCavityRadius(az, z);
   float levelFrac = clamp((z - ZANN) / max(LENGTH_NOW, 1.0), 0.0, 1.0);
-  float amp = P(SEG_AMP_BASE + ahaSegment(az, levelFrac));
+  // the LV epicardium as the classifier draws it, regional offset of the endocardium included (rv.ts)
+  float motion = lvMotionAt(az, levelFrac);
+  float radialFactor = lvRadialOffsetFactor(az, z);
+  float rCav = lvCavityRadius(az, z) + regionalCavityOffset(az, levelFrac, motion) * radialFactor;
   // decision 223: the crest's lost thickness goes to the cavity below the tricuspid plane, the free wall stays
-  float wFull = wallThicknessAt(az, levelFrac, amp) * lvRadialOffsetFactor(az, z);
+  float wFull = wallThicknessAt(az, levelFrac, motion) * radialFactor;
   float below = clamp((z - (TV_CZ + tvZ - 0.6)) / 0.3, 0.0, 1.0);
   float crestLossR = wFull * (1.0 - septalCrestFactor(az, z - ZANN)) * below * below * (3.0 - 2.0 * below);
   float rEpi = rCav + wFull - crestLossR;
@@ -126,13 +196,15 @@ vec4 rvRadii(float az, float z, float contraction, float tvZ, float rvCollapse) 
   if (rvCollapse > 0.0 && u < 0.55) t *= 1.0 - 0.65 * rvCollapse * (1.0 - u / 0.55);
   return vec4(rIn, u, rIn + t + crestLossR, t + crestLossR);
 }
-// tricuspid inflow column (heartModel.ts tvInflowSdf): annular circle narrowing below the hinges, closed on the atrial side
-// annulus offset above a point, by its azimuth around the tricuspid centre (valveSkirt.ts skirtOffsetAt)
+// annulus offset above a point, by its azimuth around the tricuspid centre
+// src/simulator/anatomy/valveSkirt.ts: skirtOffsetAt
 float tvOffsetAt(vec2 q) {
   vec2 d = q - vec2(TVS_CX, TVS_CY);
   float phi = dot(d, d) > 1e-12 ? atan(d.y, d.x) : 0.0;
   return annulusOffset(phi, TVS_SADDLE_PHI, TVS_SADDLE, TVS_TILTC, TVS_TILTS, TVS_LIFT);
 }
+// tricuspid inflow column: annular circle narrowing below the hinges, closed on the atrial side
+// src/simulator/anatomy/valveSkirt.ts: tvInflowSdf
 float tvInflowSdf(vec3 p) {
   vec2 d = p.xy - vec2(TVS_CX, TVS_CY);
   d *= tvWarpScale(d);
@@ -144,6 +216,7 @@ float tvInflowSdf(vec3 p) {
   return rho - TVS_R + 0.04 + tvInflowTaper(h, 0.25 + 0.3 * TVZ, bulge);
 }
 // RV crescent: returns [signed distance, rIn, rOut]
+// src/simulator/anatomy/rv.ts: rvCrescent
 vec3 rvCrescent(vec3 p, float az) {
   vec4 rr = rvRadii(az, p.z, CONTRACTION, TVZ, RV_COLLAPSE);
   float rIn = rr.x, u = rr.y;
@@ -202,6 +275,7 @@ bool classifyAorticExtension(vec3 p, inout Sample s) {
 }
 const float PA_WALL_CM = ${PA_WALL_CM.toFixed(8)};
 /** Signed distance to the lumen of the pulmonary trunk and its branches (greatVessels.ts pulmonaryTrunkDistance). */
+// src/simulator/anatomy/greatVessels.ts: pulmonaryTrunkDistance
 float pulmonaryTrunkDist(vec3 p) {
   vec3 rvotB = vec3(RVOT_BX, RVOT_BY, RVOT_BZ + PV_Z);
   vec3 paStj = vec3(PA_SX, PA_SY, PA_SZ + PV_Z);
@@ -212,13 +286,38 @@ float pulmonaryTrunkDist(vec3 p) {
   return min(dPa, min(dRpa, dLpa));
 }
 /** Distance beyond the epicardium of the pulmonary trunk (greatVessels.ts pulmonaryTrunkEpiDistance). */
+// src/simulator/anatomy/greatVessels.ts: pulmonaryTrunkEpiDistance
 float pulmonaryTrunkEpiDist(vec3 p) {
   vec3 rvotB = vec3(RVOT_BX, RVOT_BY, RVOT_BZ);
   vec3 paStj = vec3(PA_SX, PA_SY, PA_SZ);
   vec3 paEnd = vec3(PA_EX, PA_EY, PA_EZ);
   return min(sdRoundCone(p, rvotB, paStj, PA_ROOT_R + 0.2, PA_R + 0.2), sdCapsule(p, paStj, paEnd, PA_R + 0.2));
 }
+// signed distance to the full-effusion sac, tabulated around the bounding sphere's centre (pericardium.ts
+// parietalSacDistance, which pericardium.test.ts evaluates this text against): read at the point before the swing
+// src/simulator/anatomy/classify/pericardium.ts: parietalSacDistance
+float parietalSacDistance(float x, float y, float z) {
+  float dx = x - BOUND_CX, dy = y - BOUND_CY, dz = z - BOUND_CZ;
+  float rho = sqrt(dx * dx + dy * dy);
+  float rad = sqrt(rho * rho + dz * dz);
+  float th = rho > 1e-6 ? atan(dy, dx) : 0.0;
+  float phi = atan(rho, dz);
+  float fi = ((th < 0.0 ? th + TWO_PI : th) * float(SAC_AZ_BINS)) / TWO_PI;
+  float fj = (phi * float(SAC_POLAR_BINS - 1)) / PI;
+  int i0 = min(SAC_AZ_BINS - 1, int(floor(fi)));
+  int i1 = i0 == SAC_AZ_BINS - 1 ? 0 : i0 + 1;
+  int j0 = min(SAC_POLAR_BINS - 2, int(floor(fj)));
+  float u = fi - float(i0), v = fj - float(j0);
+  int row0 = SAC_R_BASE + j0 * SAC_AZ_BINS, row1 = row0 + SAC_AZ_BINS;
+  float r00 = P(row0 + i0), r10 = P(row0 + i1), r01 = P(row1 + i0), r11 = P(row1 + i1);
+  float r0 = r00 + (r10 - r00) * u, r1 = r01 + (r11 - r01) * u;
+  float R = r0 + (r1 - r0) * v;
+  float sa = ((r10 - r00 + (r11 - r01 - r10 + r00) * v) * float(SAC_AZ_BINS)) / TWO_PI / (R * max(rho / max(rad, 1e-6), 1e-3));
+  float sp = ((r1 - r0) * float(SAC_POLAR_BINS - 1)) / PI / R;
+  return (rad - R) / sqrt(1.0 + min(9.0, sa * sa + sp * sp));
+}
 /** Beyond the mediastinal fat in front of the pulmonary trunk (greatVessels.ts trunkFrontDistance, decision 336). */
+// src/simulator/anatomy/greatVessels.ts: trunkFrontDistance
 float trunkFrontDist(vec3 p, float dPaEpi) {
   vec3 tm = p - 0.5 * (vec3(RVOT_BX, RVOT_BY, RVOT_BZ) + vec3(PA_SX, PA_SY, PA_SZ));
   float tl = length(tm);
