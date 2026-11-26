@@ -57,6 +57,7 @@ import {
   RA_VESTIBULE_UNION_CM,
 } from '@/simulator/anatomy/classify/atria';
 import { LV_PROF_BINS } from '@/simulator/anatomy/lvShape';
+import { PARIETAL_AZ_BINS, PARIETAL_POLAR_BINS } from '@/simulator/anatomy/classify/pericardium';
 import {
   PV_INF_Z,
   PV_LEFT_INF_T,
@@ -124,6 +125,9 @@ const f = (v: number): string => (Number.isInteger(v) ? `${v}.0` : `${v}`);
  */
 export const GLSL_HEART_CONSTANTS = /* glsl */ `
 const int LV_PROF_BINS = ${LV_PROF_BINS};
+// the fixed pericardial sac over an effusion, tabulated per case (classify/pericardium.ts ParietalSac)
+const int SAC_AZ_BINS = ${PARIETAL_AZ_BINS};
+const int SAC_POLAR_BINS = ${PARIETAL_POLAR_BINS};
 const float LA_POSTERIOR_RATIO = ${f(LA_POSTERIOR_RATIO)};
 const float LA_POSTERIOR_FLOOR_DROP_CM = ${f(LA_POSTERIOR_FLOOR_DROP_CM)};
 const float LA_FLOOR_Y_CM = ${f(LA_FLOOR_Y_CM)};

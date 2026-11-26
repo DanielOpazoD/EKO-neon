@@ -70,8 +70,8 @@ export interface ClassifyCtx {
   /** Normal written by `lvCavitySdf` (leftVentricle.ts), copied into nx0/ny0/nz0. */
   lvNormal: Float64Array;
   /**
-   * RV crescent query (rightVentricle.ts): [0] signed distance to the RV cavity united with its inflow — the
-   * pericardium reads it as the RV epicardium reference —, [1] inner radius, [2] outer radius.
+   * RV crescent query (rightVentricle.ts): [0] signed distance to the RV cavity united with its inflow and outflow
+   * tract — the pericardium reads it as the RV epicardium reference —, [1] inner radius, [2] outer radius.
    */
   rvSdf: Float64Array;
   /** Distance to the base the ventricle vacated as the annulus descended, atrium now (atria.ts, decision 133); 1e3 when none. */
