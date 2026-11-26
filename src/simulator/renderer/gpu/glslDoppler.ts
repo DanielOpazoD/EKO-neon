@@ -16,11 +16,6 @@ import {
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
-  WF_MEAN_SPAN,
-  WF_QUAD_SPAN,
-  WF_QUAD_START,
-  WF_TREND_SPAN,
-  WF_TREND_START,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { spatiotemporalDefinesGlsl } from '@/simulator/doppler/color/spatiotemporalFilter';
 import {
@@ -51,11 +46,6 @@ export function dopplerDefinesGlsl(): string {
     `#define CLUTTER_BLOOD_RATIO_POW ${glslFloat(CLUTTER_BLOOD_RATIO_POW)}`,
     `#define CLUTTER_SIGMA_V_MPS ${glslFloat(CLUTTER_SIGMA_V_MPS)}`,
     `#define CLUTTER_JITTER_RAD ${glslFloat(CLUTTER_JITTER_RAD)}`,
-    `#define WF_MEAN_SPAN ${glslFloat(WF_MEAN_SPAN)}`,
-    `#define WF_TREND_START ${glslFloat(WF_TREND_START)}`,
-    `#define WF_TREND_SPAN ${glslFloat(WF_TREND_SPAN)}`,
-    `#define WF_QUAD_START ${glslFloat(WF_QUAD_START)}`,
-    `#define WF_QUAD_SPAN ${glslFloat(WF_QUAD_SPAN)}`,
     `#define NOISE_COHERENCE ${glslFloat(NOISE_COHERENCE)}`,
     `#define NOISE_POWER_GATE ${glslFloat(NOISE_POWER_GATE)}`,
     `#define LAMINAR_DECORRELATION ${glslFloat(LAMINAR_DECORRELATION)}`,
@@ -122,7 +112,7 @@ uniform int uLines;
 uniform float uDepthCm;
 uniform float uAttenFreqMHz;
 uniform float uScaleMps;
-uniform float uWallFilterMps;
+uniform vec3 uWallShares;     // shares of P0, P1, P2 the wall filter removes: kasaiEstimator.ts wallFilterShares
 uniform int uBloomSamples;
 uniform int uInvert;
 uniform int uUseKasai;
@@ -236,11 +226,11 @@ void main() {
     xi[p] = ar * sn + ai * cs + noiseAmp * nz.y;
   }
 
-  // Continuous 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic)
-  float cut = max(0.0, uWallFilterMps / scale);
-  float meanShare = min(1.0, cut / WF_MEAN_SPAN);
-  float trendShare = min(1.0, max(0.0, (cut - WF_TREND_START) / WF_TREND_SPAN));
-  float quadShare = min(1.0, max(0.0, (cut - WF_QUAD_START) / WF_QUAD_SPAN));
+  // 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic), its -3 dB point on the
+  // requested cutoff: the shares are solved once per update on the CPU by the same function the CPU estimator uses
+  float meanShare = uWallShares.x;
+  float trendShare = uWallShares.y;
+  float quadShare = uWallShares.z;
   if (meanShare > 0.0) {
     float mr = 0.0;
     float mi = 0.0;

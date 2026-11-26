@@ -1,6 +1,7 @@
 import { examClosed } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
+import { colorWallFilterRangeMps } from '@/simulator/doppler/color/kasaiEstimator';
 import { SPECTRAL_SCALE_RANGE, type SpectralModality } from '@/simulator/doppler/spectral/spectrum';
 import {
   COLOR_PALETTE_DEFAULT,
@@ -47,6 +48,10 @@ export function DopplerTab() {
   const tip = useTip();
   const mod = s.modality;
   const limits = acquisitionLimits(s);
+  // the wall filter's cutoff stays within what the packet allows at the acquired Nyquist, on the slider's 1 cm/s steps
+  const wallFilterRange = colorWallFilterRangeMps(limits.color.scaleMps);
+  const wallFilterMin = Math.ceil(wallFilterRange.min * 100 - 1e-9) / 100;
+  const wallFilterMax = Math.max(wallFilterMin, Math.floor(wallFilterRange.max * 100 + 1e-9) / 100);
 
   if (mod === '2d') {
     return (
@@ -169,11 +174,14 @@ export function DopplerTab() {
             <Slider
               label="Filtro de pared"
               value={s.color.wallFilterMps}
-              min={0}
-              max={0.3}
+              min={wallFilterMin}
+              max={wallFilterMax}
               step={0.01}
               format={(v) => `${Math.round(v * 100)} cm/s`}
               onChange={(v) => s.setColor({ wallFilterMps: v })}
+              title={tip(
+                'Velocidad de corte a −3 dB. Con 8 pulsos va de 0,11 a 0,32 × Nyquist: para ver flujo más lento, baja la escala.',
+              )}
             />
           </details>
         </Section>
@@ -458,11 +466,14 @@ export function DopplerTab() {
             <Slider
               label="Filtro de pared"
               value={s.color.wallFilterMps}
-              min={0}
-              max={0.3}
+              min={wallFilterMin}
+              max={wallFilterMax}
               step={0.01}
               format={(v) => `${Math.round(v * 100)} cm/s`}
               onChange={(v) => s.setColor({ wallFilterMps: v })}
+              title={tip(
+                'Velocidad de corte a −3 dB. Con 8 pulsos va de 0,11 a 0,32 × Nyquist: para ver flujo más lento, baja la escala.',
+              )}
             />
           </details>
         </Section>

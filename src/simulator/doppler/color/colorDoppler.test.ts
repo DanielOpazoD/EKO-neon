@@ -900,11 +900,12 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
     };
   };
 
-  // 1. Default wall filter (6 cm/s): myocardial 8 cm/s wall motion stays clean (< 5% flash)
-  const outWf6 = allocColorField(lines * samples);
+  // 1. Default wall filter (−3 dB at 20 cm/s; labelled "6 cm/s" before it was calibrated): 8 cm/s wall motion stays
+  //    clean (< 5% flash)
+  const outWfDefault = allocColorField(lines * samples);
   computeColorField(
     frame,
-    { ...baseCfg, wallFilterMps: 0.06 },
+    { ...baseCfg, wallFilterMps: DEFAULT_COLOR.wallFilterMps },
     null,
     (_idx, li, _si, res) => {
       if (li < 10) {
@@ -915,23 +916,24 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
         res.vWall = -0.08;
       }
     },
-    outWf6,
+    outWfDefault,
     ACQ,
     { realization: 3, seed: 88 },
   );
-  const myoWf6 = countRegion(outWf6, 12, 18);
-  const bloodWf6 = countRegion(outWf6, 3, 9);
+  const myoWfDefault = countRegion(outWfDefault, 12, 18);
+  const bloodWfDefault = countRegion(outWfDefault, 3, 9);
   assert.ok(
-    myoWf6.frac < 0.05,
-    `Expected < 5% myocardial clutter flash at default WF=6 cm/s, got ${(myoWf6.frac * 100).toFixed(1)}%`,
+    myoWfDefault.frac < 0.05,
+    `Expected < 5% myocardial clutter flash at the default wall filter, got ${(myoWfDefault.frac * 100).toFixed(1)}%`,
   );
   assert.ok(
-    bloodWf6.frac > 0.85 && Math.abs(bloodWf6.meanVel - 0.38) < 0.04,
-    `Expected clean blood fill near +0.38 m/s at WF=6 cm/s, got frac=${bloodWf6.frac.toFixed(2)} v=${bloodWf6.meanVel.toFixed(3)}`,
+    bloodWfDefault.frac > 0.85 && Math.abs(bloodWfDefault.meanVel - 0.38) < 0.04,
+    `Expected clean blood fill near +0.38 m/s at the default wall filter, got frac=${bloodWfDefault.frac.toFixed(2)} v=${bloodWfDefault.meanVel.toFixed(3)}`,
   );
 
-  // 2. Low wall filter (2 cm/s): moving myocardium produces real wall flash with breakthrough power > 1.0
-  //    while adjacent blood velocity stays uncontaminated and rawVel/rawPower clutter history stays cleared
+  // 2. Low wall filter (2 cm/s asked, the packet's lowest given: 7.6 cm/s at 0.68 m/s): moving myocardium produces real
+  //    wall flash with breakthrough power > 1.0 while adjacent blood velocity stays uncontaminated and rawVel/rawPower
+  //    clutter history stays cleared
   const outWf2 = allocColorField(lines * samples);
   computeColorField(
     frame,
@@ -952,7 +954,26 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
   );
   const myoWf2 = countRegion(outWf2, 12, 18);
   const bloodBoundaryWf2 = countRegion(outWf2, 8, 10);
-  const bloodBoundaryWf6 = countRegion(outWf6, 8, 10);
+  // the control is the same wall filter over still myocardium (no flash): against the default filter's field the
+  // difference would be the two filters' own bias on 0.38 m/s blood (+5 % at 1.9× the 20 cm/s cutoff, −2 % at 5× the
+  // 7.6 cm/s one), not contamination by the flash
+  const outWf2Still = allocColorField(lines * samples);
+  computeColorField(
+    frame,
+    { ...baseCfg, wallFilterMps: 0.02 },
+    null,
+    (_idx, li, _si, res) => {
+      if (li < 10) {
+        res.v = 0.38;
+        res.disp = 0.03;
+        res.present = 1;
+      }
+    },
+    outWf2Still,
+    ACQ,
+    { realization: 3, seed: 88 },
+  );
+  const bloodBoundaryStill = countRegion(outWf2Still, 8, 10);
   assert.ok(
     myoWf2.frac >= 0.6,
     `Expected >= 60% myocardial clutter flash at WF=2 cm/s, got ${(myoWf2.frac * 100).toFixed(1)}%`,
@@ -962,8 +983,8 @@ test('Color Doppler Fase 4: real myocardial clutter flash, tissue-write breakthr
     `Expected surviving myocardial flash to encode breakthrough power > 1.05, got ${myoWf2.maxPow.toFixed(3)}`,
   );
   assert.ok(
-    Math.abs(bloodBoundaryWf2.meanVel - bloodBoundaryWf6.meanVel) < 0.02,
-    `Adjacent blood velocity must not be biased by myocardial flash: wf6=${bloodBoundaryWf6.meanVel.toFixed(3)} wf2=${bloodBoundaryWf2.meanVel.toFixed(3)}`,
+    Math.abs(bloodBoundaryWf2.meanVel - bloodBoundaryStill.meanVel) < 0.02,
+    `Adjacent blood velocity must not be biased by myocardial flash: still=${bloodBoundaryStill.meanVel.toFixed(3)} flash=${bloodBoundaryWf2.meanVel.toFixed(3)}`,
   );
   // Clutter temporal history must be cleared so moving myocardium never leaves stale ghost trails
   let clutterHistCount = 0;

@@ -9,6 +9,7 @@ import {
   type Locations,
 } from './glHelpers';
 import { COLOR_THRESHOLD } from '@/simulator/doppler/color/colorDoppler';
+import { wallFilterShares, type WallFilterShares } from '@/simulator/doppler/color/kasaiEstimator';
 import {
   DEFAULT_COLOR_SMOOTHING,
   ST_HYSTERESIS_RATIO,
@@ -29,7 +30,7 @@ export const DOPPLER_AUTOCORR_UNIFORMS = [
   'uDepthCm',
   'uAttenFreqMHz',
   'uScaleMps',
-  'uWallFilterMps',
+  'uWallShares',
   'uBloomSamples',
   'uInvert',
   'uUseKasai',
@@ -123,6 +124,7 @@ export interface DeferredDopplerStats {
 }
 
 const ZERO4 = new Float32Array([0, 0, 0, 0]);
+const WALL_SHARES: WallFilterShares = { mean: 0, trend: 0, quad: 0 };
 
 /**
  * CPU colour power of a present-texture texel from its alpha, the inverse of Pass D3's `encodeDisplayAlpha` (and of
@@ -458,7 +460,9 @@ export class DeferredDopplerPipeline {
     gl.uniform1f(ua.uDepthCm, spec.depthCm);
     gl.uniform1f(ua.uAttenFreqMHz, attenFreqMHz);
     gl.uniform1f(ua.uScaleMps, settings.scaleMps);
-    gl.uniform1f(ua.uWallFilterMps, settings.wallFilterMps);
+    // the regression wall filter's shares, from the function the CPU estimator uses: both cut at the same −3 dB point
+    const wf = wallFilterShares(settings.wallFilterMps, settings.scaleMps, WALL_SHARES);
+    gl.uniform3f(ua.uWallShares, wf.mean, wf.trend, wf.quad);
     gl.uniform1i(ua.uBloomSamples, bloomSamples);
     gl.uniform1i(ua.uInvert, settings.invert ? 1 : 0);
     gl.uniform1i(ua.uUseKasai, useKasai);

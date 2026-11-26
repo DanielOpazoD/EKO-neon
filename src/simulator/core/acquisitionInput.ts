@@ -1,3 +1,4 @@
+import { colorWallFilterCutoffMps } from '@/simulator/doppler/color/kasaiEstimator';
 import { DUPLEX_BMODE_SHARE, pulsedAcquisition } from '@/simulator/renderer/pulseTiming';
 import type { SimInput } from './protocol';
 
@@ -36,15 +37,24 @@ export function constrainAcquisition<T extends AcquisitionInput>(input: T): T {
   const pulsed = input.modality === 'pw' || input.modality === 'tdi';
   const colorScale = limits.color.scaleMps;
   const colorShift = clampBaselineShift(input.color.baselineShiftMps, colorScale);
+  // the wall filter keeps the cutoff the packet can give at this Nyquist: what every Doppler view then filters with
+  const colorWf = colorWallFilterCutoffMps(input.color.wallFilterMps, colorScale);
   const spectralScale = pulsed ? limits.spectral.scaleMps : input.spectral.scaleMps;
   const spectralShift = clampBaselineShift(input.spectral.baselineShiftMps, spectralScale);
   return {
     ...input,
     gateDepthCm: limits.gateDepthCm,
     color:
-      colorScale === input.color.scaleMps && colorShift === input.color.baselineShiftMps
+      colorScale === input.color.scaleMps &&
+      colorShift === input.color.baselineShiftMps &&
+      colorWf === input.color.wallFilterMps
         ? input.color
-        : { ...input.color, scaleMps: colorScale, baselineShiftMps: colorShift },
+        : {
+            ...input.color,
+            scaleMps: colorScale,
+            baselineShiftMps: colorShift,
+            wallFilterMps: colorWf,
+          },
     spectral:
       spectralScale === input.spectral.scaleMps &&
       spectralShift === input.spectral.baselineShiftMps

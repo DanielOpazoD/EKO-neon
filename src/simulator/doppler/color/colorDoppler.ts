@@ -52,6 +52,7 @@ export interface ColorSettings {
   boxRMaxCm: number;
   scaleMps: number; // Nyquist
   baselineShiftMps: number;
+  /** Wall filter −3 dB cutoff, within what the 8-pulse packet allows at this scale (`colorWallFilterCutoffMps`). */
   wallFilterMps: number;
   gainDb: number;
   persistence: number;
@@ -70,7 +71,9 @@ export const DEFAULT_COLOR: ColorSettings = {
   boxRMaxCm: 13,
   scaleMps: 0.68,
   baselineShiftMps: 0,
-  wallFilterMps: 0.06,
+  // the filter the default always had, now labelled with its real cutoff: the old "6 cm/s" removed mean + trend + 55 % of
+  // the quadratic and cut at 0.205 m/s, which keeps 6–8 cm/s myocardium out of the colour at 0 dB
+  wallFilterMps: 0.2,
   gainDb: 0,
   persistence: 0.35,
   smoothing: DEFAULT_COLOR_SMOOTHING,

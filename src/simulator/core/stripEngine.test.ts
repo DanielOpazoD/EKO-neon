@@ -16,6 +16,7 @@ import { loadCaseById } from '@/cases';
 import { Tissue } from '@/simulator/anatomy/tissue';
 import { DEFAULT_ACQUISITION, type Scene } from '@/simulator/renderer/types';
 import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
+import { WF_MAX_NYQUIST, WF_MIN_NYQUIST } from '@/simulator/doppler/color/kasaiEstimator';
 import {
   DEFAULT_SPECTRAL,
   envelopeThreshold,
@@ -220,6 +221,36 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
     assert.equal(img[leafO], 220, 'Bright mitral leaflet line in CMM should not be overwritten by color');
     assert.equal(img[leafO + 1], 220);
     assert.equal(img[leafO + 2], 220);
+  });
+
+  it('bounds the colour wall filter to the −3 dB cutoffs an 8-pulse packet allows at the acquired Nyquist', () => {
+    const base = {
+      modality: 'color' as const,
+      gateDepthCm: 8,
+      settings: { ...DEFAULT_ACQUISITION },
+      spectral: { ...DEFAULT_SPECTRAL },
+    };
+    const color = { ...DEFAULT_COLOR };
+    const kept = constrainAcquisition({ ...base, color });
+    assert.equal(kept.color, color, 'a cutoff the packet allows is kept as it is');
+    // below 0.11 Nyquist the mean removal is the lowest cutoff that cancels stationary tissue; above 0.32 nothing here cuts
+    const low = constrainAcquisition({ ...base, color: { ...DEFAULT_COLOR, wallFilterMps: 0.02 } });
+    assert.ok(Math.abs(low.color.wallFilterMps - WF_MIN_NYQUIST * low.color.scaleMps) < 1e-12);
+    const high = constrainAcquisition({
+      ...base,
+      color: { ...DEFAULT_COLOR, scaleMps: 0.4, wallFilterMps: 0.3 },
+    });
+    assert.ok(Math.abs(high.color.wallFilterMps - WF_MAX_NYQUIST * 0.4) < 1e-12);
+    // a depth-limited PRF lowers Nyquist, and the cutoff comes down with it
+    const deep = constrainAcquisition({
+      ...base,
+      settings: { ...DEFAULT_ACQUISITION, depthCm: 24 },
+      color: { ...DEFAULT_COLOR, scaleMps: 1.2, boxRMaxCm: 22, wallFilterMps: 0.3 },
+    });
+    assert.ok(deep.color.scaleMps < 1.2, `Nyquist ${deep.color.scaleMps} should be PRF-limited at 22 cm`);
+    assert.ok(Math.abs(deep.color.wallFilterMps - WF_MAX_NYQUIST * deep.color.scaleMps) < 1e-12);
+    // off stays off
+    assert.equal(constrainAcquisition({ ...base, color: { ...DEFAULT_COLOR, wallFilterMps: 0 } }).color.wallFilterMps, 0);
   });
 
   it('clamps baselineShiftMps under depth-limited PRF and guards renderSpectralStripRgba against B-mode bleed', () => {
