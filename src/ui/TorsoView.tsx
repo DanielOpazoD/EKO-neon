@@ -12,6 +12,13 @@ import type { NavigatorCameraState } from './navigator/navigatorCamera';
 export { narrowPanelFovDeg } from './navigator/navigatorScene';
 
 /**
+ * Where the learner left the navigator's camera. It outlives each scene and the component itself: breathing, position
+ * or case rebuild the scene, and the report, the curriculum or a collapsed rail unmount it, and each time the framing
+ * went back to the overview.
+ */
+const navigatorCamera: { current: NavigatorCameraState | null } = { current: null };
+
+/**
  * 3D torso + probe trainer (spec 4.3, 58, 76). Clean clinical torso: wrap-around superellipse chest
  * with a translucent skin over a full rib cage (both sides), sternum, clavicles, a translucent heart
  * ghost and the imaging plane fan; a phased-array transducer with a pickable index marker.
@@ -32,8 +39,6 @@ export function TorsoView() {
   );
   const frozen = useHudStore((s) => s.hud?.frozen ?? false);
   const zoomRef = useRef<NavigatorZoom | null>(null);
-  // the camera outlives each scene: breathing, position or case rebuild the scene, not the learner's framing
-  const cameraRef = useRef<NavigatorCameraState | null>(null);
   // a browser without WebGL keeps the image and the cut map; only the 3D view gives way to a notice (decision 154).
   // Probed once on mounting; if the renderer still failed, the ErrorBoundary around the navigator would contain it
   const [webglError] = useState(probeWebgl);
@@ -46,7 +51,7 @@ export function TorsoView() {
       patient,
       dragAction: dragActionRef,
       zoom: zoomRef,
-      camera: cameraRef,
+      camera: navigatorCamera,
     });
   }, [caseId, patient, webglError]);
 

@@ -102,24 +102,16 @@ test('the 12 cases keep their MR grade in the truth, the expected findings and t
   }
 });
 
-// The vena contracta band of ASE 2017 (Table 8) for each grade the report writes, in cm: [from, below)
-const VC_BAND: Record<string, [number, number]> = {
-  trivial: [0, 0.3],
-  leve: [0, 0.3],
-  moderada: [0.3, 0.7],
-  severa: [0.7, Infinity],
-};
-
-test('the MR impression cites no vena contracta from the band of another grade', () => {
+test('the MR impression cites no restatement of the EROA that could read against its grade', () => {
+  let lines = 0;
   for (const { id } of CASE_INPUTS) {
     const line = mrLine(truthFor(id));
     if (!line) continue;
-    const band = VC_BAND[/^Insuficiencia mitral (\w+)/.exec(line)?.[1] ?? ''];
-    assert.ok(band, `${id}: no grade in «${line}»`);
-    const vc = /\bVC (\d+(?:\.\d+)?) cm/.exec(line);
-    if (vc) {
-      const widthCm = Number(vc[1]);
-      assert.ok(widthCm >= band[0] && widthCm < band[1], `${id}: «${line}»`);
-    }
+    lines++;
+    // the vena contracta and the PISA radius are the EROA as a width and as a radius: a mild orifice's fell in the
+    // guideline's intermediate band of both (VC 0.36–0.50 cm, PISA@40 0.47–0.62 cm). The line grades on, and cites, the
+    // EROA, the regurgitant volume and the fraction alone
+    assert.doesNotMatch(line, /\bVC \d|PISA/i, `${id}: «${line}»`);
   }
+  assert.ok(lines >= 5, 'the cases with MR write their line');
 });

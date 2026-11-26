@@ -87,6 +87,8 @@ const MIN_VIEW_SCORE_FOR_VALID = 50;
 export interface MeasurementScoringOptions {
   /** Free measurements may stand for required ones (`modePolicy(mode).freeMeasurementsScored`); default true. */
   freeMeasurements?: boolean;
+  /** They will once the impression is corrected (practice): the unmatched rows say so instead of «No medida». */
+  freeMeasurementsPending?: boolean;
 }
 
 export interface ExamScoringOptions extends MeasurementScoringOptions {
@@ -122,7 +124,7 @@ export function scoreMeasurements(
   caseDef: CaseDefinition,
   truth: StructuredEchoTruth,
   measurements: Measurement[],
-  { freeMeasurements = true }: MeasurementScoringOptions = {},
+  { freeMeasurements = true, freeMeasurementsPending = false }: MeasurementScoringOptions = {},
 ): MeasurementScore {
   const rows: MeasurementScoreRow[] = [];
   for (const req of caseDef.requiredMeasurements) {
@@ -143,7 +145,9 @@ export function scoreMeasurements(
         points: 0,
         comment: freeMeasurements
           ? 'No medida.'
-          : 'No medida desde la lista del protocolo (en el examen una medición libre no cuenta).',
+          : freeMeasurementsPending
+            ? 'No medida desde la lista del protocolo (una medición libre se compara al corregir).'
+            : 'No medida desde la lista del protocolo (en el examen una medición libre no cuenta).',
       });
       continue;
     }

@@ -170,9 +170,12 @@ export class SimulatorCore {
 
   constructor(caseDef: CaseDefinition, input: SimInput, options: SimulatorCoreOptions = {}) {
     this.caseDef = caseDef;
-    this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () =>
-      this.atlas.invalidate(),
-    );
+    // an experimental asset arriving (the Rodero heart, the Cole kernels) changes what the beam meets: the frames cached by
+    // pose and the strip's caches by ray and bin were formed without it
+    this.experimental = new ExperimentalLoaders(options.fetchAsset ?? fetchFromAppBase, () => {
+      this.atlas.invalidate();
+      this.strips.reset();
+    });
     this.input = constrainAcquisition(input);
     this.acquisitionModality = input.modality;
     this.sessionEpoch = input.sessionEpoch ?? 0;
@@ -324,7 +327,12 @@ export class SimulatorCore {
     const anatomyChanged = (input.anatomy ?? 'analytic') !== (this.input.anatomy ?? 'analytic');
     if (input.rendererBackend !== this.input.rendererBackend || anatomyChanged) {
       this.backend = this.pickBackend(input.rendererBackend, input.anatomy ?? 'analytic');
-      if (anatomyChanged) this.atlas.invalidate();
+      if (anatomyChanged) {
+        // another heart: a new acquisition, or the strip's caches keyed by ray (anatomy is not in the key) kept serving
+        // CW columns traced through the other one
+        this.atlas.invalidate();
+        this.strips.reset();
+      }
     }
     if ((input.imageFormation ?? 'lattice') !== (this.input.imageFormation ?? 'lattice'))
       this.atlas.invalidate();

@@ -77,7 +77,11 @@ export function examSummaryOf(s: ExamInputs): ExamSummary | null {
     s.measurements,
     impression,
     {
-      freeMeasurements: modePolicy(s.mode).freeMeasurementsScored,
+      // a free caliper stands for the required measurement closest to its true value: matched before «Corregir», it was
+      // an oracle, since the row it took showed the model's value, the error and the points (move it until «Dentro de
+      // tolerancia»). In practice it is compared once the impression is corrected, when the key is shown anyway
+      freeMeasurements: modePolicy(s.mode).freeMeasurementsScored && s.impressionChecked,
+      freeMeasurementsPending: modePolicy(s.mode).freeMeasurementsScored && !s.impressionChecked,
       impressionRequired: modePolicy(s.mode).impressionRequired,
     },
   );

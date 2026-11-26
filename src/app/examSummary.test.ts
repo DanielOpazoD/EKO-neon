@@ -65,6 +65,41 @@ describe('the score table of the report and the answer key (decision 257)', () =
     assert.deepEqual(shown({ ...practice, measurements: [vmax] }), ['av-vmax']);
   });
 
+  it('compares a free caliper only once the impression is corrected: before, it was an oracle', () => {
+    // a free 2.0 cm caliper stands for the closest required distance; matched at once, its row showed the model's LVOT
+    // diameter, the error and the points, and moving it until «Dentro de tolerancia» found the answer
+    const caliper: Measurement = {
+      id: 'm2',
+      kind: 'linear',
+      label: 'Distancia',
+      measurementId: null,
+      technique: null,
+      value: 2.0,
+      units: 'cm',
+      modality: '2d',
+      sourceViewId: null,
+      viewScore: 90,
+      frameId: 1,
+      phase: 0,
+      timeS: 0,
+      geometry: [],
+      imageQualityScore: null,
+      userAssisted: false,
+      referenceGuidelineIds: [],
+      createdAt: '2026-01-01T00:00:00Z',
+    };
+    const before = examSummaryOf({ ...practice, measurements: [caliper] })!.measurements.rows;
+    assert.ok(before.every((r) => r.measured === null && r.errorPct === null && r.points === 0));
+    assert.deepEqual(shown({ ...practice, measurements: [caliper] }), []);
+    assert.match(before[0]!.comment, /se compara al corregir/);
+    const after = examSummaryOf({ ...practice, measurements: [caliper], impressionChecked: true })!
+      .measurements.rows;
+    assert.ok(
+      after.some((r) => r.measured === 2.0),
+      'after «Corregir» it stands for a required distance',
+    );
+  });
+
   it('shows the whole key in the exam once it is finished, the only time its table is shown', () => {
     const exam: ExamInputs = { ...practice, mode: 'exam' };
     const rows = examSummaryOf(exam)!.measurements.rows;

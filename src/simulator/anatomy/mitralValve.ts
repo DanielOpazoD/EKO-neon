@@ -90,18 +90,22 @@ export const SAM_MAX_BLEND = 1.2;
  * Time course of the drag, in ejection times from aortic valve opening (`CycleState.ejectionProgress`). SAM begins with
  * the ejection, at low outflow velocity (Sherrid et al., J Am Coll Cardiol 2000;36:1344–1354), and the drag grows
  * smoothly over its first 0.45 (`SAM_DRAG_RISE`); it holds while the Doppler's dynamic obstruction (`lvotNarrowing`)
- * closes the tract from 0.25 to 0.85, and from `SAM_RELEASE_START` the leaflet returns over `SAM_RELEASE` ejection times,
- * ending in isovolumic relaxation, before the mitral valve opens. In the HOCM case (ejection 301 ms) the free edge meets
- * the septum 114 ms after aortic opening and leaves it at 287 ms; by Pollick's relation of the gradient to the time from
- * SAM onset to septal contact (y) and the contact's duration (x), 25·x/y + 25 mmHg (Circulation 1984;69:43–49), that is
- * 63 mmHg, and the case declares 64. Its fastest point travels at 0.50 m/s going and 0.48 m/s returning.
+ * closes the tract from 0.25 to 0.85, and from `SAM_RELEASE_START` the leaflet returns over `SAM_RELEASE` ejection times:
+ * as the outflow wanes it lets the leaflet go, and the valve is closed by aortic closure, when the beat tables close the
+ * SAM's regurgitant orifice too (cycleModel, 'sam'). Released over 0.4 ejection times from 0.9, the anterior free edge
+ * was still 29 mm from the posterior one at aortic closure and coapted 90 ms into isovolumic relaxation: the 2D and the
+ * M-mode showed the valve open with no regurgitation in colour or CW, and the end-systolic LV diameter cut the leaflet.
+ * In the HOCM case (ejection 301 ms) the free edge meets the septum 114 ms after aortic opening and leaves it at 262 ms;
+ * by Pollick's relation of the gradient to the time from SAM onset to septal contact (y) and the contact's duration (x),
+ * 25·x/y + 25 mmHg (Circulation 1984;69:43–49), that is 58 mmHg, and the case declares 64. Its fastest point travels at
+ * 0.50 m/s going and 1.26 m/s returning, the speed of a valve closing.
  * The drag followed the aortic opening, √(Q/Qmax), whose slope is infinite as the ejection starts: the tip moved 0.98 cm in
  * the first 1/256 of the cycle of ejection and 2.5 cm in 18 ms (1–3 m/s), a step in M-mode instead of the anterior slope
  * of SAM, and it fell back as steeply as the ejection ended.
  */
 export const SAM_DRAG_RISE = 0.45;
-export const SAM_RELEASE_START = 0.9;
-export const SAM_RELEASE = 0.4;
+export const SAM_RELEASE_START = 0.85;
+export const SAM_RELEASE = 0.15;
 
 /**
  * Share of the SAM a fibre takes at fraction `q` ∈ (−1, 1) of the anterior fan: the chordae hold the commissures to the

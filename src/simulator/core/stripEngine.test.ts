@@ -282,6 +282,26 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
     );
   });
 
+  it('starts a new strip acquisition when the heart changes (its ray caches know nothing of the anatomy)', () => {
+    // the experimental volume never arrives here: the change of anatomy alone must start over
+    const core = new SimulatorCore(loadCaseById('aortic-stenosis-severe'), baseInput({ modality: 'cw' }), {
+      fetchAsset: () => new Promise(() => {}),
+    });
+    try {
+      let out = null;
+      for (let i = 0; i < 6; i++) out = core.step(1 / 30) ?? out;
+      assert.ok(out && out.strip.kind === 'spectral');
+      const analytic = out.strip.acquisitionId;
+      core.setInput(baseInput({ modality: 'cw', anatomy: 'rodero' }));
+      let rodero = null;
+      for (let i = 0; i < 3; i++) rodero = core.step(1 / 30) ?? rodero;
+      assert.ok(rodero);
+      assert.notEqual(rodero.strip.acquisitionId, analytic, 'a CW strip of the other heart kept going');
+    } finally {
+      core.dispose();
+    }
+  });
+
   it('applies spectral.reject immediately live and frozen without resetting strip acquisitionId', () => {
     const caseDef = loadCaseById('normal-excellent-window');
     const core = new SimulatorCore(

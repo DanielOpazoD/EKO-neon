@@ -125,7 +125,11 @@ test('leaflet free edges move no faster than a leaflet can, beyond the opening l
         b = sw.frames[(i + 1) % N]!;
       for (let g = 0; g < 3; g++) {
         const dOpen = g === 2 ? Math.abs(b.tvOpen - a.tvOpen) : Math.abs(b.mvOpen - a.mvOpen);
-        const bound = LEAFLET_MAX_MPS * 100 * sw.stepS + OPENING_EXCURSION_CM * dOpen;
+        // the end of the SAM is the mitral valve closing as the outflow lets the anterior leaflet go: like the opening
+        // law, its release carries the free edge across its excursion at its own pace (its onset keeps to the bound)
+        const dRelease =
+          g === 0 && Math.max(a.ejection, b.ejection) > SAM_RELEASE_START ? Math.abs(b.sam - a.sam) : 0;
+        const bound = LEAFLET_MAX_MPS * 100 * sw.stepS + OPENING_EXCURSION_CM * (dOpen + dRelease);
         const A = a.tips[g]!,
           B = b.tips[g]!;
         for (let j = 0; j < A.length; j += 3) {
@@ -164,7 +168,7 @@ test('the open mitral leaflets stay inside the ventricle (12 cases, 256 phases)'
   }
 });
 
-test('SAM: the outflow drags the anterior leaflet progressively from the ejection onset and lets it go before the mitral valve opens', () => {
+test('SAM: the outflow drags the anterior leaflet progressively from the ejection onset and the valve is closed by aortic closure', () => {
   const sw = allSweeps().find((s) => s.id === 'hocm-sam')!;
   const c = loadCaseById('hocm-sam');
   const peak = Math.min(SAM_MAX_BLEND, c.anatomy.mitral.samSeverity / SAM_CONTACT_SEVERITY);
@@ -182,11 +186,16 @@ test('SAM: the outflow drags the anterior leaflet progressively from the ejectio
       assert.ok(next.sam >= f.sam, `the drag recedes while the ejection builds (${at})`);
     if ((i + 0.5) / N >= sw.mitralOpenPhase && (i + 0.5) / N < 0.99)
       assert.equal(f.sam, 0, `SAM still on as the mitral valve opens (${at})`);
+    // the SAM's regurgitant orifice closes with the ejection: a leaflet still away from coaptation in isovolumic
+    // relaxation would be an open valve with no regurgitation in colour or CW
+    if (u >= 1 && (i + 0.5) / N < sw.mitralOpenPhase)
+      assert.equal(f.sam, 0, `SAM still on after aortic closure (${at})`);
   }
 });
 
 test('samDrag is smooth: zero slope where it starts and ends, a plateau between', () => {
-  const h = 1e-4;
+  // a smoothstep's finite difference over h is 3h/width²: h small against the narrowest ramp, the release
+  const h = 1e-5;
   assert.equal(samDrag(0), 0);
   assert.equal(samDrag(-0.3), 0);
   assert.equal(samDrag(Number.NaN), 0);
