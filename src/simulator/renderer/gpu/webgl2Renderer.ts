@@ -152,7 +152,9 @@ export class Webgl2Renderer implements RendererBackend {
   private histUpload = new Float32Array(0);
   private disposed = false;
   private lostByEvent = false;
+  private restoredByEvent = false;
   private onContextLost: ((e: Event) => void) | null = null;
+  private onContextRestored: (() => void) | null = null;
   private histValid = false;
   private packedFresh = false;
   private lastPresentMs = 0;
@@ -168,14 +170,6 @@ export class Webgl2Renderer implements RendererBackend {
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
-    const canvas = gl.canvas as EventTarget | undefined;
-    if (canvas && typeof canvas.addEventListener === 'function') {
-      this.onContextLost = (e: Event) => {
-        e.preventDefault();
-        this.lostByEvent = true;
-      };
-      canvas.addEventListener('webglcontextlost', this.onContextLost);
-    }
     const ext = gl.getExtension('EXT_color_buffer_float');
     if (!ext) throw new Error('EXT_color_buffer_float unavailable');
     const common = `#version 300 es\n${GLSL_COMMON}`;
@@ -268,10 +262,50 @@ export class Webgl2Renderer implements RendererBackend {
     gl.uniform1i(this.up.uLut, 3);
     gl.uniform1i(this.up.uColor, 4);
     gl.uniform1i(this.up.uPolar, 5);
+    // Registered last, so a constructor that throws (no float targets, a shader that does not compile on a restored
+    // context) leaves no listener on the canvas; both events are dispatched as tasks, never during this constructor.
+    // preventDefault() asks the browser to restore the context. The restoration only flags it here: this renderer's
+    // programs and textures died with the lost context, and its owner builds a new renderer on `canvas`
+    // (core/gpuRecovery.ts). Nothing listened for the restoration before, and a lost context (a suspended laptop, a
+    // restarted GPU process) left the session on the CPU tracer, at medium quality, until the case was reloaded.
+    const canvas = gl.canvas as EventTarget | undefined;
+    if (canvas && typeof canvas.addEventListener === 'function') {
+      this.onContextLost = (e: Event) => {
+        e.preventDefault();
+        this.lostByEvent = true;
+        this.restoredByEvent = false;
+      };
+      this.onContextRestored = () => {
+        this.restoredByEvent = true;
+      };
+      canvas.addEventListener('webglcontextlost', this.onContextLost);
+      canvas.addEventListener('webglcontextrestored', this.onContextRestored);
+    }
   }
 
   get contextLost(): boolean {
     return this.disposed || this.lostByEvent || this.gl.isContextLost();
+  }
+
+  /** The canvas of this renderer's context: where a new renderer is built once the browser restores a lost context. */
+  get canvas(): OffscreenCanvas | HTMLCanvasElement {
+    return this.gl.canvas;
+  }
+
+  /**
+   * The browser restored the context this renderer lost (webglcontextrestored). The renderer stays unusable
+   * (`contextLost`), since its objects died with the loss; a new one can be built on `canvas`.
+   */
+  get contextRestored(): boolean {
+    return this.lostByEvent && this.restoredByEvent && !this.gl.isContextLost();
+  }
+
+  /**
+   * WEBGL_lose_context of this context, to lose and restore it as a browser would (the core's `gpuContext` dev request).
+   * Null once the context is lost: it must be taken while the context is alive.
+   */
+  loseContextExtension(): WEBGL_lose_context | null {
+    return this.contextLost ? null : this.gl.getExtension('WEBGL_lose_context');
   }
 
   /** GPU-resident Polar G-Buffer produced by the latest B-mode reconstruction pass. */
@@ -352,10 +386,19 @@ export class Webgl2Renderer implements RendererBackend {
     this.disposed = true;
     const gl = this.gl;
     const canvas = gl.canvas as EventTarget | undefined;
-    if (canvas && this.onContextLost && typeof canvas.removeEventListener === 'function') {
-      canvas.removeEventListener('webglcontextlost', this.onContextLost);
-      this.onContextLost = null;
+    if (canvas && typeof canvas.removeEventListener === 'function') {
+      if (this.onContextLost) canvas.removeEventListener('webglcontextlost', this.onContextLost);
+      if (this.onContextRestored)
+        canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
     }
+    this.onContextLost = this.onContextRestored = null;
+    this.gbufferReady = false;
+    this.histValid = false;
+    this.packedFresh = false;
+    // A lost context took every object of this renderer with it. Deleting them once the context is restored only raises
+    // INVALID_OPERATION ("object does not belong to this context"), and releasing the context would lose the one the
+    // recovery is about to build a new renderer on: the renderer just lets go of its canvas.
+    if (this.lostByEvent || gl.isContextLost()) return;
     for (const p of [
       ...this.passAVariants.values(),
       ...this.passASideVariants.values(),
@@ -380,9 +423,6 @@ export class Webgl2Renderer implements RendererBackend {
     gl.deleteTexture(this.psfTex);
     gl.deleteTexture(this.noiseKernelTex);
     this.targets.dispose();
-    this.gbufferReady = false;
-    this.histValid = false;
-    this.packedFresh = false;
     this.psfKeyUploaded = this.noiseKernelKey = '';
     this.noiseSeed = NaN;
     (gl.getExtension('WEBGL_lose_context') as { loseContext: () => void } | null)?.loseContext();

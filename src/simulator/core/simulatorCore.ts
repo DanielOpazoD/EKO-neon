@@ -67,6 +67,7 @@ import { ColorFieldDriver } from './colorFieldDriver';
 import { EcgRing } from './ecgRing';
 import { ExperimentalLoaders } from './experimentalLoaders';
 import { FrameCompositor } from './frameCompositor';
+import { GpuRecovery, type GpuFactory } from './gpuRecovery';
 import { MMODE_TRACE_SHARE } from './mmodeStrip';
 import type {
   PhaseMarks,
@@ -115,6 +116,10 @@ export class SimulatorCore {
   /** WebGL2 port of the procedural renderer; null when unavailable (reason in `gpuReason`). */
   private gpu: Webgl2Renderer | null;
   private gpuReason: string;
+  /** Brings the port back after its context was lost (suspend, GPU process restart) instead of keeping the CPU tracer. */
+  private gpuRecovery: GpuRecovery;
+  /** The context the `gpuContext` dev request lost, to restore it: WEBGL_lose_context is null on a lost context. */
+  private devLostContext: WEBGL_lose_context | null = null;
   private tier: QualityTier = 'medium';
   private consoleState: ConsoleState;
   private artifactLevels: ArtifactLevels = { sideLobe: 0, mirror: 0, beamWidth: 0, clutter: 0 };
@@ -202,7 +207,9 @@ export class SimulatorCore {
     this.consoleState = createConsoleState(caseDef.seed);
     this.caseArtifacts = caseArtifactLevels(caseDef);
     this.applyArtifactOverrides(input.artifactOverrides);
-    const g = createWebgl2Renderer();
+    const createGpu = options.createGpu ?? createWebgl2Renderer;
+    this.gpuRecovery = new GpuRecovery(createGpu, options.now ?? (() => performance.now()));
+    const g = createGpu();
     this.gpu = g.renderer;
     this.gpuReason = g.reason;
     this.atlas = new AtlasRenderer(this.gpu ?? this.procedural, caseDef.seed);
@@ -382,6 +389,7 @@ export class SimulatorCore {
     this.disposed = true;
     this.gpu?.dispose();
     this.gpu = null;
+    this.gpuRecovery.dispose();
     this.atlas.invalidate();
     this.compositor.clear();
   }
@@ -408,6 +416,12 @@ export class SimulatorCore {
     if (inp.frozen) return present ? this.frozenOutput() : null;
     this.strips.resetStepTiming();
     this.lastColorStepMs = 0;
+    // A context lost since the last step is seen here, before the tier is resolved: the CPU tracer's first frame is formed
+    // at medium («auto»), not at the calibrated tier (about 40 ms instead of 170 in Node; about a second in a browser, as
+    // quality.ts says). The port comes back here too, so the frame of the return is at the calibrated tier, and when the
+    // browser has restored the context by now the loss costs no CPU frame at all. Nothing to do on a machine without it.
+    if (this.gpu?.contextLost) this.dropGpu('WebGL context lost: CPU tracer');
+    if (!this.gpu) this.recoverGpu();
     const tier = resolveQualityTier(
       inp.quality,
       this.gpu !== null && this.backend !== this.procedural,
@@ -546,13 +560,42 @@ export class SimulatorCore {
     );
   }
 
+  /**
+   * The port's context was lost: the frames go to the CPU tracer, and the lost renderer to the recovery, which disposes it
+   * once replaced or given up. Before, it was only dropped: never disposed (its listener stayed on the canvas) and never
+   * rebuilt, so the session kept the CPU tracer, at medium quality, until the case was reloaded.
+   */
   private dropGpu(reason: string): void {
+    if (this.gpu) this.gpuRecovery.lost(this.gpu);
     this.gpu = null;
-    this.gpuReason = reason;
-    this.atlas = new AtlasRenderer(this.procedural, this.caseDef.seed);
+    this.gpuReason = this.gpuRecovery.reason ?? reason;
+    this.switchBackendSource(this.procedural);
+  }
+
+  /** The port is back: a new atlas over it, the calibrated tier from this step on, and the HUD's warning gone. */
+  private recoverGpu(): void {
+    const renderer = this.gpuRecovery.poll();
+    if (!renderer) {
+      this.gpuReason = this.gpuRecovery.reason ?? this.gpuReason;
+      return;
+    }
+    this.gpu = renderer;
+    this.gpuReason = 'ok';
+    this.switchBackendSource(renderer);
+  }
+
+  /**
+   * The image source changes between the port and the CPU tracer: a fresh atlas over it (no frame cached from the other
+   * one), and a colour field that starts again. The deferred Doppler's phasor history died with the lost context, and the
+   * CPU field still held whatever it had before the GPU took over: shown as it was on the frames it is not recomputed
+   * (every other one), and blended by persistence into the next.
+   */
+  private switchBackendSource(source: RendererBackend): void {
+    this.atlas = new AtlasRenderer(source, this.caseDef.seed);
     this.backend = this.pickBackend(this.input.rendererBackend);
     this.displayOnGpu = false;
     this.dopplerOnGpu = false;
+    this.colorDriver.resetHistory();
   }
 
   private physics(): ScenePhysics {
@@ -835,6 +878,23 @@ export class SimulatorCore {
     return false;
   }
 
+  /**
+   * Dev hook (`gpuContext` request): lose the port's context, or restore the one it lost, through WEBGL_lose_context, as
+   * the browser does on a suspend or a GPU process restart. A context lost this way comes back only on 'restore'; left
+   * lost, it exercises the recovery's retries on a new canvas.
+   */
+  private forceGpuContext(action: 'lose' | 'restore'): SimResponse {
+    if (action === 'lose') {
+      this.devLostContext = this.gpu?.loseContextExtension() ?? null;
+      this.devLostContext?.loseContext();
+      return { kind: 'gpuContext', ok: this.devLostContext !== null };
+    }
+    const ext = this.devLostContext;
+    this.devLostContext = null;
+    ext?.restoreContext();
+    return { kind: 'gpuContext', ok: ext !== null };
+  }
+
   /** Cardiac phase landmarks as fractions of RR (for phase checks in the technique engine). */
   phaseMarks(): PhaseMarks {
     return computePhaseMarks(this.tables);
@@ -847,6 +907,7 @@ export class SimulatorCore {
 
   /** Answer an on-demand request (auto-trace, canonical control, or the model at a point of the image). */
   request(req: SimRequest): SimResponse | null {
+    if (req.kind === 'gpuContext') return this.forceGpuContext(req.action);
     return routeSimRequest(req, {
       input: this.input,
       displayedFrame: this.displayedFrame,
@@ -976,9 +1037,13 @@ export class SimulatorCore {
   }
 }
 
-/** Options of a simulator core: how it fetches the app's assets (decision 352). */
+/** Options of a simulator core: how it fetches the app's assets (decision 352) and builds its GPU port. */
 export interface SimulatorCoreOptions {
   fetchAsset?: AssetFetcher;
+  /** Builds the GPU port, at start and after a lost context; `createWebgl2Renderer` by default (tests simulate a GL). */
+  createGpu?: GpuFactory;
+  /** Wall clock (ms) the GPU recovery spaces its attempts by; `performance.now` by default. */
+  now?: () => number;
 }
 
 /** The app's assets, fetched under its base URL (the worker's and the page's). */
