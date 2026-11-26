@@ -11,26 +11,17 @@ import {
   type ScanLut,
   type SectorMapping,
 } from '@/simulator/renderer/scanConvert';
-import type {
-  PolarFrame,
-  PolarFrameSpec,
-  RendererBackend,
-  TintMapId,
-} from '@/simulator/renderer/types';
+import type { PolarFrame, PolarFrameSpec, TintMapId } from '@/simulator/renderer/types';
 import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
-import type { CineBuffer, CineFrame } from './cineBuffer';
+import type { CineBuffer, CineFrame, FrameFormation } from './cineBuffer';
 import type { EcgRing } from './ecgRing';
-import type { ExperimentalLoaders } from './experimentalLoaders';
-import type { QualityTier, SimInput, SimOutput, StripInfo } from './protocol';
+import type { SimInput, SimOutput, StripInfo } from './protocol';
 import type { StripCtx, StripEngine } from './stripEngine';
 import { resolveFrozenColorSettings } from './acquisitionKeys';
 
+/** What composing and presenting an output cost (ms): the last composite's, and this one's present and colour overlay. */
 export interface CompositeTiming {
-  renderFrameMs: number;
   compositeMs: number;
-  analysisMs: number;
-  consoleMs: number;
-  cineMs: number;
   presentMs: number;
   overlayColorMs?: number;
 }
@@ -46,8 +37,11 @@ export interface CompositeContext {
   displayOnGpu: boolean;
   dopplerOnGpu: boolean;
   gpu: Webgl2Renderer | null;
-  gpuReason: string;
-  onGpuContextLost: (reason: string) => void;
+  onGpuContextLost: () => void;
+  /** How the frame shown was formed: a frozen one's own (`CineFrame.formation`), the pipeline's now when live. */
+  formation: FrameFormation;
+  /** The GPU port's state now, apart from the frame's: 'ok', lost (`GpuRecovery.status`), or why there is none. */
+  gpuLive: string;
   colorCurrent: ColorField | null;
   colorVersion: number;
   colorFps: number;
@@ -61,11 +55,7 @@ export interface CompositeContext {
   acquisitionFps: number;
   ecgRing: EcgRing;
   cine: CineBuffer;
-  backend: RendererBackend;
-  isProceduralBackend: boolean;
-  experimental: ExperimentalLoaders;
-  tier: QualityTier;
-  lastPersistence: number;
+  /** This output's composition and presentation; what forming the frame cost is its `formation`'s. */
   timing: CompositeTiming;
 }
 
@@ -203,7 +193,7 @@ export class FrameCompositor {
               }
             : null;
       bitmap = ctx.gpu.present({ lut: this.lut, width: W, height: sectorH, color, tintMap });
-      if (ctx.gpu.contextLost) ctx.onGpuContextLost('WebGL context lost: CPU tracer');
+      if (ctx.gpu.contextLost) ctx.onGpuContextLost();
     }
     ctx.timing.presentMs = bitmap ? performance.now() - tp : 0;
 
@@ -253,6 +243,7 @@ export class FrameCompositor {
     const ecgTail = ctx.ecgRing.extractTail(frozen, ctx.timeS, ctx.cine.oldest?.timeS);
     const sector = { ...mapping, x: 0, y: 0 };
     const displayedFrame = cf ?? ctx.cine.newest;
+    const f = ctx.formation;
 
     const output: SimOutput = {
       acquisition: cf?.acquisition,
@@ -297,23 +288,26 @@ export class FrameCompositor {
         endS: ctx.cine.newest?.timeS ?? ctx.timeS,
         frameS: cf ? cf.timeS : ctx.timeS,
       },
+      // the stats speak of the frame shown, frozen as it was formed (`FrameFormation`); only the port's state now and
+      // what composes and presents this output are live
       stats: {
-        ...ctx.backend.stats(),
-        backend: ctx.backend.id,
-        anatomy: ctx.experimental.anatomyStatus(inp.anatomy, ctx.isProceduralBackend),
-        imagen: ctx.experimental.imageFormationStatus(inp.imageFormation),
-        gpu: ctx.gpuReason,
-        tier: ctx.tier,
+        ...f.backendStats,
+        backend: f.backend,
+        anatomy: f.anatomy,
+        imagen: f.imagen,
+        gpu: f.gpu,
+        gpuLive: ctx.gpuLive,
+        tier: f.tier,
         lines: spec.lines,
         samples: spec.samples,
-        renderFrameMs: Number(ctx.timing.renderFrameMs.toFixed(1)),
-        consoleMs: Number(ctx.timing.consoleMs.toFixed(1)),
-        persistence: Number(ctx.lastPersistence.toFixed(3)),
-        analysisMs: Number(ctx.timing.analysisMs.toFixed(1)),
+        renderFrameMs: Number(f.renderFrameMs.toFixed(1)),
+        consoleMs: Number(f.consoleMs.toFixed(1)),
+        persistence: Number(f.persistence.toFixed(3)),
+        analysisMs: Number(f.analysisMs.toFixed(1)),
         compositeMs: Number(ctx.timing.compositeMs.toFixed(1)),
-        cineMs: Number(ctx.timing.cineMs.toFixed(2)),
-        console: ctx.displayOnGpu ? 'gpu' : 'cpu',
-        dopplerPipe: modality === 'color' ? (ctx.dopplerOnGpu ? 'gpu-deferred' : 'cpu') : 'off',
+        cineMs: Number(f.cineMs.toFixed(2)),
+        console: f.console,
+        dopplerPipe: f.dopplerPipe,
         present: bitmap ? 'gpu' : 'cpu',
         presentMs: Number(ctx.timing.presentMs.toFixed(2)),
       },

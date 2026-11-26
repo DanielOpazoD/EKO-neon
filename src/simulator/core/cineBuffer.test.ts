@@ -32,6 +32,7 @@ function makeCineFrame(frameId: number, phase: number, timeS: number, fillByte: 
       stripAcquisitionId: null,
       colorTimeS: null,
     },
+    formation: {} as CineFrame['formation'],
     scene: {} as Scene,
     tables: {} as CineFrame['tables'],
     flow: {} as CineFrame['flow'],

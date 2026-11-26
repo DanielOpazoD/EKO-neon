@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { HeartPose } from '@/simulator/anatomy/heartModel';
 import type { VolumeHeart } from '@/simulator/anatomy/volumeHeart';
-import { SimulatedCanvas } from './simulatedGl';
+import { SimulatedCanvas, withSimulatedOffscreenCanvas } from './simulatedGl';
 import { volumeHeartGpu } from './volumeHeartGpu';
-import { Webgl2Renderer } from './webgl2Renderer';
+import { createWebgl2Renderer, Webgl2Renderer } from './webgl2Renderer';
 
 const SPEC = { lines: 4, samples: 4, sectorRad: 1, depthCm: 10, focusCm: 6, elevationSamples: 1 };
 
@@ -67,19 +67,64 @@ test('the lost renderer flags the restoration and lets go of the restored contex
   assert.equal(lost.contextLost, true, 'but its programs and textures died with the loss: it stays unusable');
   assert.equal(lost.canvas, canvas as unknown, 'the canvas to build the next renderer on');
 
-  // disposing it must not touch the restored context: deleting dead objects in it only raises INVALID_OPERATION, and
-  // releasing it would lose the context the next renderer is built on
+  // the recovery builds the next renderer on the restored context and then lets go of the lost one (`keepContext`): that
+  // must not touch the restored context. Deleting dead objects in it only raises INVALID_OPERATION, and releasing it
+  // would lose the context the next renderer is built on
+  const rebuilt = new Webgl2Renderer(canvas.gl);
   const before = { ...canvas.calls };
-  lost.dispose();
+  lost.dispose(true);
   assert.deepEqual(canvas.calls, before, 'no GL call on the restored context');
   assert.equal(canvas.contextLost, false, 'the restored context is not released');
-  assert.equal(canvas.listenerCount(), 0, 'both listeners removed');
-
-  const rebuilt = new Webgl2Renderer(canvas.gl);
+  assert.deepEqual([canvas.width, canvas.height], [4, 4], 'nor its canvas resized');
   assert.equal(rebuilt.contextLost, false, 'a new renderer works on the restored context');
-  assert.equal(canvas.listenerCount('webglcontextlost'), 1);
+  assert.equal(canvas.listenerCount('webglcontextlost'), 1, "the lost renderer's listeners removed");
   assert.equal(canvas.listenerCount('webglcontextrestored'), 1);
   rebuilt.dispose();
+  assert.equal(canvas.listenerCount(), 0);
+});
+
+test('a lost renderer nobody builds on gives its context back: on the restoration, or at once if restored already', () => {
+  const canvas = new SimulatedCanvas();
+  const lost = new Webgl2Renderer(canvas.gl);
+  // where present() leaves it: a restoration allocated a drawing buffer of the screen's size, 3.4 MB
+  canvas.width = 1024;
+  canvas.height = 820;
+  assert.equal(canvas.lose(), true, 'its loss prevented, the browser may restore the context');
+  lost.dispose();
+  assert.deepEqual([canvas.width, canvas.height], [1, 1], 'a restoration allocates one pixel');
+  assert.equal(canvas.listenerCount('webglcontextlost'), 0, 'nothing asks for another restoration');
+  assert.equal(canvas.calls.loseContext, 0, 'nothing to release while it is lost');
+  assert.equal(canvas.restore(), true);
+  assert.equal(canvas.calls.loseContext, 1, 'released on its restoration');
+  assert.equal(canvas.contextLost, true);
+  assert.equal(canvas.listenerCount(), 0, 'by a one-shot listener');
+  assert.equal(canvas.restore(), false, 'and for good: its loss is not prevented any more');
+
+  const restored = new SimulatedCanvas();
+  const r = new Webgl2Renderer(restored.gl);
+  restored.lose();
+  restored.restore();
+  assert.equal(r.contextRestored, true);
+  r.dispose();
+  assert.equal(restored.calls.loseContext, 1, 'restored and nobody builds on it: released at once');
+  assert.equal(restored.contextLost, true);
+  assert.equal(restored.listenerCount(), 0);
+});
+
+test("a context createWebgl2Renderer made and could not build on is given back; one on the caller's canvas stays", () => {
+  const { result, canvases } = withSimulatedOffscreenCanvas({ floatTargets: false }, () =>
+    createWebgl2Renderer(),
+  );
+  assert.equal(result.renderer, null);
+  assert.match(result.reason, /EXT_color_buffer_float/, 'the constructor threw after getContext');
+  assert.equal(canvases.length, 1, 'on a canvas of its own, as in the worker');
+  assert.equal(canvases[0]!.calls.loseContext, 1, 'given back at once, not at the GC');
+  assert.equal(canvases[0]!.contextLost, true);
+
+  const own = new SimulatedCanvas({ floatTargets: false });
+  assert.equal(createWebgl2Renderer(own as unknown as OffscreenCanvas).renderer, null);
+  assert.equal(own.calls.loseContext, 0, "the caller's to keep or release");
+  assert.equal(own.contextLost, false);
 });
 
 test('a live renderer still deletes its objects and releases its context on dispose', () => {
