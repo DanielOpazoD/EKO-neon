@@ -47,7 +47,7 @@ import {
   TV_SYSTOLIC_SHORTENING,
   tvShortening,
 } from './valveSkirt';
-import { septalCrestFactor, septalShiftAt, wallThicknessAt } from './lvWall';
+import { meanWallThicknessCm, septalCrestFactor, septalShiftAt, wallThicknessAt } from './lvWall';
 import { ahaSegment } from './lvGeometry';
 import { rvFloorZ, rvInflowSdf, rvRadii } from './rv';
 import { anchorsCached } from './anchors';
@@ -255,8 +255,9 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
     ),
     MITRAL_CENTRE_X,
   );
-  // incompressible myocardium: the thickening factor keeps the shell volume of the end-diastolic wall
-  const tBase = (lv.ivsd + lv.lvpwd) / 2;
+  // incompressible myocardium: the thickening factor keeps the shell volume of the end-diastolic wall (its mean
+  // thickness around the circumference, as lvGeometryFromVolume measured it)
+  const tBase = meanWallThicknessCm(lv.ivsd, lv.lvpwd);
   const tMean = (zeta: number): number => tBase * axialWallFactor(zeta, lv.apexT / tBase);
   // The traced end-diastolic cavity (the volume tables follow the ASE tracing convention) includes the
   // blood among the trabeculae; in systole that trabecular layer compacts against the wall, so the
