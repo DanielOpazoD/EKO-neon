@@ -439,6 +439,7 @@ export function drawOverlay(
       }
     }
   }
+  const placedChips: { left: number; top: number; right: number; bottom: number }[] = [];
   for (const { ms, geometry } of shown) {
     let anchor = geometry[geometry.length - 1];
     if (ms.kind === 'vti' && geometry.length > 2 && stripBaselineY !== undefined) {
@@ -473,6 +474,7 @@ export function drawOverlay(
         anchor.x,
         anchor.y,
         '#ffc857',
+        placedChips,
       );
     }
   }
@@ -757,17 +759,30 @@ function drawValueChip(
   x: number,
   y: number,
   color: string,
+  placed?: { left: number; top: number; right: number; bottom: number }[],
 ): void {
   const font = ctx.font;
   ctx.font = canvasFont(10.5, 'mono');
   const w = ctx.measureText(text).width + 12;
   const h = 18;
-  const left = Math.max(
-    2,
-    Math.min(ctx.canvas.width / (window.devicePixelRatio || 1) - w - 2, x + 8),
-  );
+  const dpr = window.devicePixelRatio || 1;
+  const canvasW = ctx.canvas.width / dpr;
+  const canvasH = ctx.canvas.height / dpr;
+  const left = Math.max(2, Math.min(canvasW - w - 2, x + 8));
   // above the point, or under it when the point is at the top edge (decision 201)
-  const top = y - h - 6 < 2 ? y + 8 : y - h - 6;
+  let top = y - h - 6 < 2 ? y + 8 : y - h - 6;
+  if (placed) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const hit = placed.find(
+        (r) => left < r.right + 2 && left + w > r.left - 2 && top < r.bottom + 2 && top + h > r.top - 2,
+      );
+      if (!hit) break;
+      const below = hit.bottom + 3;
+      const above = hit.top - h - 3;
+      top = below + h <= canvasH - 2 ? below : Math.max(2, above);
+    }
+    placed.push({ left, top, right: left + w, bottom: top + h });
+  }
   ctx.fillStyle = 'rgba(8, 11, 16, 0.8)';
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
   ctx.lineWidth = 1;

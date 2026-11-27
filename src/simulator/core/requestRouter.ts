@@ -164,9 +164,9 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
       Math.abs(f.acquisition.probe.rotationDeg - refFrame.acquisition.probe.rotationDeg) < 3 &&
       Math.abs(f.acquisition.probe.tiltDeg - refFrame.acquisition.probe.tiltDeg) < 3 &&
       Math.abs(f.acquisition.probe.rockDeg - refFrame.acquisition.probe.rockDeg) < 3;
-    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT, early-diastole for mitral/TDI, ED for TAPSE/TR)
+    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT/AV CW, early-diastole for mitral/TDI, ED for TAPSE/TR)
     const desiredPhase =
-      req.target === 'lvot'
+      req.target === 'lvot' || req.target === 'av-cw'
         ? pm.ejectionStart + 0.5 * (pm.ejectionEnd - pm.ejectionStart)
         : req.target === 'mitral-inflow' || req.target === 'tdi-septal' || req.target === 'tdi-lateral'
           ? 0.5 * (pm.mitralOpen + pm.eEnd)

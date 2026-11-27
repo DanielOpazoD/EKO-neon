@@ -4,6 +4,7 @@ import { findLvotGateFromPolar } from './autoLvotGate';
 
 export type DopplerTargetId =
   | 'lvot'
+  | 'av-cw'
   | 'mitral-inflow'
   | 'tdi-septal'
   | 'tdi-lateral'
@@ -181,7 +182,7 @@ export function findDopplerTargetFromPolar(
     };
   }
 
-  if (target === 'lvot') {
+  if (target === 'lvot' || target === 'av-cw') {
     const res = findLvotGateFromPolar(structure, spec, opts);
     if (!res.ok) {
       return {
@@ -191,14 +192,42 @@ export function findDopplerTargetFromPolar(
         message: res.message,
       };
     }
+    if (target === 'lvot') {
+      return {
+        ok: true,
+        target,
+        modality: 'pw',
+        rCm: res.rCm,
+        thetaRad: res.thetaRad,
+        recommendedBaselineShiftMps: -0.25,
+        summary: `Gate PW en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm proximal a VAo).`,
+      };
+    }
+    // target === 'av-cw': aim the CW ray squarely through the open aortic valve orifice along LVOT -> AorticValve
+    const lutAv = makeLookup(spec);
+    const gx = res.rCm * Math.sin(res.thetaRad);
+    const gy = res.rCm * Math.cos(res.thetaRad);
+    const avValve = collectCells(structure, lutAv, (s) => s === Structure.AorticValve).filter(
+      (c) => Math.hypot(c.x - gx, c.y - gy) <= 3.0,
+    );
+    const avRoot =
+      avValve.length >= 2
+        ? avValve
+        : collectCells(structure, lutAv, (s) => s === Structure.AorticRoot).filter(
+            (c) => Math.hypot(c.x - gx, c.y - gy) <= 3.2,
+          );
+    const avC = areaCentroid(avRoot);
+    const aimX = avC ? 0.65 * avC.x + 0.35 * gx : gx;
+    const aimY = avC ? 0.65 * avC.y + 0.35 * gy : gy;
+    const p = clampPolar(lutAv, aimX, aimY);
     return {
       ok: true,
       target,
-      modality: 'pw',
-      rCm: res.rCm,
-      thetaRad: res.thetaRad,
-      recommendedBaselineShiftMps: -0.25,
-      summary: `Gate PW en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm proximal a VAo).`,
+      modality: 'cw',
+      rCm: p.rCm,
+      thetaRad: p.thetaRad,
+      recommendedBaselineShiftMps: -1.5,
+      summary: `Cursor CW alineado con la válvula aórtica (${Math.round((p.thetaRad * 180) / Math.PI)}°) para VTI/Vmáx VAo.`,
     };
   }
 

@@ -376,6 +376,14 @@ export function DopplerTab() {
               <button
                 type="button"
                 className="btn-primary-soft"
+                onClick={() => void snapTarget('av-cw')}
+                data-tip={tip('Alinea el cursor CW a través de la válvula aórtica en A5C/A3C para VTI y Vmax VAo.')}
+              >
+                Cursor VAo
+              </button>
+              <button
+                type="button"
+                className="ghost"
                 onClick={() => void snapTarget('tr-cw')}
                 data-tip={tip('Alinea el cursor CW a través de la válvula tricúspide para Vmax IT.')}
               >

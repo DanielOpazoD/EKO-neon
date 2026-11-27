@@ -6,6 +6,8 @@ import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
 import { baseInput } from '@/simulator/core/baseInput';
 import type { SimInput } from '@/simulator/core/protocol';
 import { SimulatorCore } from '@/simulator/core/simulatorCore';
+import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
+import { spectralDefaultsFor } from '@/simulator/doppler/spectral/spectrum';
 import { canonicalControl, getViewTarget } from '@/simulator/windows/viewTargets';
 import type { DopplerTargetId } from './autoDopplerTarget';
 import { MEASUREMENT_SPECS } from './protocol';
@@ -23,7 +25,7 @@ function coreAtView(caseId: string, viewId: string) {
     display: { width: 480, height: 380 },
   };
   const core = new SimulatorCore(c, inp);
-  return { core, inp };
+  return { core, inp, truth: computeGroundTruth(c) };
 }
 
 function specById(id: string) {
@@ -150,9 +152,95 @@ describe('Pure-2D guided Doppler & M-mode auto-targeting', () => {
     }
   });
 
+  it('aligns AV CW in A5C across normal, moderate AS, and severe AS and extracts accurate AV VTI/Vmax', () => {
+    const avVtiSpec = specById('av-vti');
+    const avVmaxSpec = specById('av-vmax');
+    for (const caseId of [
+      'normal-excellent-window',
+      'aortic-stenosis-moderate',
+      'aortic-stenosis-severe',
+    ] as const) {
+      const { core, inp, truth } = coreAtView(caseId, 'a5c');
+      try {
+        for (let i = 0; i < 16; i++) core.step(0.05);
+        const res = core.request({ kind: 'autoDopplerTarget', target: 'av-cw' });
+        assert.equal(res?.kind, 'autoDopplerTarget');
+        assert.equal(
+          res.result.ok,
+          true,
+          `${caseId} A5C av-cw should succeed: ${res.result.ok ? '' : res.result.message}`,
+        );
+        if (!res.result.ok) continue;
+        assert.equal(res.result.modality, 'cw');
+
+        const cwDef = spectralDefaultsFor('cw');
+        const cwInp: SimInput = {
+          ...inp,
+          modality: 'cw',
+          cursorThetaRad: res.result.thetaRad,
+          gateDepthCm: res.result.rCm,
+          spectral: {
+            ...cwDef,
+            baselineShiftMps: res.result.recommendedBaselineShiftMps ?? -1.5,
+          },
+        };
+        core.setInput(cwInp);
+        let out = core.step(0.05);
+        for (let i = 0; i < 44; i++) out = core.step(0.05);
+        assert.ok(out);
+
+        core.setInput({ ...cwInp, frozen: true });
+        out = core.step(0.05);
+        assert.ok(out);
+
+        const trace = core.request({ kind: 'autoTraceBeat' });
+        assert.equal(trace?.kind, 'autoTraceBeat');
+        assert.equal(
+          trace.result.ok,
+          true,
+          `${caseId} CW autoTraceBeat should succeed: ${trace.result.ok ? '' : trace.result.message}`,
+        );
+        if (!trace.result.ok) continue;
+
+        const vmaxErr =
+          Math.abs(trace.result.vmaxMps - truth.aorticValve.vmaxMps) / truth.aorticValve.vmaxMps;
+        const vtiErr =
+          Math.abs(trace.result.vtiCm - truth.aorticValve.vtiCm) / truth.aorticValve.vtiCm;
+        assert.ok(
+          vmaxErr < 0.22,
+          `${caseId} CW AV Vmax ${trace.result.vmaxMps.toFixed(2)} m/s vs truth ${truth.aorticValve.vmaxMps.toFixed(2)} m/s`,
+        );
+        assert.ok(
+          vtiErr < 0.25,
+          `${caseId} CW AV VTI ${trace.result.vtiCm.toFixed(1)} cm vs truth ${truth.aorticValve.vtiCm.toFixed(1)} cm`,
+        );
+
+        for (const sp of [avVtiSpec, avVmaxSpec]) {
+          const tq = evaluateTechnique(sp, {
+            modality: 'cw',
+            viewId: out.view?.bestViewId ?? 'a5c',
+            viewScore: out.view?.score ?? 90,
+            phase: out.phase,
+            phaseMarks: out.acquisition?.phaseMarks ?? null,
+            gate: out.gate,
+            userAssisted: true,
+          });
+          assert.equal(
+            tq.findings.some((f) => f.level === 'invalid'),
+            false,
+            `${caseId} ${sp.id} invalid findings: ${tq.findings.map((f) => f.message).join('; ')}`,
+          );
+        }
+      } finally {
+        core.dispose();
+      }
+    }
+  });
+
   it('honestly rejects misaligned or anatomically absent views (PLAX and PSAX-PM)', () => {
     const allTargets: DopplerTargetId[] = [
       'lvot',
+      'av-cw',
       'mitral-inflow',
       'tdi-septal',
       'tdi-lateral',

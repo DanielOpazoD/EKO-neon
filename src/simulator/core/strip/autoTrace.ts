@@ -407,7 +407,7 @@ export function autoTraceBestSystolicBeat(
     return {
       ok: false,
       reason: 'incomplete-beat',
-      message: 'Espera ~1 s en PW para registrar al menos un latido sistólico completo en la tira.',
+      message: 'Espera ~1 s para registrar al menos un latido sistólico completo en la tira.',
     };
   }
 
@@ -469,6 +469,6 @@ export function autoTraceBestSystolicBeat(
   return {
     ok: false,
     reason: 'no-flow',
-    message: 'No se detectó un flujo sistólico claro en la tira; verifica que el gate esté dentro del TSVI.',
+    message: 'No se detectó un flujo sistólico claro en la tira; verifica la alineación del cursor o gate.',
   };
 }
