@@ -171,6 +171,31 @@ export function fractionalAreaChange(edAreaCm2: number, esAreaCm2: number): numb
   return ((edAreaCm2 - esAreaCm2) / edAreaCm2) * 100;
 }
 
+/** LV fractional shortening (%): (LVEDD − LVESD) / LVEDD × 100. */
+export function fractionalShorteningPct(lvEddCm: number, lvEsdCm: number): number {
+  assertPositive(lvEddCm, 'lvEddCm');
+  return ((lvEddCm - lvEsdCm) / lvEddCm) * 100;
+}
+
+/** Relative wall thickness (RWT / GPR, ASE/EACVI 2015): (2 × LVPWd) / LVEDD (normal ≤ 0.42). */
+export function relativeWallThickness(lvEddCm: number, lvpwdCm: number): number {
+  assertPositive(lvEddCm, 'lvEddCm');
+  assertPositive(lvpwdCm, 'lvpwdCm');
+  return (2 * lvpwdCm) / lvEddCm;
+}
+
+/**
+ * LV mass (g) via the ASE/EACVI 2015 linear cube (Devereux) formula:
+ * Mass = 0.8 × 1.04 × ((LVEDD + IVSd + LVPWd)³ − LVEDD³) + 0.6.
+ */
+export function lvMassDevereuxG(lvEddCm: number, ivsdCm: number, lvpwdCm: number): number {
+  assertPositive(lvEddCm, 'lvEddCm');
+  assertPositive(ivsdCm, 'ivsdCm');
+  assertPositive(lvpwdCm, 'lvpwdCm');
+  const outer = lvEddCm + ivsdCm + lvpwdCm;
+  return 0.8 * 1.04 * (outer * outer * outer - lvEddCm * lvEddCm * lvEddCm) + 0.6;
+}
+
 /**
  * 2D single-plane RV volume estimate (mL) from apical 4C / RV-focused endocardial area (cm²),
  * accounting for the crescentic out-of-plane geometry of the right ventricle (V ≈ 1.60 · A^(3/2)).

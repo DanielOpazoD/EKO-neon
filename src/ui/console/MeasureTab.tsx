@@ -19,7 +19,9 @@ import { captureStepPrompt, minPointsToFinish } from '../display/measurementPrev
 import {
   runAutoChamberVolume,
   runAutoDopplerTarget,
+  runAutoLaVolume,
   runAutoLvotGate,
+  runAutoPlax,
   runAutoSpectralVti,
   runAutoStripMeasure,
 } from '../display/measurementTools';
@@ -444,9 +446,9 @@ export function MeasureTab() {
           )}
 
           <Section
-            title="Volumen y FE automáticos"
+            title="Mediciones 2D automáticas"
             tip={tip(
-              'Traza automáticamente el endocardio en TD y TS sobre el cine 2D actual (A4C y A2C para Simpson biplano del VI · enfocada en VD o A4C para VD).',
+              'Dimensiones lineales en PLAX (TD/Mesosístole/TS), Simpson biplano del VI, volumen biplano de AI (LAVI) y VD 2D directamente desde la imagen 2D del cine actual.',
             )}
           >
             <AutoEfPanel
@@ -876,7 +878,7 @@ function MeasureList({
   );
 }
 
-/** Guided one-click automatic LV & RV endocardial tracing, biplane progression, and TD/TS inspection. */
+/** Guided one-click automatic 2D measurements: PLAX linear dimensions, LV Simpson, LA volume (LAVI), and RV 2D. */
 function AutoEfPanel({
   currentViewId,
   displayedFrameId,
@@ -895,6 +897,7 @@ function AutoEfPanel({
       measurements: st.measurements,
       modality: st.modality,
       frozen: st.frozen,
+      truth: st.truth,
       closed: examClosed(st),
       setModality: st.setModality,
       startPresetView: st.startPresetView,
@@ -902,13 +905,73 @@ function AutoEfPanel({
       jumpCinePhase: st.jumpCinePhase,
     })),
   );
-  const [busy, setBusy] = useState<'lv' | 'rv' | null>(null);
+  const [busy, setBusy] = useState<'plax' | 'lv' | 'la' | 'rv' | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const summary = useMemo(
     () => summarizeAutoEf(s.measurements, currentViewId, s.modality, showViewFeedback),
     [s.measurements, currentViewId, s.modality, showViewFeedback],
   );
+  const bsaM2 = s.truth?.bsaM2 && s.truth.bsaM2 > 0 ? s.truth.bsaM2 : null;
+  const lvmi = summary.plax.massG !== null && bsaM2 ? summary.plax.massG / bsaM2 : null;
+  const lavi = summary.la.volumeMl !== null && bsaM2 ? summary.la.volumeMl / bsaM2 : null;
+
+  const runPlax = async () => {
+    if (busy || s.closed) return;
+    setBusy('plax');
+    setNotice(null);
+    try {
+      const res = await runAutoPlax();
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        const byId = new Map(res.calipers.map((c) => [c.measurementId, c.valueCm]));
+        const parts: string[] = [];
+        if (byId.has('lv-edd')) parts.push(`DTDVI ${byId.get('lv-edd')!.toFixed(1)} cm`);
+        if (byId.has('lvot-diameter')) parts.push(`TSVI ${byId.get('lvot-diameter')!.toFixed(2)} cm`);
+        if (byId.has('la-ap')) parts.push(`AI ${byId.get('la-ap')!.toFixed(1)} cm`);
+        setNotice({
+          kind: 'ok',
+          text: `PLAX: ${res.calipers.length} dimensiones trazadas${parts.length ? ` (${parts.join(' · ')})` : ''}.`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al calcular dimensiones PLAX.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runLa = async () => {
+    if (busy || s.closed) return;
+    setBusy('la');
+    setNotice(null);
+    try {
+      const res = await runAutoLaVolume();
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        const idxText = bsaM2 ? ` · LAVI ${(res.volumeMl / bsaM2).toFixed(0)} mL/m²` : '';
+        const depthWarn = res.cutByDepth
+          ? ' ⚠ Fondo de AI recortado por profundidad: aumenta Profundidad.'
+          : '';
+        setNotice({
+          kind: 'ok',
+          text: `AI trazada en TS (${res.volumeMl.toFixed(0)} mL${idxText}).${depthWarn}`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al calcular el volumen de la AI.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const run = async (chamber: 'lv' | 'rv') => {
     if (busy || s.closed) return;
@@ -950,10 +1013,11 @@ function AutoEfPanel({
     s.startPresetView(viewId);
   };
 
-  const showApicalShortcuts =
+  const showQuickViewShortcuts =
     presetsEnabled &&
     showViewFeedback &&
     summary.is2dReady &&
+    !summary.plax.viewReady &&
     !summary.lv.viewReady &&
     !summary.rv.viewReady;
   const showBiplanePrompt =
@@ -970,6 +1034,21 @@ function AutoEfPanel({
     !summary.rv.hasResult &&
     !summary.rv.viewReady &&
     summary.lv.hasResult;
+  const showPlaxPrompt =
+    presetsEnabled &&
+    showViewFeedback &&
+    summary.is2dReady &&
+    !summary.plax.viewReady &&
+    !summary.plax.hasResult;
+  const plaxEdInCine =
+    displayedFrameId === summary.plax.edFrameId ||
+    isTimeInCineWindow(summary.plax.edTimeS, cineWindow);
+  const plaxMidInCine =
+    displayedFrameId === summary.plax.midSysFrameId ||
+    isTimeInCineWindow(summary.plax.midSysTimeS, cineWindow);
+  const plaxEsInCine =
+    displayedFrameId === summary.plax.esFrameId ||
+    isTimeInCineWindow(summary.plax.esTimeS, cineWindow);
   const lvA4cEdInCine =
     summary.lv.a4c !== null &&
     (displayedFrameId === summary.lv.a4c.edFrameId ||
@@ -990,13 +1069,276 @@ function AutoEfPanel({
     displayedFrameId === summary.lv.edFrameId || isTimeInCineWindow(summary.lv.edTimeS, cineWindow);
   const lvEsInCine =
     displayedFrameId === summary.lv.esFrameId || isTimeInCineWindow(summary.lv.esTimeS, cineWindow);
+  const laA4cInCine =
+    summary.la.a4c !== null &&
+    (displayedFrameId === summary.la.a4c.frameId ||
+      isTimeInCineWindow(summary.la.a4c.timeS, cineWindow));
+  const laA2cInCine =
+    summary.la.a2c !== null &&
+    (displayedFrameId === summary.la.a2c.frameId ||
+      isTimeInCineWindow(summary.la.a2c.timeS, cineWindow));
+  const laEsInCine =
+    displayedFrameId === summary.la.esFrameId || isTimeInCineWindow(summary.la.esTimeS, cineWindow);
   const rvEdInCine =
     displayedFrameId === summary.rv.edFrameId || isTimeInCineWindow(summary.rv.edTimeS, cineWindow);
   const rvEsInCine =
     displayedFrameId === summary.rv.esFrameId || isTimeInCineWindow(summary.rv.esTimeS, cineWindow);
 
+  const plaxCard = (
+    <div className="auto-ef-card" data-auto-ef="plax">
+      <div className="auto-ef-row-head">
+        <div className="auto-ef-chamber">
+          <span className="auto-ef-title">PLAX · Dimensiones 2D</span>
+          <span className="plane-pills" aria-label="Vista PLAX">
+            <span
+              className={`plane-pill${summary.plax.hasResult ? ' done' : summary.plax.viewReady ? ' here' : ''}`}
+            >
+              {summary.plax.hasResult ? '✓ PLAX' : 'PLAX'}
+            </span>
+          </span>
+        </div>
+        <div className="auto-ef-presets">
+          {showPlaxPrompt && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={s.closed}
+              onClick={() => jumpPreset('plax')}
+              data-tip="Mueve la sonda a la vista paraesternal eje largo (PLAX)"
+            >
+              Ir a PLAX
+            </button>
+          )}
+          <button
+            type="button"
+            className={summary.plax.viewReady ? 'btn-primary-soft' : ''}
+            onClick={() => void runPlax()}
+            disabled={s.closed || busy !== null}
+            data-tip="Mide SIVd, DTDVI, PPd y raíz Ao en TD, TSVI ⌀ en mesosístole y DTSVI + AI en TS desde la imagen 2D"
+          >
+            {busy === 'plax' ? 'Midiendo…' : 'Auto-PLAX'}
+          </button>
+        </div>
+      </div>
+
+      {summary.plax.hasResult && (
+        <>
+          <div className="auto-ef-result-line">
+            <span className="auto-ef-primary">
+              {summary.plax.lvEddCm !== null
+                ? `DTDVI ${summary.plax.lvEddCm.toFixed(1)} cm`
+                : summary.plax.lvotCm !== null
+                  ? `TSVI ${summary.plax.lvotCm.toFixed(2)} cm`
+                  : 'PLAX medido'}
+              {summary.plax.fsPct !== null ? ` · FA ${summary.plax.fsPct.toFixed(0)} %` : ''}
+            </span>
+            <span className="auto-ef-metrics">
+              {lvmi !== null ? (
+                <span>IMVI {lvmi.toFixed(0)} g/m²</span>
+              ) : summary.plax.massG !== null ? (
+                <span>Masa {summary.plax.massG.toFixed(0)} g</span>
+              ) : null}
+              {summary.plax.rwt !== null && <span>GPR {summary.plax.rwt.toFixed(2)}</span>}
+            </span>
+          </div>
+          <div className="auto-ef-metrics">
+            {summary.plax.ivsdCm !== null && <span>SIVd {summary.plax.ivsdCm.toFixed(2)}</span>}
+            {summary.plax.lvpwdCm !== null && <span>PPd {summary.plax.lvpwdCm.toFixed(2)}</span>}
+            {summary.plax.lvEsdCm !== null && <span>DTSVI {summary.plax.lvEsdCm.toFixed(1)}</span>}
+            {summary.plax.lvotCm !== null && <span>TSVI {summary.plax.lvotCm.toFixed(2)}</span>}
+            {summary.plax.aoRootCm !== null && <span>Ao {summary.plax.aoRootCm.toFixed(1)}</span>}
+            {summary.plax.laApCm !== null && <span>AI {summary.plax.laApCm.toFixed(1)} cm</span>}
+          </div>
+          {(summary.plax.edFrameId !== null ||
+            summary.plax.midSysFrameId !== null ||
+            summary.plax.esFrameId !== null) && (
+            <div className="auto-ef-jump">
+              {summary.plax.edFrameId !== null && (
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.plax.edFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !plaxEdInCine}
+                  data-tip={
+                    plaxEdInCine
+                      ? 'Ver y ajustar SIVd, DTDVI, PPd y raíz Ao en TD'
+                      : 'El cuadro TD salió del bucle de cine actual'
+                  }
+                  onClick={() => inspectFrame('ed', summary.plax.edFrameId!)}
+                >
+                  Ver TD
+                </button>
+              )}
+              {summary.plax.midSysFrameId !== null && (
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.plax.midSysFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !plaxMidInCine}
+                  data-tip={
+                    plaxMidInCine
+                      ? 'Ver y ajustar el diámetro del TSVI en mesosístole'
+                      : 'El cuadro mesosistólico salió del bucle de cine actual'
+                  }
+                  onClick={() => inspectFrame('ed', summary.plax.midSysFrameId!)}
+                >
+                  Ver TSVI
+                </button>
+              )}
+              {summary.plax.esFrameId !== null && (
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.plax.esFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !plaxEsInCine}
+                  data-tip={
+                    plaxEsInCine
+                      ? 'Ver y ajustar DTSVI y diámetro AP de AI en TS'
+                      : 'El cuadro TS salió del bucle de cine actual'
+                  }
+                  onClick={() => inspectFrame('es', summary.plax.esFrameId!)}
+                >
+                  Ver TS
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  const laCard = (
+    <div className="auto-ef-card" data-auto-ef="la">
+      <div className="auto-ef-row-head">
+        <div className="auto-ef-chamber">
+          <span className="auto-ef-title">
+            AI · {summary.la.biplane ? 'Biplano' : 'Volumen'}
+          </span>
+          <span className="plane-pills" aria-label="Planos capturados de la AI">
+            <span
+              className={`plane-pill${summary.la.a4cDone ? ' done' : currentViewId === 'a4c' ? ' here' : ''}`}
+            >
+              {summary.la.a4cDone ? '✓ A4C' : 'A4C'}
+            </span>
+            <span
+              className={`plane-pill${summary.la.a2cDone ? ' done' : currentViewId === 'a2c' ? ' here' : ''}`}
+            >
+              {summary.la.a2cDone ? '✓ A2C' : 'A2C'}
+            </span>
+          </span>
+        </div>
+        <button
+          type="button"
+          className={summary.la.viewReady ? 'btn-primary-soft' : ''}
+          onClick={() => void runLa()}
+          disabled={s.closed || busy !== null}
+          data-tip="Traza el endocardio de la AI en TS (excluyendo orejuela y venas pulmonares) sobre A4C o A2C; repite en ambos para LAVI biplano"
+        >
+          {busy === 'la' ? 'Midiendo…' : 'Auto-Vol AI'}
+        </button>
+      </div>
+
+      {summary.la.hasResult && summary.la.volumeMl !== null && (
+        <>
+          <div className="auto-ef-result-line">
+            <span className="auto-ef-primary">
+              {lavi !== null
+                ? `LAVI ${lavi.toFixed(0)} mL/m²`
+                : `Vol AI ${summary.la.volumeMl.toFixed(0)} mL`}
+            </span>
+            <span className="auto-ef-metrics">
+              <span>Vol {summary.la.volumeMl.toFixed(0)} mL</span>
+              <span>{summary.la.biplane ? 'Biplano' : 'Monoplano'}</span>
+            </span>
+          </div>
+
+          {(summary.la.a4c || summary.la.a2c) && (
+            <div className="biplane-breakdown" aria-label="Desglose volumen AI A4C y A2C">
+              {([
+                {
+                  id: 'a4c' as const,
+                  label: 'A4C',
+                  plane: summary.la.a4c,
+                  inCine: laA4cInCine,
+                },
+                {
+                  id: 'a2c' as const,
+                  label: 'A2C',
+                  plane: summary.la.a2c,
+                  inCine: laA2cInCine,
+                },
+              ]).map(({ id, label, plane, inCine }) => (
+                <div key={id} className={`biplane-row${plane ? ' done' : ''}`}>
+                  <span className="bp-tag">{plane ? `✓ ${label}` : `○ ${label}`}</span>
+                  {plane ? (
+                    <>
+                      <span className="bp-vals">
+                        <b>{plane.volumeMl.toFixed(0)} mL</b>
+                        {plane.areaCm2 !== null ? ` · ${plane.areaCm2.toFixed(1)} cm²` : ''}
+                        {plane.longAxisCm !== null ? ` · L ${plane.longAxisCm.toFixed(1)}` : ''}
+                      </span>
+                      <span className="bp-jumps">
+                        <button
+                          type="button"
+                          className={`ghost${displayedFrameId === plane.frameId ? ' active' : ''}`}
+                          disabled={s.closed || !inCine}
+                          data-tip={inCine ? `Ver AI ${label} en TS` : 'Fuera del cine actual'}
+                          onClick={() => inspectFrame('es', plane.frameId)}
+                        >
+                          TS
+                        </button>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="bp-pending">Pendiente para biplano</span>
+                      {presetsEnabled && showViewFeedback && !s.closed && (
+                        <button
+                          type="button"
+                          className="ghost bp-go"
+                          onClick={() => jumpPreset(id)}
+                        >
+                          Ir a {label}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              ))}
+              {summary.la.lengthMismatch && (
+                <div className="biplane-warn" role="status">
+                  ⚠ Longitud AI dispar (&gt;0,5 cm) entre A4C y A2C (criterio ASE).
+                </div>
+              )}
+            </div>
+          )}
+
+          {!summary.la.a4c && !summary.la.a2c && summary.la.esFrameId !== null && (
+            <div className="auto-ef-jump">
+              <button
+                type="button"
+                className={`ghost${displayedFrameId === summary.la.esFrameId ? ' active' : ''}`}
+                disabled={s.closed || !laEsInCine}
+                data-tip={
+                  laEsInCine
+                    ? 'Inspeccionar contorno de la AI en TS'
+                    : 'El cuadro TS salió del bucle de cine actual'
+                }
+                onClick={() => inspectFrame('es', summary.la.esFrameId!)}
+              >
+                Ver TS
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  const onPlaxFirst = showViewFeedback && currentViewId === 'plax';
+
   return (
     <div className="auto-ef">
+      {onPlaxFirst && plaxCard}
+
       {/* LV chamber block */}
       <div className="auto-ef-card" data-auto-ef="lv">
         <div className="auto-ef-row-head">
@@ -1157,6 +1499,9 @@ function AutoEfPanel({
           )}
       </div>
 
+      {/* LA chamber block */}
+      {laCard}
+
       {/* RV chamber block */}
       <div className="auto-ef-card" data-auto-ef="rv">
         <div className="auto-ef-row-head">
@@ -1242,19 +1587,24 @@ function AutoEfPanel({
           )}
       </div>
 
-      {/* Contextual one-click helpers when not yet in 2D or apical window */}
+      {!onPlaxFirst && plaxCard}
+
+      {/* Contextual one-click helpers when not yet in 2D or target window */}
       {!summary.is2dReady && !s.closed && (
         <div className="auto-ef-helper">
-          <span>Auto-FE requiere imagen 2D</span>
+          <span>Las mediciones 2D requieren imagen 2D</span>
           <button type="button" className="ghost" onClick={() => s.setModality('2d')}>
             Volver a 2D
           </button>
         </div>
       )}
-      {showApicalShortcuts && !s.closed && (
+      {showQuickViewShortcuts && !s.closed && (
         <div className="auto-ef-helper">
-          <span>Vista apical:</span>
+          <span>Vista rápida:</span>
           <div className="auto-ef-presets">
+            <button type="button" className="ghost" onClick={() => jumpPreset('plax')}>
+              PLAX
+            </button>
             <button type="button" className="ghost" onClick={() => jumpPreset('a4c')}>
               A4C
             </button>

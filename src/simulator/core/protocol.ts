@@ -10,6 +10,8 @@ import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import type { CaseDefinition } from '@/cases/schema';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type { AutoChamberVolumeResult, ChamberId } from '@/simulator/measurements/autoVolume';
+import type { AutoLaVolumeResult } from '@/simulator/measurements/autoLaVolume';
+import type { AutoPlaxResult } from '@/simulator/measurements/autoPlax';
 import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
 import type {
   AutoDopplerTargetResult,
@@ -274,6 +276,10 @@ export type SimRequest =
   | { kind: 'cinePhaseJump'; target: 'ed' | 'es'; frameId?: number }
   /** Automatic 2D endocardial contour tracing, EDV/ESV volume, EF, and RV FAC over the acquired cine loop. */
   | { kind: 'autoChamberVolume'; chamber: ChamberId }
+  /** Automatic 2D end-systolic LA contour & Simpson volume (ASE/EACVI) over the acquired apical cine loop. */
+  | { kind: 'autoLaVolume' }
+  /** Automatic 2D PLAX linear dimensions across ED, mid-systole (LVOT), and ES over the acquired cine loop. */
+  | { kind: 'autoPlax' }
   /** Locate the optimal ASE LVOT PW gate position from the rendered 2D polar structure map. */
   | { kind: 'autoLvotGate' }
   /** Locate a clinical Doppler/M-mode gate or cursor target from the rendered 2D polar structure map. */
@@ -302,6 +308,8 @@ export type SimResponse =
   | { kind: 'autoOpt'; gainDb: number; tgcDb: number[] }
   | { kind: 'cinePhaseJump'; offset: number; phase: number }
   | { kind: 'autoChamberVolume'; result: AutoChamberVolumeResult }
+  | { kind: 'autoLaVolume'; result: AutoLaVolumeResult }
+  | { kind: 'autoPlax'; result: AutoPlaxResult }
   | { kind: 'autoLvotGate'; result: AutoLvotGateResult }
   | { kind: 'autoDopplerTarget'; result: AutoDopplerTargetResult }
   | { kind: 'autoTraceBeat'; result: AutoTraceBeatResult }
