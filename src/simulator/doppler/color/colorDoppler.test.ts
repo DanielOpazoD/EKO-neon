@@ -1959,3 +1959,43 @@ test('pulmonary veins exhibit normal antegrade S/D, moderate-MR systolic bluntin
     `Expected systolic retrograde reversal in left superior PV of mvp-primary-mr, got v=${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)}, dot=${dotAntegrade.toFixed(2)}`,
   );
 });
+
+test('competent aortic arch & descending aorta sustain antegrade Windkessel diastolic runoff that decays across diastole', () => {
+  const c = loadCaseById('normal-excellent');
+  const models = buildCaseModels(c, REST_PATIENT);
+  const tm = models.tables.timings;
+  const rr = models.tables.rrS;
+  const phEarlyDia = ((tm.ejectionEndS + 0.09) % rr) / rr;
+  const phLateDia = ((tm.ejectionEndS + 0.42) % rr) / rr;
+
+  const hpEarly = computeHeartPose(models.heart, cycleStateAt(models.tables, phEarlyDia));
+  const hpLate = computeHeartPose(models.heart, cycleStateAt(models.tables, phLateDia));
+  const netEarly = buildAorticNetwork(models.heart, models.thorax, models.tables, hpEarly, phEarlyDia);
+  const netLate = buildAorticNetwork(models.heart, models.thorax, models.tables, hpLate, phLateDia);
+
+  const qDescEarly = aorticSectionFlow(netEarly, 51, 0.5);
+  const qDescLate = aorticSectionFlow(netLate, 51, 0.5);
+  const qCarotidEarly = aorticSectionFlow(netEarly, 49, 0.5);
+  const descR = netEarly.edges[51]![0].radiusCm;
+  const vDescEarlyCenter = (qDescEarly / (Math.PI * descR * descR * 100)) * aorticVelocityProfile(0);
+
+  assert.ok(
+    vDescEarlyCenter > 0.12 && vDescEarlyCenter < 0.35,
+    `Expected physiological antegrade Windkessel runoff in early diastole (0.12–0.35 m/s), got ${vDescEarlyCenter.toFixed(3)} m/s`,
+  );
+  assert.ok(
+    qDescEarly > qDescLate && qDescLate > 10,
+    `Windkessel diastolic runoff should decay smoothly across diastole (${qDescEarly.toFixed(1)} -> ${qDescLate.toFixed(1)} mL/s)`,
+  );
+  assert.ok(
+    qCarotidEarly > 2,
+    `Supra-aortic carotid branch should sustain antegrade diastolic flow, got ${qCarotidEarly.toFixed(2)} mL/s`,
+  );
+  // Exact continuity at every phase
+  const totalStorage = netEarly.storageMlps.reduce((a, b) => a + b, 0);
+  const totalOutlets = netEarly.outletsMlps.reduce((a, b) => a + b, 0);
+  assert.ok(
+    Math.abs(netEarly.inflowMlps - totalStorage - totalOutlets) < 1e-6,
+    'Aortic network must strictly conserve mass during Windkessel diastolic runoff',
+  );
+});
