@@ -64,9 +64,21 @@ describe('the thorax tissue no organ fills is named by region', () => {
     }
   });
 
-  it('the short axis at the valve shows pericardial fat in front of the heart and both parts of the mediastinum', () => {
-    const c = sectorCounts('normal-excellent-window', 'psax-av');
-    for (const s of REGIONS) assert.ok((c.get(s) ?? 0) > 20, `structure ${s}: ${c.get(s) ?? 0} samples`);
+  it('the short axis at the valve shows pericardial fat and posterior mediastinum, and the suprasternal arch shows the superior mediastinum', () => {
+    const psax = sectorCounts('normal-excellent-window', 'psax-av');
+    assert.ok(
+      (psax.get(Structure.PericardialFat) ?? 0) > 20,
+      `PericardialFat: ${psax.get(Structure.PericardialFat) ?? 0} samples`,
+    );
+    assert.ok(
+      (psax.get(Structure.PosteriorMediastinum) ?? 0) > 20,
+      `PosteriorMediastinum: ${psax.get(Structure.PosteriorMediastinum) ?? 0} samples`,
+    );
+    const ssn = sectorCounts('normal-excellent-window', 'suprasternal-arch');
+    assert.ok(
+      (ssn.get(Structure.SuperiorMediastinum) ?? 0) > 200,
+      `SuperiorMediastinum: ${ssn.get(Structure.SuperiorMediastinum) ?? 0} samples`,
+    );
   });
 
   it('the subcostal inferior vena cava view keeps the posterior mediastinum around the descending aorta', () => {

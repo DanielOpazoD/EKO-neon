@@ -14,10 +14,12 @@ import {
 } from './aorticValve';
 import { buildCaseModels, REST_PATIENT } from './caseModels';
 import { classifyHeart } from './classify';
-import { ROOT_EXCURSION } from './heartFrame';
+import { heartDirToTorso, ROOT_EXCURSION } from './heartFrame';
 import type { HeartModel } from './heartModel';
 import { computeHeartPose, type HeartPose } from './heartPose';
 import { makeSample, Tissue } from './tissue';
+import { canonicalBeam, getViewTarget } from '@/simulator/windows/viewTargets';
+import { cross, dot, normalize, v3 } from '@/core/vec3';
 
 /**
  * One aortic valve for the 2D and the Doppler: at the peak of ejection the cusps open as far as the case's effective
@@ -193,5 +195,58 @@ test('short-axis planimetry of the drawn stenotic valves grades like the continu
     const goa = aorticOrificeAreaCm2(pose.valves.aortic, pose.valves.root);
     assert.ok(Math.abs(projected / goa - 1) < 0.02, `${where}: solved for ${goa.toFixed(3)} cm²`);
     assert.ok(slice >= projected && slice <= projected * 1.08, where);
+  }
+});
+
+test('canonical PSAX-AV stays perpendicular to the aortic root so stenotic planimetry grades like EOA', () => {
+  const view = getViewTarget('psax-av')!;
+  const s = makeSample();
+  for (const id of ['aortic-stenosis-severe', 'aortic-stenosis-moderate', 'artifact-challenge'] as const) {
+    const c = loadCaseById(id);
+    const { heart, thorax } = buildCaseModels(c, REST_PATIENT);
+    const { pose, eoa } = peakOf(id);
+    const A = anchorsCached(heart);
+    const bf = canonicalBeam(view, heart, thorax);
+    const avAxisT = heartDirToTorso(heart.frame, A.avAxis);
+    const obliqDeg = (Math.acos(Math.min(1, Math.abs(dot(bf.normal, avAxisT)))) * 180) / Math.PI;
+    // Before removing the 12° inflow tilt, canonical PSAX-AV was 12° oblique and inflated severe AS to 1.17 cm².
+    assert.ok(obliqDeg < 3, `${id}: canonical PSAX-AV obliquity ${obliqDeg.toFixed(1)}° (expected < 3°)`);
+    const nH = normalize(
+      v3(
+        dot(bf.normal, heart.frame.ex),
+        dot(bf.normal, heart.frame.ey),
+        dot(bf.normal, heart.frame.ez),
+      ),
+    );
+    const uH = normalize(cross(Math.abs(nH.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0), nH));
+    const vH = cross(nH, uH);
+    const cx = A.avCenter.x + pose.swingX,
+      cy = A.avCenter.y,
+      cz = A.avCenter.z + pose.zAnn * ROOT_EXCURSION;
+    const nPhi = 96,
+      dPhi = (2 * Math.PI) / nPhi;
+    let minArea = Infinity;
+    for (let t = 0.2; t <= pose.valves.aortic.hComm + 0.1; t += 0.025) {
+      let area = 0;
+      for (let i = 0; i < nPhi; i++) {
+        const phi = (i + 0.5) * dPhi;
+        const cphi = Math.cos(phi),
+          sphi = Math.sin(phi);
+        let r = 0;
+        for (; r < 2.0; r += 0.01) {
+          const px = cx + A.avAxis.x * t + (uH.x * cphi + vH.x * sphi) * r;
+          const py = cy + A.avAxis.y * t + (uH.y * cphi + vH.y * sphi) * r;
+          const pz = cz + A.avAxis.z * t + (uH.z * cphi + vH.z * sphi) * r;
+          if (classifyHeart(heart, pose, px, py, pz, s) && s.tissue === Tissue.Valve) break;
+        }
+        area += 0.5 * r * r * dPhi;
+      }
+      if (area < minArea) minArea = area;
+    }
+    assert.equal(
+      grade(minArea),
+      grade(eoa),
+      `${id}: canonical PSAX-AV planimetry ${minArea.toFixed(3)} cm² graded ${grade(minArea)}, expected ${grade(eoa)} (EOA ${eoa.toFixed(2)})`,
+    );
   }
 });
