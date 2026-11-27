@@ -196,3 +196,24 @@ export function IconTorso({ size }: { size?: number }) {
     </I>
   );
 }
+
+/** Camera: store a still capture into the study gallery. */
+export function IconCamera({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M4 8.5A2 2 0 0 1 6 6.5h2l1.4-2h5.2l1.4 2H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-9Z" />
+      <circle cx="12" cy="13" r="3.2" />
+    </I>
+  );
+}
+
+/** Printer: print or export clean clinical PDF report. */
+export function IconPrinter({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M7 9V4h10v5" />
+      <rect x="4" y="9" width="16" height="8" rx="2" />
+      <path d="M7 14h10v6H7v-6Z" />
+    </I>
+  );
+}

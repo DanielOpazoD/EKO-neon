@@ -7,8 +7,10 @@ import { formatClinical } from '@/clinical/reference-values';
 import { buildEducationalReport } from '@/education/report';
 import { scoreAcquisition } from '@/education/scoring/scoring';
 import { loadCaseById } from '@/cases';
-import { EXAM_CASE_NAME, showsCaseIdentity } from '@/app/modePolicy';
+import { EXAM_CASE_NAME, examClosed, showsCaseIdentity } from '@/app/modePolicy';
+import { formatCaptureCaption } from '@/app/studyCapture';
 import { useState } from 'react';
+import { IconPrinter } from './icons';
 import {
   expectedFindings,
   FINDINGS,
@@ -48,7 +50,9 @@ function FinishExam({ onFinish }: { onFinish: () => void }) {
 export function ReportScreen() {
   const s = useSimStore(
     useShallow((st) => ({
+      captures: st.captures,
       caseId: st.caseId,
+      closed: examClosed(st),
       examFinished: st.examFinished,
       examResult: st.examResult,
       finishExam: st.finishExam,
@@ -58,11 +62,13 @@ export function ReportScreen() {
       measurements: st.measurements,
       mode: st.mode,
       redoImpression: st.redoImpression,
+      removeCapture: st.removeCapture,
       toggleFinding: st.toggleFinding,
       truth: st.truth,
       viewProgress: st.viewProgress,
     })),
   );
+  const [includeEvalInPrint, setIncludeEvalInPrint] = useState(false);
   // one predicate for everything the exam keeps back until it is finished: the case, the truth and the scores
   const revealed = showsCaseIdentity(s.mode, s.examFinished);
   const report = buildEducationalReport(s.measurements, s.truth, !revealed);
@@ -93,6 +99,25 @@ export function ReportScreen() {
         Simulador educacional con pacientes sintéticos. No utilizar para diagnóstico ni toma de
         decisiones clínicas reales.
       </p>
+      <div className="cr-toolbar no-print" role="toolbar" aria-label="Exportar informe">
+        <button
+          type="button"
+          className="btn-primary-soft cr-print-btn"
+          onClick={() => window.print()}
+          data-tip="Abrir diálogo de impresión del navegador para guardar PDF limpio"
+        >
+          <IconPrinter size={14} />
+          Imprimir / Exportar PDF
+        </button>
+        <label className="cr-print-toggle">
+          <input
+            type="checkbox"
+            checked={includeEvalInPrint}
+            onChange={(e) => setIncludeEvalInPrint(e.target.checked)}
+          />
+          Incluir evaluación docente al imprimir
+        </label>
+      </div>
       {s.mode === 'exam' && !s.examFinished && <FinishExam onFinish={() => s.finishExam()} />}
       {/* the report as an echocardiography lab writes it: identification, technique and quality, measurements against
           their reference ranges, derived values and a conclusion; the teaching evaluation follows it (design review of
@@ -248,6 +273,36 @@ export function ReportScreen() {
             </tbody>
           </table>
         </section>
+        {s.captures.length > 0 && (
+          <section className="cr-section cr-captures" aria-label="Imágenes adquiridas">
+            <h3>Imágenes adquiridas ({s.captures.length})</h3>
+            <div className="cr-capture-grid">
+              {s.captures.map((cap, idx) => (
+                <figure key={cap.id} className="cr-capture-fig">
+                  <img
+                    src={cap.dataUrl}
+                    alt={`Imagen ${idx + 1}: ${formatCaptureCaption(cap, revealed)}`}
+                  />
+                  <figcaption>
+                    <span>
+                      #{idx + 1} · {formatCaptureCaption(cap, revealed)}
+                    </span>
+                    {!s.closed && (
+                      <button
+                        type="button"
+                        className="capture-del no-print"
+                        aria-label={`Eliminar imagen ${idx + 1}`}
+                        onClick={() => s.removeCapture(cap.id)}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
+          </section>
+        )}
         <section className="cr-section cr-conclusion">
           <h3>Conclusión</h3>
           {s.impressionSelection.length ? (
@@ -263,7 +318,10 @@ export function ReportScreen() {
           )}
         </section>
       </article>
-      <section className="cr-eval" aria-label="Evaluación docente">
+      <section
+        className={`cr-eval${includeEvalInPrint ? '' : ' hide-in-print'}`}
+        aria-label="Evaluación docente"
+      >
         <h2>Evaluación docente</h2>
         <h3>Vistas requeridas</h3>
         {/* the views a case requires name its diagnosis (aortic valve short axis and A5C for a stenosis, the RV-focused view

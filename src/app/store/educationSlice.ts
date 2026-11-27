@@ -13,6 +13,9 @@ import { examClosed, modePolicy, screenInMode } from '../modePolicy';
 import { OPENING_VIEW_LOST_BELOW, appPlacedPose, drawExamCase, freshSession } from './helpers';
 import type { EducationSlice, SimSliceCreator } from './types';
 
+/** Upper bound on stored JPEG thumbnails per study so session memory stays bounded. */
+export const MAX_STUDY_CAPTURES = 18;
+
 export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) => ({
   caseId: 'normal-excellent-window',
   sessionEpoch: 0,
@@ -20,6 +23,7 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
   targetViewId: null,
   truth: null,
   measurements: [],
+  captures: [],
   activeTool: 'none',
   activeMeasurementId: null,
   progress: loadProgress(typeof localStorage !== 'undefined' ? localStorage : null),
@@ -116,6 +120,17 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       examClosed(s) ? s : { measurements: s.measurements.filter((m) => m.id !== id) },
     ),
   clearMeasurements: () => set((s) => (examClosed(s) ? s : { measurements: [] })),
+  addCapture: (c) =>
+    set((s) => {
+      if (examClosed(s)) return s;
+      const next = [...s.captures, c];
+      return {
+        captures: next.length > MAX_STUDY_CAPTURES ? next.slice(next.length - MAX_STUDY_CAPTURES) : next,
+      };
+    }),
+  removeCapture: (id) =>
+    set((s) => (examClosed(s) ? s : { captures: s.captures.filter((c) => c.id !== id) })),
+  clearCaptures: () => set((s) => (examClosed(s) ? s : { captures: [] })),
   setActiveTool: (t) =>
     set((s) =>
       t !== 'none' && examClosed(s)
@@ -249,6 +264,7 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       examFinished: false,
       examResult: null,
       measurements: [],
+      captures: [],
     }),
   loadCase: (id) =>
     set((s) => {

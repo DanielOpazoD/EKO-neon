@@ -21,6 +21,7 @@ export type {
   ProductMode,
   ReviewSlice,
   SimStore,
+  StudyCapture,
   UiPrefs,
   UiSlice,
 } from './store/types';

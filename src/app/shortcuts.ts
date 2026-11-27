@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { minPointsToFinish } from '@/ui/display/measurementPreview';
 import { pendingSession } from '@/ui/display/pendingSession';
+import { captureCurrentStudyStill } from './studyCapture';
 import { useSimStore } from './store';
 import { modePolicy } from './modePolicy';
 
@@ -15,6 +16,7 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: 'Alt + ↑ ↓', action: 'Tilt (abanico) +/− 3°' },
   { keys: 'W / S', action: 'Presión +/−' },
   { keys: 'Espacio', action: 'Congelar / reanudar' },
+  { keys: 'K', action: 'Guardar captura en el estudio (Store)' },
   { keys: '2 · C · M · ⇧M · P · X · T', action: '2D · Color · modo M · CMM · PW · CW · TDI' },
   { keys: '[ / ]', action: 'Profundidad −/+ 1 cm' },
   { keys: '- / +', action: 'Ganancia −/+ 2 dB' },
@@ -268,6 +270,10 @@ export function useShortcuts(): void {
         case 'h':
         case 'H':
           if (!s.ui.minimal) s.setUi({ showTorso: !s.ui.showTorso });
+          break;
+        case 'k':
+        case 'K':
+          captureCurrentStudyStill();
           break;
         case '.':
           if (s.frozen) s.setCineOffset(s.cineOffset + 1);
