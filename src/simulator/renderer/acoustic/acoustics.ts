@@ -125,6 +125,19 @@ export const PLEURA_Z = 1;
 
 /** Blood backscatter with harmonic imaging (fundamental suppressed). */
 export const BLOOD_HARMONIC_SIGMA = 0.6;
+/**
+ * Spontaneous echo contrast ("smoke" / SEC) in low-flow stasis chambers (severe mitral stenosis LA/LAA,
+ * fibrillating dilated LA, severely hypokinetic dilated LV apex). Purely hemodynamic (no case-ID branches):
+ * uses a zero-texture domain-warped swirling vortex field (exact CPU↔GPU parity, zero extra texelFetch in
+ * Pass A) whose drift periods divide 128 evenly so the 128-cell bloodShift modulo wraps seamlessly.
+ */
+export const SEC_GAIN = 0.072;
+export const SEC_FREQ = 2.6;
+/** 4π / 128 and 2π / 128: exact integer multiples of 2π over the 128-unit bloodShift cycle (~4 cm/s swirl). */
+export const SEC_DRIFT_X = (4 * Math.PI) / 128;
+export const SEC_DRIFT_Y = (2 * Math.PI) / 128;
+export const SEC_BASE_FLOOR = 0.16;
+export const SEC_LAA_BOOST = 1.15;
 /** Lattice offsets of the heterogeneity noise (material coordinates · HETERO_FREQ + offset). */
 export const HETERO_OFFSET: readonly [number, number, number] = [5.3, 1.7, 9.1];
 /**
@@ -481,6 +494,12 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   PLEURA_DEPTH_FREQ,
   PLEURA_Z,
   BLOOD_HARMONIC_SIGMA,
+  SEC_GAIN,
+  SEC_FREQ,
+  SEC_DRIFT_X,
+  SEC_DRIFT_Y,
+  SEC_BASE_FLOOR,
+  SEC_LAA_BOOST,
   CALCIUM_GAIN,
   CALCIUM_BASE,
   CALCIUM_AMP,

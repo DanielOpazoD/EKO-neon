@@ -30,6 +30,12 @@ import {
   SOFT_TISSUE_ATTEN_DB,
   BLOOD_HARMONIC_SIGMA,
   bloodShiftCells,
+  SEC_BASE_FLOOR,
+  SEC_DRIFT_X,
+  SEC_DRIFT_Y,
+  SEC_FREQ,
+  SEC_GAIN,
+  SEC_LAA_BOOST,
   CALCIUM_AMP,
   calciumAttenDb,
   CALCIUM_BASE,
@@ -333,6 +339,8 @@ export class ProceduralSliceRenderer implements RendererBackend {
       nrmH: torsoToHeartDir(hf, beam.normal),
       bloodShift: bloodShiftCells(physics.bloodFrame ?? 0),
       spatialCompound: Math.max(0, Math.min(1, physics.spatialCompound ?? 0)),
+      secLa: Math.max(0, Math.min(1, physics.secLa ?? 0)),
+      secLv: Math.max(0, Math.min(1, physics.secLv ?? 0)),
       ...speckleLattices(physics.seed),
       line: null,
     };
@@ -654,6 +662,37 @@ export class ProceduralSliceRenderer implements RendererBackend {
         }
         sigma = accS / wsum;
         specular = accP / wsum;
+      }
+      // Spontaneous echo contrast ("smoke" / SEC) in low-flow stasis chambers (exact mirror of GLSL_PASS_B_MAIN)
+      if (tissue === Tissue.Blood && (ctx.secLa > 0 || ctx.secLv > 0)) {
+        const hf = heart.frame;
+        const dpx = px - hf.origin.x;
+        const dpy = py - hf.origin.y;
+        const dpz = pz - hf.origin.z;
+        const hx = dpx * hf.ex.x + dpy * hf.ex.y + dpz * hf.ex.z;
+        const hy = dpx * hf.ey.x + dpy * hf.ey.y + dpz * hf.ey.z;
+        const hz = dpx * hf.ez.x + dpy * hf.ez.y + dpz * hf.ez.z;
+        let sec = 0;
+        if (s.structure === Structure.LaCavity) {
+          sec = ctx.secLa;
+        } else if (s.structure === Structure.LaAppendage) {
+          sec = Math.min(1, ctx.secLa * SEC_LAA_BOOST);
+        } else if (s.structure === Structure.LvCavity && ctx.secLv > 0) {
+          const lvApex = (hz - ctx.scene.heartPose.zAnn) / Math.max(1, ctx.scene.heartPose.lengthNow);
+          const lvFrac = 0.2 + 0.8 * Math.max(0, Math.min(1, lvApex / 0.75));
+          sec = ctx.secLv * lvFrac;
+        }
+        if (sec > 0) {
+          const sx = hx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X;
+          const sy = hy * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y;
+          const sz = hz * SEC_FREQ;
+          const swirl =
+            0.5 +
+            0.5 *
+              Math.sin(sx + 0.85 * Math.cos(sy * 1.15 + sz * 0.75)) *
+              Math.cos(sy * 0.9 - 0.75 * Math.sin(sz * 1.1 - sx * 0.65));
+          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
+        }
       }
       // the beam's on-axis sensitivity at this depth: wide near the face, narrowest at the focus (decision 144)
       const fg = focusingGain(r, focus);

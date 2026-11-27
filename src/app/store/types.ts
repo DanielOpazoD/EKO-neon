@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand';
 import type { ProbeControl } from '@/simulator/probe/pose';
 import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 import type { AcquisitionSettings, ImagingModality } from '@/simulator/renderer/types';
+import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import type { ColorSettings } from '@/simulator/doppler/color/colorDoppler';
 import type {
   SpectralModality,
@@ -324,6 +325,17 @@ export interface ReviewSlice {
   loadReviewReport: (r: ReviewReport) => void;
 }
 
+/** Ephemeral teaching pointer arrow drawn on a frozen ultrasound frame (never persisted). */
+export interface TeachingArrow {
+  id: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  captureSector?: SectorMapping;
+  onStrip: boolean;
+}
+
 export interface UiSlice {
   ui: UiPrefs;
   /** Cardiac phase landmarks and LV length of the loaded case (from the simulator). */
@@ -334,12 +346,19 @@ export interface UiSlice {
   /** The 3D navigator has its model (decision 203): the start screen ticks it off. Not persisted. */
   navigatorReady: boolean;
   fpsUi: number;
+  /** Ephemeral frozen-frame teaching pointer mode (disarmed and cleared automatically on unfreeze / exam). */
+  teachingPointerOn: boolean;
+  /** Ephemeral callout arrows drawn on the current frozen frame (never persisted; auto-cleared on unfreeze). */
+  teachingArrows: TeachingArrow[];
   setUi: (u: Partial<UiPrefs>) => void;
   setCycleInfo: (marks: PhaseMarks, lvLengthCm: number) => void;
   setError: (e: string | null) => void;
   setWorkerMode: (m: UiSlice['workerMode']) => void;
   setNavigatorReady: (ready: boolean) => void;
   setFpsUi: (f: number) => void;
+  setTeachingPointer: (on: boolean) => void;
+  addTeachingArrow: (arrow: Omit<TeachingArrow, 'id'>) => void;
+  clearTeachingArrows: () => void;
 }
 
 export type SimStore = AcquisitionSlice & EducationSlice & ReviewSlice & UiSlice;

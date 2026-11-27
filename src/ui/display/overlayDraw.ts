@@ -20,6 +20,7 @@ import { polarToPixel, type SectorMapping } from '@/simulator/renderer/scanConve
 import { canvasFont } from '../canvasFonts';
 import { ecgLayoutOf, ecgTracePoints, ecgX } from '../ecgTrace';
 import { drawColorBar } from './colorBarOverlay';
+import { colorBoxCornerPixels, type ColorBoxHandleId } from './colorBoxHandles';
 import { measurementGeometryOn } from './measurementPlacement';
 import type { LivePreview } from './measurementPreview';
 import {
@@ -153,6 +154,8 @@ export function drawOverlay(
   lassoDraft: { x: number; y: number }[] = [],
   livePreview: LivePreview | null = null,
   activeHandle: ActiveMeasurementHandle | null = null,
+  colorBoxHover: ColorBoxHandleId | 'move' | null = null,
+  arrowDraft: { x0: number; y0: number; x1: number; y1: number } | null = null,
 ): void {
   const { ui, activeTool, measurements, reviewMarkers } = st;
   const {
@@ -251,7 +254,9 @@ export function drawOverlay(
       color.boxThetaMaxRad,
       color.boxRMinCm,
       color.boxRMaxCm,
-      'rgba(102, 224, 160, 0.88)',
+      colorBoxHover === 'move' ? 'rgba(116, 240, 176, 0.98)' : 'rgba(102, 224, 160, 0.88)',
+      !hud.frozen,
+      colorBoxHover,
     );
   }
   ctx.restore();
@@ -585,6 +590,34 @@ export function drawOverlay(
       activeTool === 'vti' ? stripBaselineY : undefined,
     );
   if (livePreview) drawLivePreview(ctx, livePreview);
+  if (hud.frozen && (st.teachingArrows.length > 0 || arrowDraft)) {
+    for (const arrow of st.teachingArrows) {
+      let x0 = arrow.x0;
+      let y0 = arrow.y0;
+      let x1 = arrow.x1;
+      let y1 = arrow.y1;
+      if (!arrow.onStrip && arrow.captureSector) {
+        const reproj = reprojectGeometry(
+          [
+            { x: x0, y: y0 },
+            { x: x1, y: y1 },
+          ],
+          arrow.captureSector,
+          m,
+        );
+        if (reproj.length === 2) {
+          x0 = reproj[0]!.x;
+          y0 = reproj[0]!.y;
+          x1 = reproj[1]!.x;
+          y1 = reproj[1]!.y;
+        }
+      }
+      drawTeachingArrow(ctx, x0, y0, x1, y1, false);
+    }
+    if (arrowDraft && Math.hypot(arrowDraft.x1 - arrowDraft.x0, arrowDraft.y1 - arrowDraft.y0) >= 6) {
+      drawTeachingArrow(ctx, arrowDraft.x0, arrowDraft.y0, arrowDraft.x1, arrowDraft.y1, true);
+    }
+  }
   ctx.lineWidth = 1;
   // review markers (decision 134): numbered, with the structure the model holds under each one.
   if (ui.reviewMode) {
@@ -721,9 +754,11 @@ function drawArcBox(
   r0: number,
   r1: number,
   color: string,
+  showHandles = false,
+  hover: ColorBoxHandleId | 'move' | null = null,
 ): void {
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.2;
+  ctx.lineWidth = hover === 'move' ? 1.5 : 1.2;
   ctx.beginPath();
   const n = 16;
   for (let i = 0; i <= n; i++) {
@@ -737,7 +772,86 @@ function drawArcBox(
   }
   ctx.closePath();
   ctx.stroke();
+  if (showHandles) {
+    const corners = colorBoxCornerPixels(m, { t0, t1, r0, r1 });
+    for (const c of corners) {
+      const active = hover === c.id;
+      if (active) {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 7.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(102, 224, 160, 0.24)';
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, active ? 4.4 : 3.0, 0, Math.PI * 2);
+      ctx.fillStyle = active ? '#ffffff' : 'rgba(10, 18, 26, 0.85)';
+      ctx.fill();
+      ctx.strokeStyle = active ? '#57f2a6' : 'rgba(102, 224, 160, 0.92)';
+      ctx.lineWidth = active ? 1.8 : 1.3;
+      ctx.stroke();
+    }
+  }
   ctx.lineWidth = 1;
+}
+
+/** High-contrast ephemeral teaching pointer arrow with dark halo for live classroom projection. */
+function drawTeachingArrow(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  draft: boolean,
+): void {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < 4) return;
+  const ang = Math.atan2(dy, dx);
+  const headLen = Math.min(14, Math.max(9, len * 0.26));
+  const spread = 0.44;
+  const shaftEndX = x1 - Math.cos(ang) * (headLen * 0.72);
+  const shaftEndY = y1 - Math.sin(ang) * (headLen * 0.72);
+  const leftX = x1 - Math.cos(ang - spread) * headLen;
+  const leftY = y1 - Math.sin(ang - spread) * headLen;
+  const rightX = x1 - Math.cos(ang + spread) * headLen;
+  const rightY = y1 - Math.sin(ang + spread) * headLen;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  // Dark halo so the arrow reads crisply over both calcified valves and dark blood pools
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.82)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(shaftEndX, shaftEndY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(leftX, leftY);
+  ctx.lineTo(rightX, rightY);
+  ctx.closePath();
+  ctx.stroke();
+
+  const fg = draft ? '#7dd3fc' : '#38bdf8';
+  ctx.strokeStyle = fg;
+  ctx.fillStyle = fg;
+  ctx.lineWidth = 2.4;
+  if (draft) ctx.setLineDash([5, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(shaftEndX, shaftEndY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(leftX, leftY);
+  ctx.lineTo(rightX, rightY);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawGeometry(

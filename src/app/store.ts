@@ -22,6 +22,7 @@ export type {
   ReviewSlice,
   SimStore,
   StudyCapture,
+  TeachingArrow,
   UiPrefs,
   UiSlice,
 } from './store/types';
