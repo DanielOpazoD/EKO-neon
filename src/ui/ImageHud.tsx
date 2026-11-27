@@ -27,19 +27,24 @@ export function ImageHud() {
   const caseId = useSimStore((s) => s.caseId);
   const examFinished = useSimStore((s) => s.examFinished);
   const truth = useSimStore((s) => s.truth);
-  const depthCm = useSimStore((s) => s.settings.depthCm);
-  const frequencyMHz = useSimStore((s) => s.settings.frequencyMHz);
-  const harmonics = useSimStore((s) => s.settings.harmonics);
-  const strip = useSimStore((s) => isStripModality(s.modality));
-  const { hrBpm, fps, gpu, tier, gpuLive } = useHudStore(
+  const liveDepthCm = useSimStore((s) => s.settings.depthCm);
+  const liveFrequencyMHz = useSimStore((s) => s.settings.frequencyMHz);
+  const liveHarmonics = useSimStore((s) => s.settings.harmonics);
+  const liveStrip = useSimStore((s) => isStripModality(s.modality));
+  const { hrBpm, fps, gpu, tier, gpuLive, frozenAcq } = useHudStore(
     useShallow((h) => ({
       hrBpm: h.hud ? Math.round(h.hud.heartRateBpm) : null,
       fps: h.hud ? Math.round(h.hud.simulatedFps) : null,
       gpu: h.hud?.stats?.['gpu'] ?? null,
       tier: h.hud?.stats?.['tier'] ?? null,
       gpuLive: h.hud?.stats?.['gpuLive'] ?? null,
+      frozenAcq: h.hud?.frozen ? (h.hud.acquisition ?? null) : null,
     })),
   );
+  const depthCm = frozenAcq ? frozenAcq.settings.depthCm : liveDepthCm;
+  const frequencyMHz = frozenAcq ? frozenAcq.settings.frequencyMHz : liveFrequencyMHz;
+  const harmonics = frozenAcq ? frozenAcq.settings.harmonics : liveHarmonics;
+  const strip = frozenAcq ? isStripModality(frozenAcq.modality) : liveStrip;
   const notice = gpuNotice({ gpu, tier, gpuLive });
   // the title wraps to two lines on a narrow image: the segment chip below it reads its height (--hud-tl-h) to keep clear
   const titleBoxRef = useRef<HTMLDivElement>(null);

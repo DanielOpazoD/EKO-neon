@@ -221,3 +221,70 @@ test('the sector above a strip is the scan conversion of the frame it shows, on 
   assert.ok(sweepOnly >= 10, `${sweepOnly} of 50 ticks moved only the sweep`);
   core.dispose();
 });
+
+test('frozen HUD frame rate, cadence and color rate stay locked to the displayed cine frame instead of live settings', () => {
+  const stepUntilFrame = (core: SimulatorCore): SimOutput => {
+    for (let i = 0; i < 10; i++) {
+      const out = core.step(1 / 30);
+      if (out) return out;
+    }
+    throw new Error('expected a live frame within 10 ticks');
+  };
+  const base = baseInput();
+  const deep2d: SimInput = {
+    ...base,
+    modality: '2d',
+    settings: { ...base.settings, depthCm: 18, sectorDeg: 90, lineDensity: 'high', harmonics: true },
+  };
+  const core = new SimulatorCore(caseDef, deep2d);
+  stepLive(core, 6);
+  const deepOut = stepUntilFrame(core);
+  const deepFps = deepOut.simulatedFps;
+  const deepCadence = deepOut.cadenceHz;
+  const deepCount = internals(core).cine.length;
+  core.recycle(deepOut.rgba);
+
+  const shallowColor: SimInput = {
+    ...deep2d,
+    modality: 'color',
+    settings: { ...deep2d.settings, depthCm: 12, sectorDeg: 70, lineDensity: 'medium', harmonics: false },
+  };
+  core.setInput(shallowColor);
+  stepLive(core, 8);
+  const colorOut = stepUntilFrame(core);
+  const colorFps = colorOut.simulatedFps;
+  const colorCadence = colorOut.cadenceHz;
+  const colorRate = colorOut.colorFps;
+  assert.ok(Math.abs(colorFps - deepFps) > 5, `expected distinct FR (${deepFps} vs ${colorFps})`);
+  assert.ok(colorRate > 0);
+  core.recycle(colorOut.rgba);
+
+  // Freeze on the shallow Color frame, then drastically change live console settings while frozen.
+  const frozenEdited: SimInput = {
+    ...shallowColor,
+    frozen: true,
+    modality: '2d',
+    settings: { ...shallowColor.settings, depthCm: 22, sectorDeg: 45, lineDensity: 'low', harmonics: true },
+  };
+  core.setInput(frozenEdited);
+  const frozenNow = core.step(0.08);
+  assert.ok(frozenNow?.frozen);
+  assert.equal(frozenNow.simulatedFps, colorFps, 'frozen FR must not follow live depth/sector/modality edits');
+  assert.equal(frozenNow.cadenceHz, colorCadence, 'frozen cadence must not follow live edits');
+  assert.equal(frozenNow.colorFps, colorRate, 'frozen colorFps must stay at the frame’s acquired color rate');
+  assert.equal(frozenNow.acquisition?.settings.depthCm, 12);
+  core.recycle(frozenNow.rgba);
+
+  // Scrub back into the earlier deep 2D frames: FR, cadence and colorFps should match that cine frame.
+  const totalFrames = internals(core).cine.length;
+  const backOffset = -(totalFrames - deepCount + 1);
+  core.setInput({ ...frozenEdited, cineOffset: backOffset });
+  const frozenEarlier = core.step(0.08);
+  assert.ok(frozenEarlier?.frozen);
+  assert.equal(frozenEarlier.acquisition?.settings.depthCm, 18);
+  assert.equal(frozenEarlier.simulatedFps, deepFps, 'scrubbed cine frame must report its own acquired FR');
+  assert.equal(frozenEarlier.cadenceHz, deepCadence);
+  assert.equal(frozenEarlier.colorFps, 0);
+  core.recycle(frozenEarlier.rgba);
+  core.dispose();
+});

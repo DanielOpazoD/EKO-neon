@@ -47,6 +47,10 @@ export interface FrameFormation {
   analysisMs: number;
   cineMs: number;
   persistence: number;
+  /** Physical acquisition frame rate (Hz), simulation cadence (Hz), and Color Doppler rate (Hz) of the acquired frame. */
+  acquisitionFps: number;
+  cadenceHz: number;
+  colorFps: number;
 }
 
 export interface CineFrame {

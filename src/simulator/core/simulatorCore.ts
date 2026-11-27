@@ -148,6 +148,7 @@ export class SimulatorCore {
   private display: Uint8ClampedArray | null = null;
   private colorDriver = new ColorFieldDriver();
   private colorFps = 0;
+  private lastAcquisitionFps = 0;
   private displayOnGpu = false;
   private dopplerOnGpu = false;
   private transCodeScratch = new Uint8Array(0);
@@ -477,6 +478,7 @@ export class SimulatorCore {
         : 0;
     const acquisitionFps = this.acquisitionFps();
     const fps = cadenceHz(spec, acquisitionFps, colorLines);
+    this.lastAcquisitionFps = acquisitionFps;
     this.colorFps = inp.modality === 'color' ? acquisitionFps : 0;
     const beam = beamFrameFromPose(
       poseFromControl(this.thorax, inp.probe),
@@ -1036,6 +1038,9 @@ export class SimulatorCore {
       analysisMs: t.analysisMs,
       cineMs: t.cineMs,
       persistence: this.lastPersistence,
+      acquisitionFps: this.lastAcquisitionFps || this.acquisitionFps(),
+      cadenceHz: 1 / this.frameIntervalS,
+      colorFps: this.colorFps,
     };
   }
 
@@ -1045,6 +1050,7 @@ export class SimulatorCore {
     frozen: boolean,
     cf?: CineFrame,
   ): SimOutput | null {
+    const form = frozen && cf ? cf.formation : this.formation();
     const res = this.compositor.composite({
       input: this.input,
       beam,
@@ -1059,19 +1065,19 @@ export class SimulatorCore {
       onGpuContextLost: () => this.dropGpu(),
       // a frozen frame is described as it was formed, a live one by the pipeline forming it; the port's state goes apart
       // in both, since a frame cannot keep it: it moves on after the capture (an attempt, the return)
-      formation: frozen && cf ? cf.formation : this.formation(),
+      formation: form,
       gpuLive: this.gpuLive,
       colorCurrent: this.colorDriver.current,
       colorVersion: this.colorDriver.version,
-      colorFps: this.colorFps,
+      colorFps: form.colorFps,
       strips: this.strips,
       stripCtx: () => this.stripCtx(),
       lastAnalysis: this.lastAnalysis,
       clockCurrent: this.clock.current,
       timeS: this.timeS,
       frameId: this.frameId,
-      frameIntervalS: this.frameIntervalS,
-      acquisitionFps: this.acquisitionFps(),
+      frameIntervalS: 1 / form.cadenceHz,
+      acquisitionFps: form.acquisitionFps,
       ecgRing: this.ecgRing,
       cine: this.cine,
       timing: this.timing,
