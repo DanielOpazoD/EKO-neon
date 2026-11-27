@@ -458,10 +458,23 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       inputs: `E ${(e * 100).toFixed(0)} cm/s${beatNote(eAgg)}, e′ ${ep.toFixed(1)} cm/s${epNote}`,
     });
   }
+  const ivcExp = v('ivc-diameter');
+  const ivcInsp = v('ivc-diameter-inspiration');
+  if (ivcExp !== null && ivcExp > 0) {
+    const rap = rightAtrialPressure(ivcExp, ivcInsp);
+    const collapsePct = ivcInsp !== null ? Math.max(0, (1 - ivcInsp / ivcExp) * 100) : null;
+    rows.push({
+      id: 'rap-ivc',
+      label: 'PAD estimada (VCI)',
+      value: `${rap.rapMmHg} mmHg${collapsePct !== null ? ` · colapso ${collapsePct.toFixed(0)} %` : ''}`,
+      formula: 'ASE: ≤2,1 cm y >50 % → 3 · >2,1 cm y <50 % → 15 · resto → 8 mmHg',
+      inputs: rap.basis,
+    });
+  }
   const trAgg = agg('tr-vmax');
   const tr = trAgg?.value ?? null;
   if (tr !== null) {
-    const rap = rightAtrialPressure(v('ivc-diameter'), v('ivc-diameter-inspiration'));
+    const rap = rightAtrialPressure(ivcExp, ivcInsp);
     rows.push({
       id: 'rvsp',
       label: `PSVD estimada (PAD ${rap.rapMmHg} mmHg)`,

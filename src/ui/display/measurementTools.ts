@@ -13,6 +13,7 @@ import type {
   AutoDopplerTargetResult,
   DopplerTargetId,
 } from '@/simulator/measurements/autoDopplerTarget';
+import type { AutoIvcResult, AutoIvcSuccess } from '@/simulator/measurements/autoIvc';
 import type {
   AutoLaVolumeResult,
   AutoLaVolumeSuccess,
@@ -716,6 +717,51 @@ export function commitAutoChamberVolume(res: AutoChamberVolumeSuccess): void {
   if (!st.frozen) st.toggleFreeze();
   st.addMeasurement(buildRecord(res.ed, edSpec, 'ed'));
   st.addMeasurement(buildRecord(res.es, esSpec, 'es'));
+  // For RV, also commit the ASE basal end-diastolic diameter caliper on the same ED frame.
+  if (!isLv && res.rvBasal) {
+    const basalSpec = specFor('rv-basal');
+    const acquiredMode = res.ed.acquisition.modality;
+    const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+    const basalTech = basalSpec
+      ? evaluateTechnique(basalSpec, {
+          modality: acquiredMode,
+          viewId: res.ed.viewId,
+          viewScore: res.ed.viewScore,
+          phase: res.ed.phase,
+          phaseMarks: res.ed.acquisition.phaseMarks ?? st.phaseMarks,
+          gate: null,
+          segmentStructures: res.rvBasal.segmentStructures,
+          segmentEndsOutside: res.rvBasal.segmentEndsOutside,
+          userAssisted: true,
+        })
+      : null;
+    st.addMeasurement({
+      id: `m${baseId}rvb${Math.floor(Math.random() * 1e3)}`,
+      kind: 'linear',
+      measurementId: basalSpec ? basalSpec.id : 'rv-basal',
+      technique: basalTech,
+      label: basalSpec ? basalSpec.label : 'Diámetro basal del VD',
+      value: res.rvBasal.valueCm,
+      units: 'cm',
+      modality,
+      sourceViewId: res.ed.viewId,
+      viewScore: res.ed.viewScore,
+      frameId: res.ed.frameId,
+      phase: res.ed.phase,
+      timeS: res.ed.timeS,
+      geometry: [res.rvBasal.aPx, res.rvBasal.bPx],
+      captureSector: { ...res.ed.sector },
+      acquisition: res.ed.acquisition,
+      beatIndex: res.ed.beatIndex,
+      rrS: res.rrS,
+      imageQualityScore: res.ed.gainScore,
+      userAssisted: true,
+      referenceGuidelineIds: basalSpec
+        ? basalSpec.referenceIds
+        : ['ase-eacvi-chamber-2015', 'ase-right-heart-2025'],
+      createdAt: now,
+    });
+  }
   // Jump strictly by ED frameId so the overlaid contour stays aligned even if live frames elapsed during the RPC.
   useSimStore.getState().jumpCinePhase('ed', res.ed.frameId);
 }
@@ -875,6 +921,71 @@ export async function runAutoPlax(): Promise<AutoPlaxResult> {
     };
   }
   if (res.result.ok) commitAutoPlax(res.result);
+  return res.result;
+}
+
+/**
+ * Commit an automatic 2D subcostal IVC lumen caliper (`ivc-diameter` or `ivc-diameter-inspiration`)
+ * and freeze on the measured frame so the endpoints are immediately visible and drag-editable.
+ */
+export function commitAutoIvc(res: AutoIvcSuccess): void {
+  const st = useSimStore.getState();
+  const spec = specFor(res.measurementId);
+  const acquiredMode = res.acquisition.modality;
+  const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+  const technique = spec
+    ? evaluateTechnique(spec, {
+        modality: acquiredMode,
+        viewId: res.viewId,
+        viewScore: res.viewScore,
+        phase: res.phase,
+        phaseMarks: res.acquisition.phaseMarks ?? st.phaseMarks,
+        gate: null,
+        segmentStructures: res.segmentStructures,
+        segmentEndsOutside: res.segmentEndsOutside,
+        userAssisted: true,
+      })
+    : null;
+
+  if (!st.frozen) st.toggleFreeze();
+  st.addMeasurement({
+    id: `m${Date.now().toString(36)}ivc${Math.floor(Math.random() * 1e3)}`,
+    kind: 'linear',
+    measurementId: spec ? spec.id : res.measurementId,
+    technique,
+    label: spec ? spec.label : 'Diámetro de la VCI',
+    value: res.valueCm,
+    units: 'cm',
+    modality,
+    sourceViewId: res.viewId,
+    viewScore: res.viewScore,
+    frameId: res.frameId,
+    phase: res.phase,
+    timeS: res.timeS,
+    geometry: [res.aPx, res.bPx],
+    captureSector: { ...res.sector },
+    acquisition: res.acquisition,
+    beatIndex: res.beatIndex,
+    rrS: res.rrS,
+    imageQualityScore: res.gainScore,
+    userAssisted: true,
+    referenceGuidelineIds: spec ? spec.referenceIds : ['ase-right-heart-2025'],
+    createdAt: new Date().toISOString(),
+  });
+  useSimStore.getState().jumpCinePhase('ed', res.frameId);
+}
+
+/** Request automatic 2D subcostal IVC lumen measurement from the displayed frame. */
+export async function runAutoIvc(): Promise<AutoIvcResult> {
+  const res = await frameBus.request({ kind: 'autoIvc' });
+  if (!res || res.kind !== 'autoIvc') {
+    return {
+      ok: false,
+      reason: 'no-frame',
+      message: 'El simulador no respondió a la medición automática de la VCI.',
+    };
+  }
+  if (res.result.ok) commitAutoIvc(res.result);
   return res.result;
 }
 
@@ -1104,11 +1215,13 @@ export async function runAutoStripMeasure(
   const modOk =
     target === 'tapse'
       ? acquiredMod === 'm-mode' || acquiredMod === 'cmm'
-      : target === 'tdi-e-prime'
+      : target === 'tdi-e-prime' || target === 'rv-s-prime'
         ? acquiredMod === 'tdi'
         : target === 'tr-vmax'
           ? acquiredMod === 'cw'
-          : acquiredMod === 'pw' || acquiredMod === 'cw';
+          : target === 'rvot-at'
+            ? acquiredMod === 'pw'
+            : acquiredMod === 'pw' || acquiredMod === 'cw';
   if (!modOk) {
     return {
       ok: false,
@@ -1119,9 +1232,13 @@ export async function runAutoStripMeasure(
           ? 'Activa Modo M sobre el anillo tricuspídeo lateral para medir TAPSE automáticamente.'
           : target === 'tdi-e-prime'
             ? 'Activa Doppler tisular (TDI) sobre el anillo mitral para medir e′ automáticamente.'
-            : target === 'tr-vmax'
-              ? 'Activa Doppler continuo (CW) sobre la válvula tricúspide para medir Vmax IT.'
-              : 'Activa Doppler pulsado (PW) sobre las puntas mitrales para medir E / A / TD.',
+            : target === 'rv-s-prime'
+              ? 'Activa Doppler tisular (TDI) sobre el anillo tricuspídeo lateral para medir S′ VD.'
+              : target === 'tr-vmax'
+                ? 'Activa Doppler continuo (CW) sobre la válvula tricúspide para medir Vmax IT.'
+                : target === 'rvot-at'
+                  ? 'Activa Doppler pulsado (PW) en el TSVD / válvula pulmonar para medir el TAc pulmonar.'
+                  : 'Activa Doppler pulsado (PW) sobre las puntas mitrales para medir E / A / TD.',
     };
   }
 
@@ -1247,6 +1364,27 @@ export async function runAutoStripMeasure(
     const vMps = Math.abs(out.ePrime.velocityMps);
     pushRecord('ep', specId, 'velocity', vMps * 100, 'cm/s', [pt], out.beatIndex, {
       gradientMmHg: 4 * vMps * vMps,
+    });
+    return out;
+  }
+
+  if (out.target === 'rv-s-prime') {
+    const pt = { x: strip.x + out.sPrime.xPx, y: yForStripVal(out.sPrime.velocityMps) };
+    const vMps = Math.abs(out.sPrime.velocityMps);
+    pushRecord('sp', 'rv-s-prime', 'velocity', vMps * 100, 'cm/s', [pt], out.beatIndex, {
+      gradientMmHg: 4 * vMps * vMps,
+    });
+    return out;
+  }
+
+  if (out.target === 'rvot-at') {
+    const yPeak = yForStripVal(out.peakVelocityMps);
+    const yBase = yForStripVal(0);
+    const p0 = { x: strip.x + out.onsetXPx, y: yBase };
+    const p1 = { x: strip.x + out.peakXPx, y: yPeak };
+    pushRecord('at', 'rvot-acceleration-time', 'time', out.atMs, 'ms', [p0, p1], out.beatIndex, {
+      vmaxMps: Math.abs(out.peakVelocityMps),
+      vtiCm: out.vtiCm,
     });
     return out;
   }

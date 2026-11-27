@@ -19,6 +19,7 @@ import { captureStepPrompt, minPointsToFinish } from '../display/measurementPrev
 import {
   runAutoChamberVolume,
   runAutoDopplerTarget,
+  runAutoIvc,
   runAutoLaVolume,
   runAutoLvotGate,
   runAutoPlax,
@@ -448,7 +449,7 @@ export function MeasureTab() {
           <Section
             title="Mediciones 2D automáticas"
             tip={tip(
-              'Dimensiones lineales en PLAX (TD/Mesosístole/TS), Simpson biplano del VI, volumen biplano de AI (LAVI) y VD 2D directamente desde la imagen 2D del cine actual.',
+              'PLAX 2D, Simpson biplano VI, volumen AI (LAVI), VD 2D + basal y VCI con colapso inspiratorio (PAD) directamente desde la imagen 2D.',
             )}
           >
             <AutoEfPanel
@@ -898,14 +899,16 @@ function AutoEfPanel({
       modality: st.modality,
       frozen: st.frozen,
       truth: st.truth,
+      respiration: st.patient.respiration,
       closed: examClosed(st),
       setModality: st.setModality,
+      setPatient: st.setPatient,
       startPresetView: st.startPresetView,
       toggleFreeze: st.toggleFreeze,
       jumpCinePhase: st.jumpCinePhase,
     })),
   );
-  const [busy, setBusy] = useState<'plax' | 'lv' | 'la' | 'rv' | null>(null);
+  const [busy, setBusy] = useState<'plax' | 'lv' | 'la' | 'rv' | 'ivc' | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const summary = useMemo(
@@ -915,6 +918,47 @@ function AutoEfPanel({
   const bsaM2 = s.truth?.bsaM2 && s.truth.bsaM2 > 0 ? s.truth.bsaM2 : null;
   const lvmi = summary.plax.massG !== null && bsaM2 ? summary.plax.massG / bsaM2 : null;
   const lavi = summary.la.volumeMl !== null && bsaM2 ? summary.la.volumeMl / bsaM2 : null;
+
+  const runIvc = async () => {
+    if (busy || s.closed) return;
+    setBusy('ivc');
+    setNotice(null);
+    try {
+      const res = await runAutoIvc();
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else if (res.measurementId === 'ivc-diameter-inspiration') {
+        const exp = summary.ivc.expCm;
+        const colText =
+          exp !== null && exp > 0
+            ? ` (colapso ${Math.max(0, (1 - res.valueCm / exp) * 100).toFixed(0)} %)`
+            : '';
+        setNotice({
+          kind: 'ok',
+          text: `VCI inspiración: ${res.valueCm.toFixed(2)} cm${colText}.`,
+        });
+      } else {
+        setNotice({
+          kind: 'ok',
+          text: `VCI espiración: ${res.valueCm.toFixed(2)} cm. Pulsa «Insp (olfateo)» y repite Auto-VCI para calcular el colapso y la PAD.`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al medir la VCI automáticamente.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const setRespirationLive = (resp: 'expiration' | 'inspiration') => {
+    if (s.closed) return;
+    setNotice(null);
+    if (s.frozen) s.toggleFreeze();
+    s.setPatient({ respiration: resp });
+  };
 
   const runPlax = async () => {
     if (busy || s.closed) return;
@@ -987,7 +1031,7 @@ function AutoEfPanel({
           text:
             chamber === 'lv'
               ? `VI trazado en TD y TS (FEVI ${res.efPct.toFixed(0)} %).`
-              : `VD trazado en TD y TS (FEVD ${res.efPct.toFixed(0)} %, CAF ${res.facPct.toFixed(0)} %).`,
+              : `VD trazado en TD y TS (FEVD ${res.efPct.toFixed(0)} %, CAF ${res.facPct.toFixed(0)} %${res.rvBasal ? `, basal ${res.rvBasal.valueCm.toFixed(1)} cm` : ''}).`,
         });
       }
     } catch (e: unknown) {
@@ -1019,7 +1063,20 @@ function AutoEfPanel({
     summary.is2dReady &&
     !summary.plax.viewReady &&
     !summary.lv.viewReady &&
-    !summary.rv.viewReady;
+    !summary.rv.viewReady &&
+    !summary.ivc.viewReady;
+  const showIvcPrompt =
+    presetsEnabled &&
+    showViewFeedback &&
+    summary.is2dReady &&
+    !summary.ivc.viewReady &&
+    !summary.ivc.hasResult;
+  const ivcExpInCine =
+    displayedFrameId === summary.ivc.expFrameId ||
+    isTimeInCineWindow(summary.ivc.expTimeS, cineWindow);
+  const ivcInspInCine =
+    displayedFrameId === summary.ivc.inspFrameId ||
+    isTimeInCineWindow(summary.ivc.inspTimeS, cineWindow);
   const showBiplanePrompt =
     presetsEnabled &&
     showViewFeedback &&
@@ -1333,11 +1390,139 @@ function AutoEfPanel({
     </div>
   );
 
+  const isInsp = s.respiration === 'inspiration';
+  const ivcCard = (
+    <div className="auto-ef-card" data-auto-ef="ivc">
+      <div className="auto-ef-row-head">
+        <div className="auto-ef-chamber">
+          <span className="auto-ef-title">VCI · Presión AD</span>
+          <span className="plane-pills" aria-label="Fases respiratorias de VCI">
+            <span
+              className={`plane-pill${summary.ivc.expCm !== null ? ' done' : summary.ivc.viewReady && !isInsp ? ' here' : ''}`}
+            >
+              {summary.ivc.expCm !== null ? '✓ Esp' : 'Esp'}
+            </span>
+            <span
+              className={`plane-pill${summary.ivc.inspCm !== null ? ' done' : summary.ivc.viewReady && isInsp ? ' here' : ''}`}
+            >
+              {summary.ivc.inspCm !== null ? '✓ Insp' : 'Insp'}
+            </span>
+          </span>
+        </div>
+        <div className="auto-ef-presets">
+          {showIvcPrompt && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={s.closed}
+              onClick={() => jumpPreset('subcostal-ivc')}
+              data-tip="Mueve la sonda a la vista subcostal VCI en eje largo"
+            >
+              Ir a VCI
+            </button>
+          )}
+          <button
+            type="button"
+            className={summary.ivc.viewReady ? 'btn-primary-soft' : ''}
+            onClick={() => void runIvc()}
+            disabled={s.closed || busy !== null}
+            data-tip="Mide el lumen de la VCI en el cuadro actual (espiración o inspiración/olfateo) para estimar el colapso y la PAD"
+          >
+            {busy === 'ivc' ? 'Midiendo…' : 'Auto-VCI'}
+          </button>
+        </div>
+      </div>
+
+      {(summary.ivc.viewReady || (summary.ivc.expCm !== null && summary.ivc.inspCm === null)) &&
+        !s.closed && (
+          <div className="auto-ef-jump">
+            <button
+              type="button"
+              className={!isInsp ? 'ghost active' : 'ghost'}
+              onClick={() => setRespirationLive('expiration')}
+              data-tip="Poner al paciente en espiración (VCI basal máxima)"
+            >
+              Espiración
+            </button>
+            <button
+              type="button"
+              className={
+                isInsp
+                  ? 'ghost active'
+                  : summary.ivc.expCm !== null && summary.ivc.inspCm === null
+                    ? 'btn-primary-soft'
+                    : 'ghost'
+              }
+              onClick={() => setRespirationLive('inspiration')}
+              data-tip="Simular inspiración brusca (olfateo) para medir el colapso inspiratorio de la VCI"
+            >
+              Insp (olfateo)
+            </button>
+          </div>
+        )}
+
+      {summary.ivc.hasResult && (
+        <>
+          <div className="auto-ef-result-line">
+            <span className="auto-ef-primary">
+              {summary.ivc.rapMmHg !== null
+                ? `PAD ${summary.ivc.rapMmHg} mmHg`
+                : `VCI ${summary.ivc.inspCm?.toFixed(2)} cm`}
+              {summary.ivc.collapsePct !== null
+                ? ` · Colapso ${summary.ivc.collapsePct.toFixed(0)} %`
+                : ''}
+            </span>
+            <span className="auto-ef-metrics">
+              {summary.ivc.expCm !== null && <span>Esp {summary.ivc.expCm.toFixed(2)} cm</span>}
+              {summary.ivc.inspCm !== null && <span>Insp {summary.ivc.inspCm.toFixed(2)} cm</span>}
+            </span>
+          </div>
+          {(summary.ivc.expFrameId !== null || summary.ivc.inspFrameId !== null) && (
+            <div className="auto-ef-jump">
+              {summary.ivc.expFrameId !== null && (
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.ivc.expFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !ivcExpInCine}
+                  data-tip={
+                    ivcExpInCine
+                      ? 'Ver caliper VCI en espiración'
+                      : 'El cuadro espiratorio salió del cine actual'
+                  }
+                  onClick={() => inspectFrame('ed', summary.ivc.expFrameId!)}
+                >
+                  Ver Esp
+                </button>
+              )}
+              {summary.ivc.inspFrameId !== null && (
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.ivc.inspFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !ivcInspInCine}
+                  data-tip={
+                    ivcInspInCine
+                      ? 'Ver caliper VCI en inspiración'
+                      : 'El cuadro inspiratorio salió del cine actual'
+                  }
+                  onClick={() => inspectFrame('ed', summary.ivc.inspFrameId!)}
+                >
+                  Ver Insp
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
   const onPlaxFirst = showViewFeedback && currentViewId === 'plax';
+  const onIvcFirst = showViewFeedback && currentViewId === 'subcostal-ivc';
 
   return (
     <div className="auto-ef">
       {onPlaxFirst && plaxCard}
+      {onIvcFirst && ivcCard}
 
       {/* LV chamber block */}
       <div className="auto-ef-card" data-auto-ef="lv">
@@ -1539,55 +1724,68 @@ function AutoEfPanel({
           </div>
         </div>
 
-        {summary.rv.hasResult &&
-          summary.rv.efPct !== null &&
-          summary.rv.edvMl !== null &&
-          summary.rv.esvMl !== null &&
-          summary.rv.svMl !== null && (
-            <>
+        {summary.rv.hasResult && (
+          <>
+            {summary.rv.efPct !== null &&
+            summary.rv.edvMl !== null &&
+            summary.rv.esvMl !== null &&
+            summary.rv.svMl !== null ? (
+              <>
+                <div className="auto-ef-result-line">
+                  <span className="auto-ef-primary">
+                    FEVD {summary.rv.efPct.toFixed(0)} %
+                    {summary.rv.facPct !== null ? ` · CAF ${summary.rv.facPct.toFixed(0)} %` : ''}
+                  </span>
+                </div>
+                <div className="auto-ef-metrics">
+                  {summary.rv.basalCm !== null && (
+                    <span>Basal {summary.rv.basalCm.toFixed(1)} cm</span>
+                  )}
+                  <span>VTD {summary.rv.edvMl.toFixed(0)} mL</span>
+                  <span>VTS {summary.rv.esvMl.toFixed(0)} mL</span>
+                  <span>VS {summary.rv.svMl.toFixed(0)} mL</span>
+                  {summary.rv.edAreaCm2 !== null && summary.rv.esAreaCm2 !== null && (
+                    <span>
+                      Área {summary.rv.edAreaCm2.toFixed(1)}/{summary.rv.esAreaCm2.toFixed(1)} cm²
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : summary.rv.basalCm !== null ? (
               <div className="auto-ef-result-line">
                 <span className="auto-ef-primary">
-                  FEVD {summary.rv.efPct.toFixed(0)} %
-                  {summary.rv.facPct !== null ? ` · CAF ${summary.rv.facPct.toFixed(0)} %` : ''}
+                  VD basal {summary.rv.basalCm.toFixed(1)} cm
                 </span>
               </div>
-              <div className="auto-ef-metrics">
-                <span>VTD {summary.rv.edvMl.toFixed(0)} mL</span>
-                <span>VTS {summary.rv.esvMl.toFixed(0)} mL</span>
-                <span>VS {summary.rv.svMl.toFixed(0)} mL</span>
-                {summary.rv.edAreaCm2 !== null && summary.rv.esAreaCm2 !== null && (
-                  <span>
-                    Área {summary.rv.edAreaCm2.toFixed(1)}/{summary.rv.esAreaCm2.toFixed(1)} cm²
-                  </span>
-                )}
+            ) : null}
+            {summary.rv.edFrameId !== null && summary.rv.esFrameId !== null && (
+              <div className="auto-ef-jump">
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.rv.edFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !rvEdInCine}
+                  data-tip={rvEdInCine ? 'Inspeccionar contorno y basal del VD en TD' : 'El cuadro TD salió del bucle de cine actual'}
+                  onClick={() => inspectFrame('ed', summary.rv.edFrameId!)}
+                >
+                  Ver TD
+                </button>
+                <button
+                  type="button"
+                  className={`ghost${displayedFrameId === summary.rv.esFrameId ? ' active' : ''}`}
+                  disabled={s.closed || !rvEsInCine}
+                  data-tip={rvEsInCine ? 'Inspeccionar contorno del VD en TS' : 'El cuadro TS salió del bucle de cine actual'}
+                  onClick={() => inspectFrame('es', summary.rv.esFrameId!)}
+                >
+                  Ver TS
+                </button>
               </div>
-              {summary.rv.edFrameId !== null && summary.rv.esFrameId !== null && (
-                <div className="auto-ef-jump">
-                  <button
-                    type="button"
-                    className={`ghost${displayedFrameId === summary.rv.edFrameId ? ' active' : ''}`}
-                    disabled={s.closed || !rvEdInCine}
-                    data-tip={rvEdInCine ? 'Inspeccionar contorno del VD en TD' : 'El cuadro TD salió del bucle de cine actual'}
-                    onClick={() => inspectFrame('ed', summary.rv.edFrameId!)}
-                  >
-                    Ver TD
-                  </button>
-                  <button
-                    type="button"
-                    className={`ghost${displayedFrameId === summary.rv.esFrameId ? ' active' : ''}`}
-                    disabled={s.closed || !rvEsInCine}
-                    data-tip={rvEsInCine ? 'Inspeccionar contorno del VD en TS' : 'El cuadro TS salió del bucle de cine actual'}
-                    onClick={() => inspectFrame('es', summary.rv.esFrameId!)}
-                  >
-                    Ver TS
-                  </button>
-                </div>
-              )}
-            </>
-          )}
+            )}
+          </>
+        )}
       </div>
 
       {!onPlaxFirst && plaxCard}
+      {!onIvcFirst && ivcCard}
 
       {/* Contextual one-click helpers when not yet in 2D or target window */}
       {!summary.is2dReady && !s.closed && (
@@ -1613,6 +1811,9 @@ function AutoEfPanel({
             </button>
             <button type="button" className="ghost" onClick={() => jumpPreset('rv-focused')}>
               VD
+            </button>
+            <button type="button" className="ghost" onClick={() => jumpPreset('subcostal-ivc')}>
+              VCI
             </button>
           </div>
         </div>
@@ -1659,6 +1860,11 @@ const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
       tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
     },
     {
+      id: 'rv-s-prime',
+      label: 'S′ VD TDI',
+      tip: 'Coloca el gate TDI en el anillo tricuspídeo lateral para S′ VD',
+    },
+    {
       id: 'tr-cw',
       label: 'IT CW',
       tip: 'Alinea el cursor CW a través de la válvula tricúspide para Vmax IT',
@@ -1669,6 +1875,11 @@ const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
       id: 'tapse',
       label: 'TAPSE M',
       tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
+    },
+    {
+      id: 'rv-s-prime',
+      label: 'S′ VD TDI',
+      tip: 'Coloca el gate TDI en el anillo tricuspídeo lateral para S′ VD',
     },
     {
       id: 'tr-cw',
@@ -1691,6 +1902,11 @@ const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
     },
   ],
   'psax-av': [
+    {
+      id: 'rvot-pw',
+      label: 'TSVD PW',
+      tip: 'Coloca el gate PW en el TSVD / válvula pulmonar para medir el tiempo de aceleración pulmonar',
+    },
     {
       id: 'tr-cw',
       label: 'IT CW',
@@ -1732,19 +1948,39 @@ function AutoLvotVtiPanel({
   const gateState = useHudStore(
     useShallow((h) => {
       const g = h.hud?.gate;
-      if (!g) return { inLvot: false, angleDeg: null as number | null, tdiLateral: false };
+      if (!g) {
+        return {
+          inLvot: false,
+          inRvot: false,
+          angleDeg: null as number | null,
+          tdiLateral: false,
+          tdiRv: false,
+        };
+      }
       return {
         inLvot: g.structure === Structure.Lvot || g.peakFlowStructure === Structure.Lvot,
+        inRvot:
+          g.structure === Structure.Rvot ||
+          g.structure === Structure.PulmonaryArtery ||
+          g.structure === Structure.PulmonaryValve ||
+          g.peakFlowStructure === Structure.Rvot ||
+          g.peakFlowStructure === Structure.PulmonaryArtery ||
+          g.peakFlowStructure === Structure.PulmonaryValve,
         angleDeg: g.flowAngleDeg !== null ? Math.round(g.flowAngleDeg) : null,
         tdiLateral:
           g.structure === Structure.LvWallLateral || g.peakFlowStructure === Structure.LvWallLateral,
+        tdiRv:
+          g.structure === Structure.RvWall ||
+          g.structure === Structure.TricuspidAnnulus ||
+          g.peakFlowStructure === Structure.RvWall ||
+          g.peakFlowStructure === Structure.TricuspidAnnulus,
       };
     }),
   );
   const [busy, setBusy] = useState<
     'gate' | 'vti' | 'av-vti' | DopplerTargetId | AutoStripMeasureTarget | 'tdi-lat-m' | null
   >(null);
-  const [tdiSiteHint, setTdiSiteHint] = useState<'septal' | 'lateral'>('septal');
+  const [tdiSiteHint, setTdiSiteHint] = useState<'septal' | 'lateral' | 'rv'>('septal');
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const isPw = s.modality === 'pw';
@@ -1752,6 +1988,7 @@ function AutoLvotVtiPanel({
   const isTdi = s.modality === 'tdi';
   const isMmode = s.modality === 'm-mode' || s.modality === 'cmm';
   const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
+  const onPulmonaryView = currentViewId === 'psax-av' || gateState.inRvot;
   const viewTargets =
     presetsEnabled && showViewFeedback && currentViewId
       ? (VIEW_DOPPLER_TARGETS[currentViewId] ?? [])
@@ -1764,6 +2001,8 @@ function AutoLvotVtiPanel({
   const latestA = useMemo(() => aggOfId('mitral-a'), [s.measurements]);
   const latestEpSept = useMemo(() => aggOfId('e-prime-septal'), [s.measurements]);
   const latestEpLat = useMemo(() => aggOfId('e-prime-lateral'), [s.measurements]);
+  const latestRvSPrime = useMemo(() => aggOfId('rv-s-prime'), [s.measurements]);
+  const latestRvotAt = useMemo(() => aggOfId('rvot-acceleration-time'), [s.measurements]);
   const latestTr = useMemo(() => aggOfId('tr-vmax'), [s.measurements]);
   const latestTapse = useMemo(() => aggOfId('tapse'), [s.measurements]);
   const showAfHint = showIdentity && s.truth?.rhythm === 'atrial-fibrillation';
@@ -1777,12 +2016,17 @@ function AutoLvotVtiPanel({
       : null;
   const velocityRatio =
     latestVti && latestAvVti && latestAvVti.value > 0 ? latestVti.value / latestAvVti.value : null;
-  const activeTdiSite: 'septal' | 'lateral' = gateState.tdiLateral ? 'lateral' : tdiSiteHint;
+  const activeTdiSite: 'septal' | 'lateral' | 'rv' = gateState.tdiRv
+    ? 'rv'
+    : gateState.tdiLateral
+      ? 'lateral'
+      : tdiSiteHint;
 
   const placeTarget = async (target: Exclude<DopplerTargetId, 'lvot'>) => {
     if (busy || s.closed || !presetsEnabled) return;
     if (target === 'tdi-septal') setTdiSiteHint('septal');
     else if (target === 'tdi-lateral') setTdiSiteHint('lateral');
+    else if (target === 'rv-s-prime') setTdiSiteHint('rv');
     setBusy(target);
     setNotice(null);
     try {
@@ -1823,6 +2067,16 @@ function AutoLvotVtiPanel({
         setNotice({
           kind: 'ok',
           text: `e′ ${siteLabel}: ${(Math.abs(res.ePrime.velocityMps) * 100).toFixed(1)} cm/s.`,
+        });
+      } else if (res.target === 'rv-s-prime') {
+        setNotice({
+          kind: 'ok',
+          text: `S′ tricuspídea (VD): ${(Math.abs(res.sPrime.velocityMps) * 100).toFixed(1)} cm/s.`,
+        });
+      } else if (res.target === 'rvot-at') {
+        setNotice({
+          kind: 'ok',
+          text: `TAc pulmonar: ${Math.round(res.atMs)} ms (VTI TSVD ${res.vtiCm.toFixed(1)} cm${res.atMs < 105 ? ' · <105 ms sugiere HTP' : ''}).`,
         });
       } else if (res.target === 'tr-vmax') {
         setNotice({
@@ -1904,7 +2158,7 @@ function AutoLvotVtiPanel({
 
   const showStripAutoCard = isPw || isTdi || isCw || isMmode;
   const hasStripSummary = Boolean(
-    latestE || latestEpSept || latestEpLat || latestTr || latestTapse,
+    latestE || latestEpSept || latestEpLat || latestRvSPrime || latestRvotAt || latestTr || latestTapse,
   );
   const viewTargetsCard =
     viewTargets.length > 0 || showStripAutoCard || hasStripSummary ? (
@@ -1935,15 +2189,26 @@ function AutoLvotVtiPanel({
         {showStripAutoCard && (
           <div className="auto-lvot-actions" data-auto-strip="actions">
             {isPw && (
-              <button
-                type="button"
-                className={!onOutflowView ? 'btn-primary-soft' : 'ghost'}
-                disabled={s.closed || busy !== null}
-                onClick={() => void measureStrip('mitral-inflow')}
-                data-tip="Congela la tira PW y mide automáticamente onda E, onda A y tiempo de desaceleración (TD E)"
-              >
-                {busy === 'mitral-inflow' ? 'Midiendo…' : 'Auto E / A / TD'}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className={!onOutflowView && !onPulmonaryView ? 'btn-primary-soft' : 'ghost'}
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void measureStrip('mitral-inflow')}
+                  data-tip="Congela la tira PW y mide automáticamente onda E, onda A y tiempo de desaceleración (TD E)"
+                >
+                  {busy === 'mitral-inflow' ? 'Midiendo…' : 'Auto E / A / TD'}
+                </button>
+                <button
+                  type="button"
+                  className={onPulmonaryView ? 'btn-primary-soft' : 'ghost'}
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void measureStrip('rvot-at')}
+                  data-tip="Congela la tira PW en el TSVD y mide el tiempo de aceleración pulmonar (TAc < 105 ms apoya HTP)"
+                >
+                  {busy === 'rvot-at' ? 'Midiendo…' : 'Auto TAc pulm'}
+                </button>
+              </>
             )}
             {isTdi && (
               <>
@@ -1964,6 +2229,15 @@ function AutoLvotVtiPanel({
                   data-tip="Congela la tira TDI y detecta automáticamente el pico e′ lateral"
                 >
                   {busy === 'tdi-lat-m' ? 'Midiendo…' : 'Auto e′ lat'}
+                </button>
+                <button
+                  type="button"
+                  className={activeTdiSite === 'rv' ? 'btn-primary-soft' : 'ghost'}
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void measureStrip('rv-s-prime')}
+                  data-tip="Congela la tira TDI sobre el anillo tricuspídeo lateral y detecta el pico sistólico S′ VD"
+                >
+                  {busy === 'rv-s-prime' ? 'Midiendo…' : 'Auto S′ VD'}
                 </button>
               </>
             )}
@@ -2010,6 +2284,18 @@ function AutoLvotVtiPanel({
               <span>
                 e′l {latestEpLat.value.toFixed(1)}
                 {latestEpLat.isAveraged ? ` (${latestEpLat.beatCount}l)` : ''}
+              </span>
+            )}
+            {latestRvSPrime && (
+              <span>
+                S′ VD {latestRvSPrime.value.toFixed(1)} cm/s
+                {latestRvSPrime.isAveraged ? ` (${latestRvSPrime.beatCount}l)` : ''}
+              </span>
+            )}
+            {latestRvotAt && (
+              <span>
+                TAc {Math.round(latestRvotAt.value)} ms
+                {latestRvotAt.isAveraged ? ` (${latestRvotAt.beatCount}l)` : ''}
               </span>
             )}
             {latestTr && (

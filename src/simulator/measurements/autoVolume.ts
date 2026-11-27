@@ -56,6 +56,20 @@ export interface ExtractedChamberContour {
   /** Ordered open endocardial contour in un-inverted sector cm: hinge1 -> left wall -> apex -> right wall -> hinge2. */
   contourCm: { x: number; y: number }[];
   cutByDepth: boolean;
+  /** For RV at ED: ASE basal third maximal transverse cavity diameter (cm), parallel to the tricuspid plane. */
+  rvBasalCm?: {
+    a: { x: number; y: number };
+    b: { x: number; y: number };
+    valueCm: number;
+  };
+}
+
+export interface AutoRvBasalCaliper {
+  valueCm: number;
+  aPx: { x: number; y: number };
+  bPx: { x: number; y: number };
+  segmentStructures: number[];
+  segmentEndsOutside: [number, number];
 }
 
 export type AutoChamberFailureReason =
@@ -106,6 +120,8 @@ export interface AutoChamberVolumeSuccess {
   rrS: number;
   ed: AutoChamberFrameSnapshot;
   es: AutoChamberFrameSnapshot;
+  /** For RV: ASE basal end-diastolic diameter caliper extracted on the same ED frame. */
+  rvBasal?: AutoRvBasalCaliper;
 }
 
 export type AutoChamberVolumeResult = AutoChamberVolumeSuccess | AutoChamberVolumeFailure;
@@ -354,6 +370,70 @@ export function extractChamberContour(
   const volumeMl = chamber === 'lv' ? volumeFromProfileMl(prof) : rvVolumeFromAreaMl(areaCm2);
   if (!(volumeMl > 0) || !Number.isFinite(volumeMl)) return null;
 
+  // For RV, also locate the ASE basal-third transverse cavity diameter (parallel to the tricuspid plane,
+  // just apical to the open tricuspid leaflet tips, bounded by RV free wall and interventricular septum).
+  let rvBasalCm: ExtractedChamberContour['rvBasalCm'];
+  if (chamber === 'rv') {
+    const sampleSt = (x: number, y: number): number => {
+      const r = Math.hypot(x, y);
+      if (r <= 0 || r >= depthCm) return 0;
+      const th = Math.atan2(x, y);
+      const half = sectorRad / 2;
+      if (th < -half || th > half) return 0;
+      const li = Math.min(lines - 1, Math.max(0, Math.floor(((th + half) / sectorRad) * lines)));
+      const si = Math.min(samples - 1, Math.max(0, Math.floor((r / depthCm) * samples)));
+      return structure[li * samples + si] ?? 0;
+    };
+    const isWall = (st: number) =>
+      st === Structure.RvWall ||
+      st === Structure.LvWallSeptal ||
+      st === Structure.LvWallInferior ||
+      st === Structure.LvWallAnterior ||
+      st === Structure.Pericardium;
+    const tLo = Math.max(1.2, longAxisCm * 0.18);
+    const tHi = Math.min(longAxisCm * 0.38, Math.max(tLo + 1.0, 3.2));
+    let bestSpan = 0;
+    const stepCm = 0.025;
+    for (let t = tLo; t <= tHi; t += 0.12) {
+      const ox = bx + ax * t;
+      const oy = by + ay * t;
+      let inRun = false;
+      let r0 = 0;
+      let widest: { s0: number; s1: number } | null = null;
+      for (let s = -4.5; s <= 4.5; s += stepCm) {
+        const st = sampleSt(ox + px * s, oy + py * s);
+        if (st === Structure.RvCavity) {
+          if (!inRun) {
+            inRun = true;
+            r0 = s;
+          }
+        } else if (inRun) {
+          if (!widest || s - stepCm - r0 > widest.s1 - widest.s0) {
+            widest = { s0: r0, s1: s - stepCm };
+          }
+          inRun = false;
+        }
+      }
+      if (inRun && (!widest || 4.5 - r0 > widest.s1 - widest.s0)) {
+        widest = { s0: r0, s1: 4.5 };
+      }
+      if (!widest) continue;
+      const len = widest.s1 - widest.s0;
+      if (len < 1.5 || len > 7.5) continue;
+      const e0 = sampleSt(ox + px * (widest.s0 - 0.14), oy + py * (widest.s0 - 0.14));
+      const e1 = sampleSt(ox + px * (widest.s1 + 0.14), oy + py * (widest.s1 + 0.14));
+      if (!isWall(e0) || !isWall(e1)) continue;
+      if (len > bestSpan) {
+        bestSpan = len;
+        rvBasalCm = {
+          a: { x: ox + px * widest.s0, y: oy + py * widest.s0 },
+          b: { x: ox + px * widest.s1, y: oy + py * widest.s1 },
+          valueCm: len,
+        };
+      }
+    }
+  }
+
   return {
     chamber,
     areaCm2,
@@ -362,6 +442,7 @@ export function extractChamberContour(
     baseSpanCm,
     contourCm,
     cutByDepth: cutBySectorDepth({ structure, polar: spec }, [...cavSet]),
+    ...(rvBasalCm ? { rvBasalCm } : {}),
   };
 }
 
@@ -550,6 +631,40 @@ export function computeAutoChamberVolume(
   const efPct = (svMl / ed.volumeMl) * 100;
   const facPct = fractionalAreaChange(ed.areaCm2, es.areaCm2);
 
+  let rvBasal: AutoRvBasalCaliper | undefined;
+  if (chamber === 'rv' && edExt.rvBasalCm) {
+    const aPx = sectorCmToPixel(ed.sector, edExt.rvBasalCm.a);
+    const bPx = sectorCmToPixel(ed.sector, edExt.rvBasalCm.b);
+    const p = edFrame.spec;
+    const atPx = (x: number, y: number): number => {
+      const { rCm, thetaRad } = pixelToPolar(ed.sector, x, y);
+      if (rCm < 0 || rCm > p.depthCm || Math.abs(thetaRad) > p.sectorRad / 2) return 0;
+      const li = Math.min(
+        p.lines - 1,
+        Math.max(0, Math.floor(((thetaRad + p.sectorRad / 2) / p.sectorRad) * p.lines)),
+      );
+      const si = Math.min(p.samples - 1, Math.max(0, Math.floor((rCm / p.depthCm) * p.samples)));
+      return edFrame.structure[li * p.samples + si] ?? 0;
+    };
+    const along: number[] = [];
+    for (let i = 0; i < 24; i++) {
+      const frac = (i + 0.5) / 24;
+      along.push(atPx(aPx.x + (bPx.x - aPx.x) * frac, aPx.y + (bPx.y - aPx.y) * frac));
+    }
+    const dx = bPx.x - aPx.x;
+    const dy = bPx.y - aPx.y;
+    const lenPx = Math.hypot(dx, dy) || 1;
+    const ux = (dx / lenPx) * 3;
+    const uy = (dy / lenPx) * 3;
+    rvBasal = {
+      valueCm: edExt.rvBasalCm.valueCm,
+      aPx,
+      bPx,
+      segmentStructures: along,
+      segmentEndsOutside: [atPx(aPx.x - ux, aPx.y - uy), atPx(bPx.x + ux, bPx.y + uy)],
+    };
+  }
+
   return {
     ok: true,
     chamber,
@@ -563,5 +678,6 @@ export function computeAutoChamberVolume(
     rrS: edFrame.rrS,
     ed,
     es,
+    ...(rvBasal ? { rvBasal } : {}),
   };
 }

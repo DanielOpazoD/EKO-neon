@@ -13,7 +13,13 @@ import {
   STRIP_MM_WIDTH,
 } from './autoTrace';
 
-export type AutoStripMeasureTarget = 'mitral-inflow' | 'tdi-e-prime' | 'tr-vmax' | 'tapse';
+export type AutoStripMeasureTarget =
+  | 'mitral-inflow'
+  | 'tdi-e-prime'
+  | 'rv-s-prime'
+  | 'tr-vmax'
+  | 'rvot-at'
+  | 'tapse';
 
 export interface AutoMitralInflowSuccess {
   ok: true;
@@ -37,11 +43,29 @@ export interface AutoTdiEPrimeSuccess {
   ePrime: { xPx: number; velocityMps: number };
 }
 
+export interface AutoRvSPrimeSuccess {
+  ok: true;
+  target: 'rv-s-prime';
+  beatIndex: number;
+  sPrime: { xPx: number; velocityMps: number };
+}
+
 export interface AutoTrVmaxSuccess {
   ok: true;
   target: 'tr-vmax';
   beatIndex: number;
   vmax: { xPx: number; velocityMps: number; peakGradientMmHg: number };
+}
+
+export interface AutoRvotAtSuccess {
+  ok: true;
+  target: 'rvot-at';
+  beatIndex: number;
+  onsetXPx: number;
+  peakXPx: number;
+  peakVelocityMps: number;
+  atMs: number;
+  vtiCm: number;
 }
 
 export interface AutoTapseSuccess {
@@ -63,7 +87,9 @@ export interface AutoStripMeasureFailure {
 export type AutoStripMeasureResult =
   | AutoMitralInflowSuccess
   | AutoTdiEPrimeSuccess
+  | AutoRvSPrimeSuccess
   | AutoTrVmaxSuccess
+  | AutoRvotAtSuccess
   | AutoTapseSuccess
   | AutoStripMeasureFailure;
 
@@ -532,6 +558,276 @@ export function autoMeasureTdiEPrime(
     target: 'tdi-e-prime',
     reason: 'no-signal',
     message: 'No se detectó señal tisular e′ clara; verifica que el gate TDI esté en el anillo mitral.',
+  };
+}
+
+/**
+ * Pure strip-signal detector for systolic lateral tricuspid annular TDI velocity (S′ VD).
+ * Uses the same modal spectral-ridge centroid as e′ over the systolic ejection window.
+ */
+export function autoMeasureRvSPrime(
+  strip: Float32Array,
+  cols: number,
+  displayCols: number,
+  head: number,
+  stripPhase: Float32Array,
+  stripBeatIndex: Uint32Array,
+  stripSampleTime: Float64Array,
+  spectral: SpectralSettings,
+  phaseMarks: PhaseMarks,
+  modality: ImagingModality,
+): AutoStripMeasureResult {
+  if (modality !== 'tdi') {
+    return {
+      ok: false,
+      target: 'rv-s-prime',
+      reason: 'wrong-modality',
+      message: 'Activa Doppler tisular (TDI) sobre el anillo tricuspídeo lateral para medir S′ VD.',
+    };
+  }
+  if (cols < 16 || strip.length < cols * SPECTRAL_BINS) {
+    return {
+      ok: false,
+      target: 'rv-s-prime',
+      reason: 'incomplete-beat',
+      message: 'Aún no hay suficientes datos TDI para detectar una sístole completa.',
+    };
+  }
+
+  const pixelsPerColumn = (displayCols || cols) / cols;
+  const spans = findSpectralBeatSpans(cols, head, stripPhase, stripBeatIndex, stripSampleTime);
+  const wStart = Math.max(0.02, phaseMarks.ejectionStart - 0.02);
+  const wEnd = Math.min(0.6, phaseMarks.ejectionEnd + 0.04);
+  const candidates = spans
+    .filter((sp) => sp.minPhase <= wStart + 0.02 && sp.maxPhase >= wEnd - 0.02)
+    .sort((a, b) => b.maxTimeS - a.maxTimeS);
+
+  if (!candidates.length) {
+    return {
+      ok: false,
+      target: 'rv-s-prime',
+      reason: 'incomplete-beat',
+      message: 'Espera ~1 s en TDI para registrar una onda sistólica S′ completa en la tira.',
+    };
+  }
+
+  const { vMin, vMax } = spectralRange(spectral);
+  const span = vMax - vMin;
+  const baselineBin = Math.max(0, Math.min(SPECTRAL_BINS, (vMax / span) * SPECTRAL_BINS));
+  const wf = spectral.wallFilterMps + 0.008;
+
+  for (const cand of candidates) {
+    let c0 = -1;
+    let c1 = -1;
+    for (let c = cand.c0; c <= cand.c1; c++) {
+      const ph = stripPhase[c] ?? 0;
+      if (ph >= wStart && ph <= wEnd) {
+        if (c0 < 0) c0 = c;
+        c1 = c;
+      }
+    }
+    if (c0 < 0 || c1 - c0 < 4) continue;
+
+    let posEnergy = 0;
+    let negEnergy = 0;
+    for (let c = c0; c <= c1; c++) {
+      const base = c * SPECTRAL_BINS;
+      let colMax = 0;
+      for (let b = 0; b < SPECTRAL_BINS; b++) colMax = Math.max(colMax, strip[base + b] ?? 0);
+      const thr = envelopeThreshold(colMax, spectral);
+      let upBest = thr;
+      let dnBest = thr;
+      for (let b = 0; b < SPECTRAL_BINS; b++) {
+        const val = strip[base + b] ?? 0;
+        if (val <= thr) continue;
+        const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        if (Math.abs(vBin) <= wf) continue;
+        if (b < baselineBin) upBest = Math.max(upBest, val);
+        else dnBest = Math.max(dnBest, val);
+      }
+      if (upBest > thr) posEnergy += upBest;
+      if (dnBest > thr) negEnergy += dnBest;
+    }
+    const useAbove = posEnergy >= negEnergy;
+    const bStart = useAbove ? 0 : Math.ceil(baselineBin);
+    const bEnd = useAbove ? Math.floor(baselineBin) - 1 : SPECTRAL_BINS - 1;
+
+    const modalV: number[] = [];
+    for (let c = c0; c <= c1; c++) {
+      const base = c * SPECTRAL_BINS;
+      let colMax = 0;
+      for (let b = 0; b < SPECTRAL_BINS; b++) colMax = Math.max(colMax, strip[base + b] ?? 0);
+      const thr = envelopeThreshold(colMax, spectral);
+      let peakBin = -1;
+      let peakVal = thr;
+      for (let b = bStart; b <= bEnd; b++) {
+        const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+        if (Math.abs(vBin) <= wf) continue;
+        const val = strip[base + b] ?? 0;
+        if (val > peakVal) {
+          peakVal = val;
+          peakBin = b;
+        }
+      }
+      if (peakBin < 0) {
+        modalV.push(0);
+      } else {
+        let wSum = 0;
+        let vSum = 0;
+        const lo = Math.max(bStart, peakBin - 2);
+        const hi = Math.min(bEnd, peakBin + 2);
+        for (let b = lo; b <= hi; b++) {
+          const val = strip[base + b] ?? 0;
+          if (val >= 0.6 * peakVal) {
+            const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+            wSum += val;
+            vSum += val * vBin;
+          }
+        }
+        modalV.push(wSum > 0 ? vSum / wSum : 0);
+      }
+    }
+
+    let bestIdx = -1;
+    let bestAbs = 0;
+    for (let i = 0; i < modalV.length; i++) {
+      const a = modalV[Math.max(0, i - 1)]!;
+      const b = modalV[i]!;
+      const d = modalV[Math.min(modalV.length - 1, i + 1)]!;
+      const med = a + b + d - Math.min(a, b, d) - Math.max(a, b, d);
+      if (Math.abs(med) > bestAbs) {
+        bestAbs = Math.abs(med);
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0 && bestAbs >= 0.025) {
+      const a = modalV[Math.max(0, bestIdx - 1)]!;
+      const b = modalV[bestIdx]!;
+      const d = modalV[Math.min(modalV.length - 1, bestIdx + 1)]!;
+      const medV = a + b + d - Math.min(a, b, d) - Math.max(a, b, d);
+      return {
+        ok: true,
+        target: 'rv-s-prime',
+        beatIndex: cand.beatIndex,
+        sPrime: {
+          xPx: (c0 + bestIdx + 0.5) * pixelsPerColumn,
+          velocityMps: medV,
+        },
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    target: 'rv-s-prime',
+    reason: 'no-signal',
+    message: 'No se detectó señal sistólica S′ clara; verifica que el gate TDI esté en el anillo tricuspídeo lateral.',
+  };
+}
+
+/**
+ * Pure strip-signal detector for Pulmonary Acceleration Time (TAc pulmonar) and RVOT VTI on PW.
+ * Measures from systolic ejection onset to peak pulmonary outflow velocity (< 105 ms supports PH).
+ */
+export function autoMeasureRvotAt(
+  strip: Float32Array,
+  cols: number,
+  displayCols: number,
+  head: number,
+  stripPhase: Float32Array,
+  stripBeatIndex: Uint32Array,
+  stripSampleTime: Float64Array,
+  spectral: SpectralSettings,
+  phaseMarks: PhaseMarks,
+  modality: ImagingModality,
+): AutoStripMeasureResult {
+  if (modality !== 'pw') {
+    return {
+      ok: false,
+      target: 'rvot-at',
+      reason: 'wrong-modality',
+      message: 'Activa Doppler pulsado (PW) en el TSVD / válvula pulmonar para medir el TAc pulmonar.',
+    };
+  }
+  const traced = autoTraceBestSystolicBeat(
+    strip,
+    cols,
+    displayCols,
+    head,
+    stripPhase,
+    stripBeatIndex,
+    stripSampleTime,
+    spectral,
+    phaseMarks,
+    true,
+  );
+  if (!traced.ok) {
+    return {
+      ok: false,
+      target: 'rvot-at',
+      reason: traced.reason === 'incomplete-beat' ? 'incomplete-beat' : 'no-signal',
+      message: traced.message,
+    };
+  }
+  const raw = traced.velocitiesMps;
+  if (raw.length < 8) {
+    return {
+      ok: false,
+      target: 'rvot-at',
+      reason: 'no-signal',
+      message: 'Flujo pulmonar demasiado breve o débil para determinar el tiempo de aceleración.',
+    };
+  }
+
+  // 3-point median smoothing suppresses single-column speckle jitter around the systolic peak
+  const sm = raw.map((_, i) => {
+    const a = Math.abs(raw[Math.max(0, i - 1)]!);
+    const b = Math.abs(raw[i]!);
+    const c = Math.abs(raw[Math.min(raw.length - 1, i + 1)]!);
+    return a + b + c - Math.min(a, b, c) - Math.max(a, b, c);
+  });
+
+  let peakIdx = 0;
+  for (let i = 1; i < sm.length; i++) {
+    if (sm[i]! > sm[peakIdx]!) peakIdx = i;
+  }
+  const peakAbs = sm[peakIdx]!;
+  if (peakAbs < 0.25) {
+    return {
+      ok: false,
+      target: 'rvot-at',
+      reason: 'no-signal',
+      message: 'No se detectó señal de flujo pulmonar clara; verifica que el gate PW esté en el TSVD.',
+    };
+  }
+
+  const onsetThr = Math.max(0.08, 0.12 * peakAbs);
+  let onsetIdx = 0;
+  for (let i = 0; i < peakIdx; i++) {
+    if (sm[i]! >= onsetThr) {
+      onsetIdx = i;
+      break;
+    }
+  }
+  const atMs = (peakIdx - onsetIdx) * traced.secondsPerColumn * 1000;
+  if (!(atMs >= 30 && atMs <= 260)) {
+    return {
+      ok: false,
+      target: 'rvot-at',
+      reason: 'no-signal',
+      message: 'No se pudo identificar un pico de aceleración pulmonar fisiológico en la tira PW.',
+    };
+  }
+
+  return {
+    ok: true,
+    target: 'rvot-at',
+    beatIndex: traced.beatIndex,
+    onsetXPx: traced.x0 + onsetIdx * traced.pixelsPerColumn,
+    peakXPx: traced.x0 + peakIdx * traced.pixelsPerColumn,
+    peakVelocityMps: raw[peakIdx]!,
+    atMs,
+    vtiCm: traced.vtiCm,
   };
 }
 

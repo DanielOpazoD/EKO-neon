@@ -3,6 +3,7 @@ import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { computeAutoChamberVolume } from '@/simulator/measurements/autoVolume';
+import { computeAutoIvc } from '@/simulator/measurements/autoIvc';
 import { computeAutoLaVolume } from '@/simulator/measurements/autoLaVolume';
 import { computeAutoPlaxMeasurements } from '@/simulator/measurements/autoPlax';
 import { findLvotGateFromPolar } from '@/simulator/measurements/autoLvotGate';
@@ -130,6 +131,11 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
     );
     return { kind: 'autoPlax', result };
   }
+  if (req.kind === 'autoIvc') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    const result = computeAutoIvc(ctx.cine, refFrame, ctx.input.display, ctx.input.settings);
+    return { kind: 'autoIvc', result };
+  }
   if (req.kind === 'autoLvotGate') {
     const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
     if (!refFrame) {
@@ -188,10 +194,13 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
       Math.abs(f.acquisition.probe.rotationDeg - refFrame.acquisition.probe.rotationDeg) < 3 &&
       Math.abs(f.acquisition.probe.tiltDeg - refFrame.acquisition.probe.tiltDeg) < 3 &&
       Math.abs(f.acquisition.probe.rockDeg - refFrame.acquisition.probe.rockDeg) < 3;
-    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT/AV CW, early-diastole for mitral/TDI, ED for TAPSE/TR)
+    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT/AV CW/RVOT PW/RV S', early-diastole for mitral/TDI e', ED for TAPSE/TR)
     const desiredPhase =
-      req.target === 'lvot' || req.target === 'av-cw'
-        ? pm.ejectionStart + 0.5 * (pm.ejectionEnd - pm.ejectionStart)
+      req.target === 'lvot' ||
+      req.target === 'av-cw' ||
+      req.target === 'rvot-pw' ||
+      req.target === 'rv-s-prime'
+        ? pm.ejectionStart + 0.4 * (pm.ejectionEnd - pm.ejectionStart)
         : req.target === 'mitral-inflow' || req.target === 'tdi-septal' || req.target === 'tdi-lateral'
           ? 0.5 * (pm.mitralOpen + pm.eEnd)
           : 0;

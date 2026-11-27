@@ -71,6 +71,8 @@ import {
 } from './strip/autoTrace';
 import {
   autoMeasureMitralInflow,
+  autoMeasureRvotAt,
+  autoMeasureRvSPrime,
   autoMeasureTapse,
   autoMeasureTdiEPrime,
   autoMeasureTrVmax,
@@ -1027,18 +1029,44 @@ export class StripEngine {
                 phaseMarks,
                 this.acquired.modality,
               )
-            : autoMeasureTrVmax(
-                strip,
-                this.stripCols,
-                this.displayCols,
-                this.stripHead,
-                this.stripPhase,
-                this.stripBeatIndex,
-                this.stripSampleTime,
-                eff,
-                phaseMarks,
-                this.acquired.modality,
-              );
+            : req.target === 'rv-s-prime'
+              ? autoMeasureRvSPrime(
+                  strip,
+                  this.stripCols,
+                  this.displayCols,
+                  this.stripHead,
+                  this.stripPhase,
+                  this.stripBeatIndex,
+                  this.stripSampleTime,
+                  eff,
+                  phaseMarks,
+                  this.acquired.modality,
+                )
+              : req.target === 'rvot-at'
+                ? autoMeasureRvotAt(
+                    strip,
+                    this.stripCols,
+                    this.displayCols,
+                    this.stripHead,
+                    this.stripPhase,
+                    this.stripBeatIndex,
+                    this.stripSampleTime,
+                    eff,
+                    phaseMarks,
+                    this.acquired.modality,
+                  )
+                : autoMeasureTrVmax(
+                    strip,
+                    this.stripCols,
+                    this.displayCols,
+                    this.stripHead,
+                    this.stripPhase,
+                    this.stripBeatIndex,
+                    this.stripSampleTime,
+                    eff,
+                    phaseMarks,
+                    this.acquired.modality,
+                  );
       return { kind: 'autoMeasureStrip', result };
     }
     return null;
