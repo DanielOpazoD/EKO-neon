@@ -16,6 +16,7 @@ import {
   cavalVenousVelocityMps,
   coronarySinusVelocityMps,
   mrJetInitialDirection,
+  pulmonaryVeinPeaks,
   sampleFlow,
   sampleLeafletVelocity,
   sampleTissueVelocity,
@@ -36,6 +37,8 @@ import {
 import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
 import { colorWallFilterRangeMps } from './kasaiEstimator';
 import { computeHeartPose, heartAnchors } from '@/simulator/anatomy/heartModel';
+import { atrialScale } from '@/simulator/anatomy/classify/atria';
+import { pulmonaryVeinSegment } from '@/simulator/anatomy/pulmonaryVeins';
 import { regionalMeanFraction } from '@/simulator/anatomy/lvGeometry';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 
@@ -1911,5 +1914,48 @@ test('aortic regurgitation produces LVOT jet with 3D aortic PISA and holodiastol
   assert.ok(
     Math.abs(net.inflowMlps - totalStorage - totalOutlets) < 1e-6,
     'Aortic network must strictly conserve mass during diastolic AR reversal',
+  );
+});
+
+test('pulmonary veins exhibit normal antegrade S/D, moderate-MR systolic blunting, and severe-MR holosystolic flow reversal', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+  // 1. Normal: antegrade S > 0, D > 0; moderate MR (hfref-severe-mr): blunted 0 < S < D; severe MR (mvp-primary-mr): S < -0.25 reversal
+  const normPv = pulmonaryVeinPeaks(loadCaseById('normal-excellent'));
+  const modMrPv = pulmonaryVeinPeaks(loadCaseById('hfref-severe-mr'));
+  const sevMrPv = pulmonaryVeinPeaks(loadCaseById('mvp-primary-mr'));
+  assert.ok(normPv.sMps > 0.5 && normPv.dMps > 0.4, `Normal PV should have brisk antegrade S/D (${normPv.sMps.toFixed(2)}/${normPv.dMps.toFixed(2)})`);
+  assert.ok(modMrPv.sMps > 0 && modMrPv.sMps < modMrPv.dMps * 0.4, `Moderate MR should blunt systolic S (${modMrPv.sMps.toFixed(2)} vs D=${modMrPv.dMps.toFixed(2)})`);
+  assert.ok(sevMrPv.sMps < -0.25, `Severe primary MR (EROA 0.45) must reverse pulmonary vein S wave (< -0.25 m/s), got ${sevMrPv.sMps.toFixed(2)} m/s`);
+
+  // 2. Spatial check inside the wall-clipped left superior pulmonary vein (index 1) of mvp-primary-mr during systole: flow exits LA toward hilum
+  const mvpCase = loadCaseById('mvp-primary-mr');
+  const models = buildCaseModels(mvpCase, REST_PATIENT);
+  const flow = buildFlowParams(mvpCase, models.heart, models.tables, models.thorax);
+  const A = heartAnchors(models.heart);
+  const phase = 0.2;
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phase, flow.flowPeaks));
+  const seg = new Float64Array(6);
+  const zTop = A.laCenter.z - A.laR.z;
+  const zBottom = hp.zAnn + 0.25;
+  const bo = atrialScale(hp.laBooster, A.laReservoir, hp.state.contraction);
+  pulmonaryVeinSegment(1, A.laCenter, A.laR, bo, 0.5 * (zTop + zBottom), 0.5 * (zBottom - zTop), seg, {
+    nx: A.laPostN.x,
+    ny: A.laPostN.y,
+    nz: A.laPostN.z,
+    d: A.laPostD,
+  });
+  const midX = 0.5 * (seg[0]! + seg[3]!);
+  const midY = 0.5 * (seg[1]! + seg[4]!);
+  const midZ = 0.5 * (seg[2]! + seg[5]!);
+  // Antegrade direction (distal -> ostium into LA)
+  const ux = seg[0]! - seg[3]!;
+  const uy = seg[1]! - seg[4]!;
+  const uz = seg[2]! - seg[5]!;
+  sampleFlow(flow, models.tables, hp, phase, midX, midY, midZ, fs, Structure.PulmonaryVein);
+  const dotAntegrade = fs.vx * ux + fs.vy * uy + fs.vz * uz;
+  assert.ok(
+    fs.present === 1 && dotAntegrade < 0 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.25,
+    `Expected systolic retrograde reversal in left superior PV of mvp-primary-mr, got v=${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)}, dot=${dotAntegrade.toFixed(2)}`,
   );
 });

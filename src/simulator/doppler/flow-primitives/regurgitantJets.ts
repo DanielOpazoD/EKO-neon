@@ -34,6 +34,7 @@ import {
 
 /** Scratch for the pulmonary vein being sampled (no allocation per sample). */
 const PV_SEG = new Float64Array(6);
+const PV_WALL = { nx: 0, ny: 0, nz: 0, d: 0 };
 
 /** Pulmonary venous flow in the four vein stubs and their ostia (geometry mirrors heartModel's veins). */
 export function samplePulmonaryVeins(
@@ -57,7 +58,7 @@ export function samplePulmonaryVeins(
   const czL = (zTop + zBottom) / 2;
   const tm = tables.timings;
   const t = phase * tables.rrS;
-  // S: during ventricular systole (annular descent pulls blood into the LA)
+  // S: during ventricular systole (annular descent pulls blood into the LA; reverses in severe MR)
   const uS = (t - tm.ejectionStartS + 0.03) / (tm.ejectionEndS - tm.ejectionStartS + 0.08);
   const sWave = uS > 0 && uS < 1 ? Math.pow(Math.sin(Math.PI * uS), 0.9) : 0;
   // D: mirrors the mitral E wave (conduit), Ar: atrial contraction reversal
@@ -66,20 +67,26 @@ export function samplePulmonaryVeins(
   const dWave = inE ? sampleTable(tables.mitralFlowMlps, phase) / qmvMax : 0;
   const inA = tm.hasAWave && t > tm.aStartS && t < tm.aEndS + 0.03;
   const arWave = inA ? Math.sin((Math.PI * (t - tm.aStartS)) / (tm.aEndS + 0.03 - tm.aStartS)) : 0;
-  const vAlong = pv.sMps * sWave + pv.dMps * dWave - pv.arMps * arWave; // + = into the LA
+  const vAlong = pv.sMps * sWave + pv.dMps * dWave - pv.arMps * arWave; // + = into the LA, − = reversal
   if (Math.abs(vAlong) < 0.02) return;
   const rzL = (zBottom - zTop) / 2;
   const bo = atrialScale(hp.laBooster, pv.laReservoir, hp.state.contraction);
+  const A = heartAnchors(p.heart);
+  PV_WALL.nx = A.laPostN.x;
+  PV_WALL.ny = A.laPostN.y;
+  PV_WALL.nz = A.laPostN.z;
+  PV_WALL.d = A.laPostD;
+  const disp = vAlong < -0.22 ? 0.12 : (p.turbulence['pulmonary-vein'] ?? 0.06);
   for (let i = 0; i < 4; i++) {
-    // the vein of the classifier (pulmonaryVeins.ts): the flow runs where the wall is drawn
-    pulmonaryVeinSegment(i, la, lr, bo, czL, rzL, PV_SEG);
+    // exact same wall-clipped segment as classify/atriaVessels.ts (decisions 143, 330, 337)
+    pulmonaryVeinSegment(i, la, lr, bo, czL, rzL, PV_SEG, PV_WALL);
     const ox = PV_SEG[0]!,
       oy = PV_SEG[1]!,
       oz = PV_SEG[2]!;
     const ex = PV_SEG[3]!,
       ey = PV_SEG[4]!,
       ez = PV_SEG[5]!;
-    // vein axis from the distal end toward the ostium, extended 0.8 cm into the LA
+    // vein axis from the distal end toward the ostium, extended 1.45 cm smoothly into the LA roof
     const ax = ox - ex,
       ay = oy - ey,
       az = oz - ez;
@@ -91,24 +98,24 @@ export function samplePulmonaryVeins(
       dy = y - ey,
       dz = z - ez;
     const along = dx * ux + dy * uy + dz * uz;
-    if (along < 0 || along > L + 1.1) continue;
+    if (along < 0 || along > L + 1.45) continue;
     const qx = dx - ux * along,
       qy = dy - uy * along,
       qz = dz - uz * along;
     const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
-    const R = along <= L ? PV_RADIUS - 0.03 : PV_RADIUS - 0.03 + (along - L) * 0.6; // spreads into the atrium
+    const R = along <= L ? PV_RADIUS - 0.02 : PV_RADIUS - 0.02 + (along - L) * 0.55; // spreads into the atrium
     const sOut = Math.max(0, along - L);
     if (rho >= jetReach(0.84 * R, sOut)) continue;
     const prof = jetProfile(rho, 0.84 * R, sOut);
     const decay =
-      (along <= L ? 1 : 1 / (1 + (along - L) / 0.6)) *
-      smoothstep(0, 0.5, along) *
-      fadeOut(along, L + 0.4, L + 1.1);
+      (along <= L ? 1 : 1 / (1 + (along - L) / 0.72)) *
+      smoothstep(0, 0.4, along) *
+      fadeOut(along, L + 0.5, L + 1.45);
     const v = vAlong * prof * decay;
     out.vx += ux * v;
     out.vy += uy * v;
     out.vz += uz * v;
-    out.dispersion = Math.max(out.dispersion, p.turbulence['pulmonary-vein'] ?? 0.06);
+    out.dispersion = Math.max(out.dispersion, disp);
     out.present = 1;
   }
 }
