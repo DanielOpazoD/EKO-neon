@@ -1675,3 +1675,73 @@ test('LV diastolic apical vortex redirects E-deceleration flow basally along the
   sampleFlow(flow, models.tables, hp, phDecel, retX, retY, retZ, fs, Structure.AorticRoot);
   assert.equal(fs.present, 0, 'LV diastolic vortex must never leak into AorticRoot');
 });
+
+test('severe aortic stenosis shows laminar distal-LVOT convergence and post-stenotic sinus turbulent plume while preserving PW LVOT plane', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const asCase = loadCaseById('aortic-stenosis-severe');
+  const models = buildCaseModels(asCase, REST_PATIENT);
+  const flow = buildFlowParams(asCase, models.heart, models.tables, models.thorax);
+  const phase = 0.2;
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phase, flow.flowPeaks));
+  const ax = flow.avAxis;
+  const cz = flow.avCenter.z + hp.zAnn * 0.65;
+  // Build an orthonormal radial vector perpendicular to avAxis
+  const pxRaw = -ax.y, pyRaw = ax.x;
+  const pLen = Math.hypot(pxRaw, pyRaw);
+  const rx = pxRaw / pLen, ry = pyRaw / pLen;
+
+  // 1. PW LVOT plane (tAv = -0.5 cm, rho = 0): exact continuity speed and pure axial alignment
+  const qao = sampleTable(models.tables.aorticFlowMlps, phase);
+  const expectedLvotV = qao / flow.lvotAreaCm2 / 100;
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x + ax.x * -0.5,
+    flow.avCenter.y + ax.y * -0.5,
+    cz + ax.z * -0.5,
+    fs,
+    Structure.Lvot,
+  );
+  const vLvot = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(
+    Math.abs(vLvot - expectedLvotV) / expectedLvotV < 0.03,
+    `PW LVOT plane speed (${vLvot.toFixed(2)} m/s) must match exact continuity (${expectedLvotV.toFixed(2)} m/s)`,
+  );
+
+  // 2. Distal LVOT off-axis proximal convergence (tAv = -0.10 cm, rho = 0.55 cm): bends inward toward avAxis
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x + ax.x * -0.1 + rx * 0.55,
+    flow.avCenter.y + ax.y * -0.1 + ry * 0.55,
+    cz + ax.z * -0.1,
+    fs,
+    Structure.Lvot,
+  );
+  const radialDot = fs.vx * rx + fs.vy * ry;
+  assert.ok(
+    fs.present === 1 && radialDot < -0.15,
+    `Expected inward proximal flow convergence beneath stenotic AV (radialDot < -0.15), got ${radialDot.toFixed(2)} m/s`,
+  );
+
+  // 3. Post-stenotic outer aortic sinus (tAv = 0.9 cm, rho = 1.15 cm): entrained turbulent sinus plume
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x + ax.x * 0.9 + rx * 1.15,
+    flow.avCenter.y + ax.y * 0.9 + ry * 1.15,
+    cz + ax.z * 0.9,
+    fs,
+    Structure.AorticRoot,
+  );
+  assert.ok(
+    fs.present === 1 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.35 && fs.dispersion > 0.45,
+    `Expected post-stenotic turbulent sinus entrainment plume in AorticRoot, got v=${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)}, d=${fs.dispersion.toFixed(2)}`,
+  );
+});
