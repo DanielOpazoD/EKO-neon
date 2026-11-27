@@ -374,4 +374,28 @@ describe('SimStore case identity and the views acquired by hand', () => {
     assert.equal(frameOfSession(acq('normal-excellent-window', s.sessionEpoch), s), false);
     assert.equal(frameOfSession(undefined, s), false);
   });
+
+  it('keeps a user-clicked preset view when caseReady arrives immediately after switching cases', () => {
+    get().setMode('sandbox');
+    get().loadCase('aortic-stenosis-severe');
+    // Learner immediately clicks A5C before the worker's caseReady fires
+    get().startPresetView('a5c');
+    assert.equal(get().targetViewId, 'a5c');
+
+    const marks = {} as unknown as PhaseMarks;
+    const truth = {} as unknown as StructuredEchoTruth;
+    get().caseReady({
+      truth,
+      caseId: 'aortic-stenosis-severe',
+      phaseMarks: marks,
+      lvLengthCm: 8.2,
+      workerMode: 'worker',
+    });
+
+    // openOnStartView must stand down instead of overriding A5C with the opening PLAX jump
+    assert.equal(get().targetViewId, 'a5c');
+    assert.equal(get().openingView, null);
+    assert.deepEqual(get().presetViews, ['a5c']);
+    get().resetProbe();
+  });
 });

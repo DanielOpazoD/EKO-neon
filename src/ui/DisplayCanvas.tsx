@@ -10,7 +10,7 @@ import type { SimOutput } from '@/simulator/core/protocol';
 import { reprojectGeometry } from '@/simulator/measurements/geometry';
 import { hasGate, isStripModality } from '@/simulator/renderer/modality';
 import { pixelToPolar, polarToPixel } from '@/simulator/renderer/scanConvert';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { cineOffsetAtX, cineOffsetOnEcg, ecgLayoutOf } from './ecgTrace';
 import { ImageHud } from './ImageHud';
 import { ImageQuickBar } from './ImageQuickBar';
@@ -42,7 +42,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
   const wrapRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLCanvasElement>(null);
   const ovRef = useRef<HTMLCanvasElement>(null);
-  const [size, setSize] = useState({ width: 640, height: 520 });
+  const lastSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingRef = useRef<PendingMeasurement>({ points: [] });
   const lastOutRef = useRef<SimOutput | null>(null);
   /** the overlay redraw of the drawing effect, so tool clicks refresh the overlay without waiting for a frame */
@@ -72,7 +72,9 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       const r = el.getBoundingClientRect();
       // the frame keeps the box's proportions: the canvases stretch over the box, and must stretch alike in x and y
       const next = frameSizeForBox(r.width, r.height);
-      setSize(next);
+      const prev = lastSizeRef.current;
+      if (prev && prev.width === next.width && prev.height === next.height) return;
+      lastSizeRef.current = next;
       onSize(next);
     });
     ro.observe(el);
@@ -398,12 +400,9 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
 
   return (
     <div className={`display-wrap${frozen ? ' frozen' : ''}`} ref={wrapRef}>
-      <canvas
-        ref={imgRef}
-        width={size.width}
-        height={size.height}
-        aria-label="Imagen ecográfica simulada"
-      />
+      {/* imgRef dimensions are updated exclusively inside drawImage(out) right before painting so
+          layout/resize events never clear the ultrasound canvas to black before the next frame arrives. */}
+      <canvas ref={imgRef} aria-label="Imagen ecográfica simulada" />
       <canvas
         ref={ovRef}
         className={`overlay${reviewMode ? ' review' : ''}${reviewMode && reviewTool === 'lasso' ? ' lasso' : ''}${armed ? ' armed' : ''}`}
