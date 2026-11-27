@@ -766,14 +766,15 @@ export async function runAutoSpectralVti(
   const st = useSimStore.getState();
   const initialHud = useHudStore.getState().hud;
   const acquiredMod = initialHud?.acquisition?.modality ?? st.modality;
-  if (acquiredMod !== 'pw' && acquiredMod !== 'cw') {
+  const expectedMod = measurementId === 'av-vti' ? 'cw' : 'pw';
+  if (acquiredMod !== expectedMod) {
     return {
       ok: false,
       reason: 'wrong-modality',
       message:
         measurementId === 'lvot-vti'
           ? 'Activa Doppler pulsado (PW) sobre el TSVI para calcular el VTI automático.'
-          : 'Activa Doppler continuo (CW) para calcular el VTI automático.',
+          : 'Activa Doppler continuo (CW) sobre la válvula aórtica para calcular el VTI/Vmáx automático.',
     };
   }
   // Freeze first and yield one animation frame so the worker's strip head and HUD snapshot match exactly.
@@ -816,8 +817,10 @@ export async function runAutoSpectralVti(
       ((v - strip.topValue) / (strip.bottomValue - strip.topValue)) * strip.height,
   }));
   const stateNow = useSimStore.getState();
+  const baseId = Date.now().toString(36);
+  const nowIso = new Date().toISOString();
   stateNow.addMeasurement({
-    id: `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
+    id: `m${baseId}${Math.floor(Math.random() * 1e4)}`,
     kind: 'vti',
     label: spec ? spec.label : 'VTI auto',
     measurementId: spec ? spec.id : null,
@@ -849,7 +852,54 @@ export async function runAutoSpectralVti(
     imageQualityScore: hud.view ? Math.round(hud.view.components.gain * 100) : null,
     userAssisted: true,
     referenceGuidelineIds: spec ? spec.referenceIds : ['ase-tte-2019'],
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
   });
+
+  // For transaortic CW auto-VTI, also record the drag-editable AV Vmax peak marker so continuity AVA,
+  // velocity ratio (DVI), and peak transaortic gradient populate in one clinical step.
+  if (measurementId === 'av-vti' && modeNow === 'cw' && geometry.length > 0) {
+    let peakIdx = 0;
+    let peakAbs = -1;
+    for (let i = 0; i < traced.velocitiesMps.length; i++) {
+      const av = Math.abs(traced.velocitiesMps[i]!);
+      if (av > peakAbs) {
+        peakAbs = av;
+        peakIdx = i;
+      }
+    }
+    const peakPt = geometry[peakIdx]!;
+    const vmaxSpec = specFor('av-vmax');
+    stateNow.addMeasurement({
+      id: `m${baseId}v${Math.floor(Math.random() * 1e3)}`,
+      kind: 'velocity',
+      label: vmaxSpec ? vmaxSpec.label : 'Vmax VAo',
+      measurementId: vmaxSpec ? vmaxSpec.id : 'av-vmax',
+      technique: evaluateCapture(
+        vmaxSpec,
+        hud,
+        modeNow,
+        hud.acquisition?.phaseMarks ?? stateNow.phaseMarks,
+        { userAssisted: true },
+      ),
+      value: traced.vmaxMps,
+      units: 'm/s',
+      modality: modeNow,
+      geometry: [peakPt],
+      captureStrip: { ...strip },
+      acquisition: hud.acquisition,
+      beatIndex: traced.beatIndex,
+      rrS: hud.rrS,
+      derived: { gradientMmHg: traced.peakGradientMmHg },
+      frameId: hud.frameId,
+      phase: hud.phase,
+      timeS: hud.timeS,
+      sourceViewId: hud.view?.bestViewId ?? null,
+      viewScore: hud.view?.score ?? null,
+      imageQualityScore: hud.view ? Math.round(hud.view.components.gain * 100) : null,
+      userAssisted: true,
+      referenceGuidelineIds: vmaxSpec ? vmaxSpec.referenceIds : ['ase-eacvi-aortic-stenosis-2017'],
+      createdAt: nowIso,
+    });
+  }
   return traced;
 }

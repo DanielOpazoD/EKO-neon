@@ -1327,10 +1327,11 @@ function AutoLvotVtiPanel({
       };
     }),
   );
-  const [busy, setBusy] = useState<'gate' | 'vti' | DopplerTargetId | null>(null);
+  const [busy, setBusy] = useState<'gate' | 'vti' | 'av-vti' | DopplerTargetId | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const isPw = s.modality === 'pw';
+  const isCw = s.modality === 'cw';
   const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
   const viewTargets =
     presetsEnabled && showViewFeedback && currentViewId
@@ -1339,6 +1340,12 @@ function AutoLvotVtiPanel({
   const latestVti = useMemo(() => {
     for (let i = s.measurements.length - 1; i >= 0; i--) {
       if (s.measurements[i]!.measurementId === 'lvot-vti') return s.measurements[i]!;
+    }
+    return null;
+  }, [s.measurements]);
+  const latestAvVti = useMemo(() => {
+    for (let i = s.measurements.length - 1; i >= 0; i--) {
+      if (s.measurements[i]!.measurementId === 'av-vti') return s.measurements[i]!;
     }
     return null;
   }, [s.measurements]);
@@ -1352,6 +1359,12 @@ function AutoLvotVtiPanel({
     latestVti && latestLvotDiam && latestLvotDiam.value > 0
       ? strokeVolume(latestLvotDiam.value, latestVti.value)
       : null;
+  const continuityAvaCm2 =
+    dopplerSvMl !== null && latestAvVti && latestAvVti.value > 0
+      ? dopplerSvMl / latestAvVti.value
+      : null;
+  const velocityRatio =
+    latestVti && latestAvVti && latestAvVti.value > 0 ? latestVti.value / latestAvVti.value : null;
 
   const placeTarget = async (target: Exclude<DopplerTargetId, 'lvot'>) => {
     if (busy || s.closed || !presetsEnabled) return;
@@ -1398,14 +1411,19 @@ function AutoLvotVtiPanel({
     }
   };
 
-  const traceVti = async () => {
+  const traceVti = async (id: 'lvot-vti' | 'av-vti' = 'lvot-vti') => {
     if (busy || s.closed) return;
-    setBusy('vti');
+    setBusy(id === 'av-vti' ? 'av-vti' : 'vti');
     setNotice(null);
     try {
-      const res = await runAutoSpectralVti('lvot-vti');
+      const res = await runAutoSpectralVti(id);
       if (!res.ok) {
         setNotice({ kind: 'err', text: res.message });
+      } else if (id === 'av-vti') {
+        setNotice({
+          kind: 'ok',
+          text: `VTI VAo ${res.vtiCm.toFixed(1)} cm · Vmáx ${res.vmaxMps.toFixed(2)} m/s · ΔPm ${res.meanGradientMmHg.toFixed(0)} mmHg.`,
+        });
       } else {
         setNotice({
           kind: 'ok',
@@ -1425,7 +1443,7 @@ function AutoLvotVtiPanel({
   const goA5c = () => {
     if (s.closed || !presetsEnabled) return;
     setNotice(null);
-    if (s.modality !== '2d' && s.modality !== 'pw') s.setModality('2d');
+    if (s.modality !== '2d' && s.modality !== 'pw' && s.modality !== 'cw') s.setModality('2d');
     s.startPresetView('a5c');
   };
 
@@ -1457,7 +1475,7 @@ function AutoLvotVtiPanel({
   const lvotCard = (
     <div className="auto-ef-card">
       <div className="auto-ef-row-head">
-        <span className="auto-ef-title">TSVI · PW</span>
+        <span className="auto-ef-title">TSVI / VAo · Continuidad</span>
         {showViewFeedback && isPw && (
           <span
             className={`plane-pill${
@@ -1481,7 +1499,7 @@ function AutoLvotVtiPanel({
             className="ghost"
             disabled={s.closed || busy !== null}
             onClick={goA5c}
-            data-tip="Mueve la sonda a A5C para alinear el TSVI"
+            data-tip="Mueve la sonda a A5C para alinear el TSVI y la válvula aórtica"
           >
             Ir a A5C
           </button>
@@ -1489,7 +1507,7 @@ function AutoLvotVtiPanel({
         {presetsEnabled && (
           <button
             type="button"
-            className={onOutflowView && !isPw ? 'btn-primary-soft' : ''}
+            className={onOutflowView && !isPw && !isCw ? 'btn-primary-soft' : ''}
             disabled={s.closed || busy !== null}
             onClick={() => void placeGate()}
             data-tip="Detecta el TSVI en el corte 2D actual, coloca el gate PW a ~0,5 cm de la válvula aórtica y activa PW"
@@ -1501,24 +1519,59 @@ function AutoLvotVtiPanel({
           type="button"
           className={isPw ? 'btn-primary-soft' : ''}
           disabled={s.closed || busy !== null}
-          onClick={() => void traceVti()}
-          data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI, Vmáx y gradientes)"
+          onClick={() => void traceVti('lvot-vti')}
+          data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI TSVI)"
         >
-          {busy === 'vti' ? 'Trazando…' : 'Auto-VTI'}
+          {busy === 'vti' ? 'Trazando…' : 'Auto-VTI TSVI'}
+        </button>
+      </div>
+      <div className="auto-lvot-actions">
+        {presetsEnabled && (
+          <button
+            type="button"
+            className={onOutflowView && latestVti && !isCw ? 'btn-primary-soft' : 'ghost'}
+            disabled={s.closed || busy !== null}
+            onClick={() => void placeTarget('av-cw')}
+            data-tip="Alinea el cursor CW a través de la válvula aórtica en A5C/A3C y activa Doppler continuo"
+          >
+            {busy === 'av-cw' ? 'Buscando…' : 'CW VAo'}
+          </button>
+        )}
+        <button
+          type="button"
+          className={isCw ? 'btn-primary-soft' : ''}
+          disabled={s.closed || busy !== null}
+          onClick={() => void traceVti('av-vti')}
+          data-tip="Congela la tira CW y traza automáticamente VTI, Vmáx y gradientes transaórticos"
+        >
+          {busy === 'av-vti' ? 'Trazando…' : 'Auto-VTI VAo'}
         </button>
       </div>
 
-      {latestVti && (
+      {(latestVti || latestAvVti) && (
         <div className="auto-ef-result-line">
-          <span className="auto-ef-primary">VTI {latestVti.value.toFixed(1)} cm</span>
+          {continuityAvaCm2 !== null ? (
+            <span className="auto-ef-primary">AVA {continuityAvaCm2.toFixed(2)} cm²</span>
+          ) : latestAvVti ? (
+            <span className="auto-ef-primary">VTI VAo {latestAvVti.value.toFixed(1)} cm</span>
+          ) : (
+            <span className="auto-ef-primary">VTI TSVI {latestVti!.value.toFixed(1)} cm</span>
+          )}
           <span className="auto-ef-metrics">
-            {latestVti.derived?.vmaxMps !== undefined && (
-              <span>Vmáx {Math.round(latestVti.derived.vmaxMps * 100)} cm/s</span>
-            )}
-            {latestVti.derived?.meanGradientMmHg !== undefined && (
-              <span>ΔPm {latestVti.derived.meanGradientMmHg.toFixed(1)} mmHg</span>
-            )}
+            {latestVti && <span>TSVI {latestVti.value.toFixed(1)} cm</span>}
             {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
+            {latestAvVti && (
+              <span>
+                VAo {latestAvVti.value.toFixed(1)} cm
+                {latestAvVti.derived?.vmaxMps !== undefined
+                  ? ` · ${latestAvVti.derived.vmaxMps.toFixed(2)} m/s`
+                  : ''}
+                {latestAvVti.derived?.meanGradientMmHg !== undefined
+                  ? ` · ΔPm ${latestAvVti.derived.meanGradientMmHg.toFixed(0)}`
+                  : ''}
+              </span>
+            )}
+            {velocityRatio !== null && <span>DVI {velocityRatio.toFixed(2)}</span>}
           </span>
         </div>
       )}
