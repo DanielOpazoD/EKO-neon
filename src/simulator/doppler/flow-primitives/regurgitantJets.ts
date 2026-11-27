@@ -230,53 +230,72 @@ export function sampleRegurgitantJets(
       }
     }
   }
-  // ---- AR jet ----
+  // ---- AR jet (vena contracta neck + anterior-mitral-directed LVOT jet + 3D aortic-side PISA) ----
   const allowArJet = (mask & FLOW_MASK_AR_JET) !== 0;
   const allowArPisa = (mask & FLOW_MASK_AR_PISA) !== 0;
   if ((allowArJet || allowArPisa) && p.enabled['ar-jet'] !== false && p.arEroCm2 > 0) {
     const q = sampleTable(tables.arFlowMlps, phase);
     if (q > 1) {
       const vj = q / p.arEroCm2 / 100;
-      const r0 = Math.sqrt(p.arEroCm2 / Math.PI) * 1.1;
+      const rVc = Math.sqrt(p.arEroCm2 / Math.PI);
+      const r0 = rVc * 1.1;
       const ax = p.avAxis;
       const cz = p.avCenter.z + zAnn * ROOT_EXCURSION;
       const dx = x - p.avCenter.x,
         dy = y - p.avCenter.y,
         dz = z - cz;
       const t = dx * ax.x + dy * ax.y + dz * ax.z; // along the root axis (negative = into the LV)
-      const qx = dx - ax.x * t,
-        qy = dy - ax.y * t,
-        qz = dz - ax.z * t;
-      const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
       const along = -t;
       if (along >= 0 && allowArJet && along < 6) {
-        const spreadSlope = 0.31 * (1 - 0.05 * Math.min(4, along));
-        const rHalf = 0.84 * (r0 + along * spreadSlope);
-        if (rho < jetReach(rHalf, along, FAST_JET_SHEAR)) {
-          const prof = jetProfile(rho, rHalf, along, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, (2 * r0) / 1.1) * fadeOut(along, 4.3, 5.9);
+        // Past the collimated vena contracta neck (0..0.35 cm), AR jets drift subtly posteriorly (-y)
+        // along the anterior mitral leaflet toward the LV inflow while keeping orifice alignment exact.
+        const amlBend = 0.11 * smoothstep(0.35, 2.2, along);
+        const shiftY = -amlBend * Math.max(0, along - 0.35);
+        const qx = dx - ax.x * t,
+          qy = dy - ax.y * t - shiftY,
+          qz = dz - ax.z * t;
+        const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
+        const expandAlong = Math.max(0, along - 0.35);
+        const spreadSlope = 0.3 * (1 - 0.05 * Math.min(4, expandAlong));
+        const rHalf = 0.84 * (rVc + expandAlong * spreadSlope);
+        if (rho < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
+          const prof = jetProfile(rho, rHalf, expandAlong, FAST_JET_SHEAR);
+          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 4.3, 5.9);
           const v = vj * prof * decay;
-          out.vx -= ax.x * v;
-          out.vy -= ax.y * v;
-          out.vz -= ax.z * v;
+          const vxRaw = -ax.x;
+          const vyRaw = -ax.y - amlBend;
+          const vzRaw = -ax.z;
+          const vLen = Math.hypot(vxRaw, vyRaw, vzRaw) || 1;
+          out.vx += (vxRaw / vLen) * v;
+          out.vy += (vyRaw / vLen) * v;
+          out.vz += (vzRaw / vLen) * v;
+          const neckBlend = smoothstep(0.15, 0.7, along);
+          const baseTurb = (p.turbulence['ar-jet'] ?? 0.38) * (0.35 + 0.65 * neckBlend);
           out.dispersion = Math.max(
             out.dispersion,
-            (p.turbulence['ar-jet'] ?? 0.3) + 0.2 * Math.min(1, rho / (rHalf / 0.84)),
+            baseTurb + 0.22 * neckBlend * Math.min(1, rho / Math.max(0.08, rHalf / 0.84)),
           );
           out.present = 1;
         }
       } else if (along < 0 && allowArPisa) {
-        // convergence in the root, fading out where it used to stop
+        // 3D hemispheric aortic-side PISA conserving Q_AR = 2·π·d²·v
         const d = Math.hypot(dx, dy, dz);
-        if (d > 0.05 && d < 1.5) {
+        const rShell30 = Math.sqrt(q / (2 * Math.PI * 30));
+        const rMax = Math.min(2.4, Math.max(1.6, rShell30 * 1.9));
+        if (d > 0.05 && d < rMax) {
+          const qx = dx - ax.x * t,
+            qy = dy - ax.y * t,
+            qz = dz - ax.z * t;
+          const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
+          const vHemisphere = q / (2 * Math.PI * d * d * 100);
+          const hemiWeight = convergenceWeight(rho, -along, r0, 0.12, 0.38);
           const v =
-            Math.min(vj * 0.6, q / (2 * Math.PI * d * d) / 100) *
-            fadeOut(d, 1.0, 1.5) *
-            convergenceWeight(rho, -along, r0);
+            Math.min(vj * 0.85, vHemisphere) * fadeOut(d, rMax * 0.78, rMax) * hemiWeight;
           if (v > 0.03) {
             out.vx += (-dx / d) * v;
             out.vy += (-dy / d) * v;
             out.vz += (-dz / d) * v;
+            out.dispersion = Math.max(out.dispersion, 0.06);
             out.present = 1;
           }
         }

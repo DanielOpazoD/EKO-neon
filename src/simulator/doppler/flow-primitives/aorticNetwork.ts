@@ -98,10 +98,16 @@ export function buildAorticNetwork(
   );
   const inflowMlps = sampleTable(tables.aorticFlowMlps, p) - sampleTable(tables.arFlowMlps, p);
   const available = inflowMlps - storageMlps.reduce((a, b) => a + b, 0);
-  // Poiseuille r⁴ weights with equal effective downstream lengths, an explicit outlet assumption.
-  // The displayed four-centimetre branch stubs are NOT used as peripheral resistance lengths.
-  const weights = [48, 49, 50, 51].map((i) => edges[i]![0].radiusCm ** 4),
-    sum = weights.reduce((a, b) => a + b, 0);
+  // Poiseuille r⁴ weights in antegrade systole; during diastolic AR retrograde runoff (available < 0),
+  // the large-capacitance descending aorta reservoir supplies ~78% of retrograde return (while
+  // autoregulated cerebral/upper-body beds carry lower retrograde share), reproducing ASE holodiastolic
+  // flow reversal (> 20 cm/s) in the proximal descending thoracic aorta in severe AR.
+  const rawWeights = [48, 49, 50, 51].map((i) => edges[i]![0].radiusCm ** 4);
+  const weights =
+    available < 0
+      ? [rawWeights[0]! * 0.35, rawWeights[1]! * 0.35, rawWeights[2]! * 0.35, rawWeights[3]!]
+      : rawWeights;
+  const sum = weights.reduce((a, b) => a + b, 0);
   const outletsMlps = Float64Array.from(weights, (w) => (available * w) / sum);
   const startMlps = new Float64Array(edges.length);
   const junctions: { segment: number; u: number; branch: number }[] = [];
