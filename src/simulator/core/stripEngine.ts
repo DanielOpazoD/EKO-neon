@@ -742,7 +742,10 @@ export class StripEngine {
       const hy = ohy + dhy * r;
       const hz = ohz + dhz * r;
       if (nearBlood) {
-        sampleFlow(ctx.flow, ctx.tables, scene.heartPose, phase, hx, hy, hz, fs);
+        const bloodSt = isBlood
+          ? this.lineSt[Math.min(S - 1, Math.floor(((si + 0.5) / F) * S))]
+          : undefined;
+        sampleFlow(ctx.flow, ctx.tables, scene.heartPose, phase, hx, hy, hz, fs, bloodSt);
         if (fs.present) {
           const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
           const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;

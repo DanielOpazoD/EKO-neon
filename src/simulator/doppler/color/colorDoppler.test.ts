@@ -19,7 +19,7 @@ import {
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
 import { allocPolarFrame, type PolarFrameSpec } from '@/simulator/renderer/types';
-import { Tissue } from '@/simulator/anatomy/tissue';
+import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
 import { loadCaseById } from '@/cases';
 import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
@@ -1199,5 +1199,77 @@ test('LV radial wall velocity and valve leaflet snap velocity follow cardiac phy
   assert.ok(
     midSysLeafSpeed < 0.02,
     `Expected closed mitral leaflet in mid-systole to stay quiescent (< 0.02 m/s), got ${midSysLeafSpeed.toFixed(4)}`,
+  );
+});
+
+test('sampleFlow anatomical chamber containment blocks cross-septal and cross-wall jet bleed', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+  // 1. Eccentric MR (mvp-primary-mr) aimed at -35 deg toward the IAS must stay in LA and never leak into RA, SVC, or PV
+  const mrCase = loadCaseById('mvp-primary-mr');
+  const mrModels = buildCaseModels(mrCase, REST_PATIENT);
+  const mrFlow = buildFlowParams(mrCase, mrModels.heart, mrModels.tables, mrModels.thorax);
+  const mrHp = computeHeartPose(mrModels.heart, cycleStateAt(mrModels.tables, 0.2, mrFlow.flowPeaks));
+  // Point along the -35 deg MR jet trajectory 2.5 cm into the atrial level
+  const jx = mrFlow.mvCenter.x + Math.sin(mrFlow.mrJetDirRad) * 2.5;
+  const jy = mrFlow.mvCenter.y;
+  const jz = mrHp.zAnn - 0.1 - Math.cos(mrFlow.mrJetDirRad) * 2.5;
+  sampleFlow(mrFlow, mrModels.tables, mrHp, 0.2, jx, jy, jz, fs, Structure.LaCavity);
+  const laSpeed = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(laSpeed > 1.5, `Expected strong MR jet in LaCavity, got ${laSpeed.toFixed(2)} m/s`);
+
+  sampleFlow(mrFlow, mrModels.tables, mrHp, 0.2, jx, jy, jz, fs, Structure.Svc);
+  assert.equal(fs.present, 0, 'MR jet must never bleed into SVC');
+
+  sampleFlow(mrFlow, mrModels.tables, mrHp, 0.2, jx, jy, jz, fs, Structure.PulmonaryVein);
+  assert.ok(
+    fs.dispersion < 0.15,
+    `MR jet must never bleed turbulent flow into PulmonaryVein, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+
+  // 2. Severe AS post-stenotic jet must stay inside AorticRoot/AscendingAorta and never bleed into RV or PA
+  const asCase = loadCaseById('aortic-stenosis-severe');
+  const asModels = buildCaseModels(asCase, REST_PATIENT);
+  const asFlow = buildFlowParams(asCase, asModels.heart, asModels.tables, asModels.thorax);
+  const asHp = computeHeartPose(asModels.heart, cycleStateAt(asModels.tables, 0.18, asFlow.flowPeaks));
+  const ax = asFlow.avAxis;
+  const asX = asFlow.avCenter.x + ax.x * 1.2;
+  const asY = asFlow.avCenter.y + ax.y * 1.2;
+  const asZ = asFlow.avCenter.z + asHp.zAnn * 0.65 + ax.z * 1.2;
+  sampleFlow(asFlow, asModels.tables, asHp, 0.18, asX, asY, asZ, fs, Structure.AorticRoot);
+  assert.ok(
+    Math.hypot(fs.vx, fs.vy, fs.vz) > 2.5 && fs.dispersion > 0.35,
+    'Expected high-velocity turbulent AS jet in AorticRoot',
+  );
+  sampleFlow(asFlow, asModels.tables, asHp, 0.18, asX, asY, asZ, fs, Structure.RvCavity);
+  assert.ok(
+    fs.dispersion < 0.15,
+    `AS jet must never bleed turbulent flow into RvCavity, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+  sampleFlow(asFlow, asModels.tables, asHp, 0.18, asX, asY, asZ, fs, Structure.LaCavity);
+  assert.ok(
+    fs.dispersion < 0.15,
+    `AS jet must never bleed turbulent flow into LaCavity, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+
+  // 3. Severe TR (pulmonary-hypertension-rv) must never bleed into PulmonaryVein or LaCavity
+  const phCase = loadCaseById('pulmonary-hypertension-rv');
+  const phModels = buildCaseModels(phCase, REST_PATIENT);
+  const phFlow = buildFlowParams(phCase, phModels.heart, phModels.tables, phModels.thorax);
+  const phHp = computeHeartPose(phModels.heart, cycleStateAt(phModels.tables, 0.2, phFlow.flowPeaks));
+  const tx = phFlow.tvCenter.x;
+  const ty = phFlow.tvCenter.y;
+  const tz = phFlow.tvCenter.z + phHp.tvZ - 1.5;
+  sampleFlow(phFlow, phModels.tables, phHp, 0.2, tx, ty, tz, fs, Structure.RaCavity);
+  assert.ok(Math.hypot(fs.vx, fs.vy, fs.vz) > 1.5, 'Expected strong TR jet inside RaCavity');
+  sampleFlow(phFlow, phModels.tables, phHp, 0.2, tx, ty, tz, fs, Structure.PulmonaryVein);
+  assert.ok(
+    fs.dispersion < 0.15,
+    `TR jet must never bleed into PulmonaryVein, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+  sampleFlow(phFlow, phModels.tables, phHp, 0.2, tx, ty, tz, fs, Structure.LaCavity);
+  assert.ok(
+    fs.dispersion < 0.15,
+    `TR jet must never bleed into LaCavity, got disp=${fs.dispersion.toFixed(2)}`,
   );
 });
