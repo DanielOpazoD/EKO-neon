@@ -396,8 +396,9 @@ export function solveInflowWave(
 }
 
 /**
- * Pulmonary venous velocities (spec 63): S follows the annular descent (LA reservoir) and is blunted by
- * mitral regurgitation, D mirrors the mitral E wave (conduit) and Ar is the atrial reversal (absent in AF).
+ * Pulmonary venous velocities (spec 63): S follows the annular descent (LA reservoir), blunts in
+ * moderate MR (`0 < S < D`), and reverses holosystolically in severe MR (`mrEro >= 0.35 cm²`, ASE
+ * severe MR criterion); D mirrors the mitral E wave (conduit) and Ar is the atrial reversal (absent in AF).
  */
 export function pulmonaryVeinPeaks(c: CaseDefinition): {
   sMps: number;
@@ -405,11 +406,15 @@ export function pulmonaryVeinPeaks(c: CaseDefinition): {
   arMps: number;
 } {
   const mrEro = c.hemodynamics.regurgitation.mr?.eroaCm2 ?? 0;
-  const s = 0.55 * Math.min(1.3, c.physiology.mapseCm / 1.3) * (1 - 0.9 * Math.min(1, mrEro / 0.4));
+  const sBase = 0.55 * Math.min(1.3, c.physiology.mapseCm / 1.3);
+  const s =
+    mrEro <= 0.3
+      ? sBase * (1 - 0.85 * (mrEro / 0.32))
+      : sBase * (1 - 0.85 * (0.3 / 0.32)) - 0.52 * Math.min(1.2, (mrEro - 0.3) / 0.15);
   const d = 0.58 * (c.physiology.ePeakMps / 0.8);
   const ar =
     c.rhythm.type === 'atrial-fibrillation' || c.physiology.aPeakMps <= 0
       ? 0
       : 0.22 + 0.12 * Math.min(1, (c.physiology.aPeakMps - 0.4) / 0.5);
-  return { sMps: Math.max(0, s), dMps: d, arMps: ar };
+  return { sMps: s, dMps: d, arMps: ar };
 }
