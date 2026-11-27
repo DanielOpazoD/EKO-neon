@@ -1,0 +1,63 @@
+# Real WebGL2 CPU <-> GPU parity verification using headless Chromium + SwiftShader.
+# Runs automatically on changes touching the GPU shaders, Color Doppler pipeline, heart/thorax
+# anatomy, or parity harness — and on demand via workflow_dispatch — without slowing down check.yml
+# or adding Playwright to package.json.
+name: gpu-parity
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/simulator/renderer/gpu/**'
+      - 'src/simulator/doppler/color/**'
+      - 'src/simulator/anatomy/**'
+      - 'src/app/debugCompare.ts'
+      - 'scripts/verifyGpuParity*'
+      - '.github/workflows/gpu-parity.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/simulator/renderer/gpu/**'
+      - 'src/simulator/doppler/color/**'
+      - 'src/simulator/anatomy/**'
+      - 'src/app/debugCompare.ts'
+      - 'scripts/verifyGpuParity*'
+      - '.github/workflows/gpu-parity.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Install headless Chromium (isolated from package.json)
+        run: |
+          mkdir -p /tmp/pw-ci
+          npm --prefix /tmp/pw-ci install --no-save --no-audit --no-fund playwright
+          /tmp/pw-ci/node_modules/.bin/playwright install --with-deps chromium
+      - name: Run real WebGL2 CPU <-> GPU parity suite
+        run: |
+          set -euo pipefail
+          npx vite --port 4173 --host 127.0.0.1 --strictPort >/tmp/vite-gpu-parity.log 2>&1 &
+          VITE_PID=$!
+          trap 'kill "$VITE_PID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4173 >/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:4173 >/dev/null
+          PLAYWRIGHT_MODULE=/tmp/pw-ci/node_modules/playwright node scripts/verifyGpuParityCi.mjs http://127.0.0.1:4173
