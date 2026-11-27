@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { loadCaseById } from '@/cases';
+import { CASE_INPUTS, loadCaseById } from '@/cases';
 import { Structure } from '@/simulator/anatomy/tissue';
 import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
 import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import type { Measurement } from '@/simulator/measurements/types';
-import { allTasks, isUnlocked } from './curriculum';
+import { getViewTarget } from '@/simulator/windows/viewTargets';
+import { allTasks, evaluateTasks, isUnlocked, type LearnerSnapshot } from './curriculum';
 import { subcostalPostureHint } from './causes';
 import { expectedFindings, scoreImpression } from './impression';
 import { loadProgress, PROGRESS_KEY, summarizeProgress } from './progress';
@@ -360,5 +361,89 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     assert.ok(subcostalPostureHint(null, 'subcostal-4c', 'supine')?.includes('Supino (subcostal)'));
     assert.equal(subcostalPostureHint('subcostal-ivc', 'subcostal-ivc', 'subcostal-supine'), null);
     assert.equal(subcostalPostureHint('plax', 'plax', 'left-lateral'), null);
+  });
+
+  it('validates curriculum graph integrity and unlocks/completes valvular and pulmonary venous tasks', () => {
+    const tasks = allTasks();
+    const ids = new Set(tasks.map((t) => t.id));
+    assert.equal(ids.size, tasks.length, 'Curriculum task ids must be unique');
+    const caseIds = new Set(CASE_INPUTS.map((c) => c.id));
+    for (const t of tasks) {
+      for (const req of t.requires ?? []) {
+        assert.ok(ids.has(req), `Task ${t.id} requires unknown task ${req}`);
+      }
+      if (t.caseId) assert.ok(caseIds.has(t.caseId), `Task ${t.id} points to unknown case ${t.caseId}`);
+      if (t.viewId) assert.ok(getViewTarget(t.viewId), `Task ${t.id} points to unknown view ${t.viewId}`);
+    }
+
+    const mkMeas = (measurementId: string, score = 0.9): Measurement => ({
+      id: `m-${measurementId}`,
+      measurementId,
+      kind: 'velocity',
+      label: measurementId,
+      value: 1,
+      units: 'm/s',
+      modality: 'cw',
+      createdAt: '2026-01-01T00:00:00Z',
+      frameId: 1,
+      phase: 0.2,
+      timeS: 0.2,
+      sourceViewId: 'a4c',
+      viewScore: 90,
+      imageQualityScore: 90,
+      userAssisted: false,
+      referenceGuidelineIds: ['ase-tte-2019'],
+      geometry: [],
+      technique: { score, findings: [] },
+    });
+
+    const baseSnap = (overrides: Partial<LearnerSnapshot>): LearnerSnapshot => ({
+      caseId: 'normal-excellent-window',
+      mode: 'guided',
+      viewProgress: {},
+      handViewProgress: {},
+      bestView: null,
+      modality: '2d',
+      colorScaleMps: 0.62,
+      colorGainDb: 0,
+      gateStructure: null,
+      gateFlowAngleDeg: null,
+      measurements: [],
+      impressionScore: null,
+      settings: { depthCm: 16, gainDb: 0, frequencyMHz: 2.5, harmonics: true },
+      ...overrides,
+    });
+
+    // 1. MR VC/PISA + CW task requires colour-normal-scale
+    const mrSnap = baseSnap({
+      caseId: 'mvp-primary-mr',
+      measurements: [mkMeas('mr-pisa-radius'), mkMeas('mr-vmax')],
+    });
+    assert.deepEqual(evaluateTasks(mrSnap, {}), []);
+    assert.ok(evaluateTasks(mrSnap, { 'colour-normal-scale': true }).includes('mr-vc-pisa'));
+
+    // 2. Pulmonary venous S & D task requires mitral-e-ok and both waves with adequate technique
+    const pvPartial = baseSnap({ measurements: [mkMeas('pv-s')] });
+    assert.deepEqual(evaluateTasks(pvPartial, { 'mitral-e-ok': true }), []);
+    const pvFull = baseSnap({ measurements: [mkMeas('pv-s'), mkMeas('pv-d')] });
+    assert.ok(evaluateTasks(pvFull, { 'mitral-e-ok': true }).includes('pv-flow-ok'));
+
+    // 3. Severe AR task requires cw-as-vmax, ar-pht/ar-vmax, and impression >= 70
+    const arSnap = baseSnap({
+      caseId: 'aortic-regurgitation-severe',
+      measurements: [mkMeas('ar-pht')],
+      impressionScore: 85,
+    });
+    assert.deepEqual(evaluateTasks(arSnap, {}), []);
+    assert.ok(evaluateTasks(arSnap, { 'cw-as-vmax': true }).includes('impression-ar'));
+
+    // 4. Severe MS task requires mitral-e-ok, mitral-pht, and impression >= 70
+    const msSnap = baseSnap({
+      caseId: 'mitral-stenosis-severe',
+      measurements: [mkMeas('mitral-pht')],
+      impressionScore: 80,
+    });
+    assert.deepEqual(evaluateTasks(msSnap, {}), []);
+    assert.ok(evaluateTasks(msSnap, { 'mitral-e-ok': true }).includes('impression-ms'));
   });
 });
