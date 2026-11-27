@@ -401,9 +401,17 @@ export function accumulatePulsedSpectrum(
       const absV = Math.abs(p.v);
       const signV = Math.sign(p.v);
       const hasV = absV > 0.05;
+      // Laminar plug flow (low dispersion <= 0.06) keeps erythrocytes tightly clustered near modal
+      // velocity to render a crisp hollow spectral window, smoothly expanding to full half-normal
+      // shear fill as flow turns turbulent (dispersion >= 0.18).
+      const dispRamp = Math.min(1, Math.max(0, (p.dispersion - 0.05) / 0.13));
+      const turbFill = 0.32 + 0.68 * dispRamp * dispRamp * (3 - 2 * dispRamp);
       for (let k = 0; k < MICROSCATTERERS; k++) {
         // Half-normal deceleration, capped at zero; aperture rays span D/F uniformly.
-        const turbulent = Math.min(absV, 0.9 * p.dispersion * absV * HALF_NORMAL_QUANTILES[k]!);
+        const turbulent = Math.min(
+          absV,
+          0.9 * p.dispersion * turbFill * absV * HALF_NORMAL_QUANTILES[k]!,
+        );
         const geometric = aperture * (hash3(j, k, ensemble + 103, packetSeed) - 0.5);
         const v = p.v - signV * turbulent + geometric;
         const accelScale = hasV ? Math.max(0, Math.min(1.2, v / p.v)) : 1;

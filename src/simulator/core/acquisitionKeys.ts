@@ -118,7 +118,7 @@ export function simInputKey(inp: SimInput): string {
     inp.frozen ? 1 : 0,
     inp.cineOffset,
     `${colorAcquisitionKey(c)}|${c.showVariance ? 1 : 0}|${c.palette ?? 'vivid'}`,
-    `${sp.scaleMps}|${sp.baselineShiftMps}|${sp.wallFilterMps}|${sp.gainDb}|${sp.sweepSpeedMmPerS}|${sp.gateLengthCm}|${sp.invert ? 1 : 0}|${sp.audioOn ? 1 : 0}|${sp.volume}|${sp.reject ?? 0}`,
+    `${sp.scaleMps}|${sp.baselineShiftMps}|${sp.wallFilterMps}|${sp.gainDb}|${sp.sweepSpeedMmPerS}|${sp.gateLengthCm}|${sp.invert ? 1 : 0}|${sp.audioOn ? 1 : 0}|${sp.volume}|${sp.reject ?? 0}|${sp.stripTintMap ?? 'inherit'}`,
     inp.cursorThetaRad,
     inp.gateDepthCm,
     inp.quality,

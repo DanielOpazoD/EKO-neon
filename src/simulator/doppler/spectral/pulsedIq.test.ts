@@ -287,3 +287,53 @@ test('accumulateContinuousWaveSpectrum runs unaliased baseband I/Q + FFT with pe
     `Oblique CW scatterer (${widthBins(obliqueOut).toFixed(2)} bins) should broaden over axial (${widthBins(axialOut).toFixed(2)} bins)`,
   );
 });
+
+test('PW laminar plug flow preserves a crisp dark hollow spectral window compared to turbulent jet fill', () => {
+  const sPw = { ...spectralDefaultsFor('pw'), scaleMps: 1.2, baselineShiftMps: 0, wallFilterMps: 0.08 };
+  const lamOut = new Float32Array(SPECTRAL_BINS);
+  const turbOut = new Float32Array(SPECTRAL_BINS);
+  accumulatePulsedSpectrum(
+    [{ v: 0.95, weight: 1, dispersion: 0.04, vPerp: 0.02, depthCm: 9, focusCm: 9, gateLengthCm: 0.35 }],
+    sPw,
+    2.5,
+    42,
+    0.2,
+    lamOut,
+    9,
+    9,
+  );
+  accumulatePulsedSpectrum(
+    [{ v: 0.95, weight: 1, dispersion: 0.42, vPerp: 0.02, depthCm: 9, focusCm: 9, gateLengthCm: 0.35 }],
+    sPw,
+    2.5,
+    42,
+    0.2,
+    turbOut,
+    9,
+    9,
+  );
+  const { vMin, vMax } = spectralRange(sPw);
+  const span = vMax - vMin;
+  const bandEnergy = (arr: Float32Array, loV: number, hiV: number) => {
+    let sum = 0;
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      if (v >= loV && v <= hiV) sum += arr[b]!;
+    }
+    return sum;
+  };
+  const lamCore = bandEnergy(lamOut, 0.8, 1.1);
+  const lamWindow = bandEnergy(lamOut, 0.25, 0.65);
+  const turbCore = bandEnergy(turbOut, 0.8, 1.1);
+  const turbWindow = bandEnergy(turbOut, 0.25, 0.65);
+  const lamFillRatio = lamWindow / Math.max(1e-9, lamCore);
+  const turbFillRatio = turbWindow / Math.max(1e-9, turbCore);
+  assert.ok(
+    lamFillRatio < 0.05,
+    `Laminar PW flow should maintain a dark hollow spectral window (window/core=${lamFillRatio.toFixed(4)})`,
+  );
+  assert.ok(
+    turbFillRatio > lamFillRatio * 8 && turbFillRatio > 0.35,
+    `Turbulent PW flow should clearly fill the spectral window (turb=${turbFillRatio.toFixed(3)} vs lam=${lamFillRatio.toFixed(4)})`,
+  );
+});

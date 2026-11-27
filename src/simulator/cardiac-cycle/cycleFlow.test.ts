@@ -13,6 +13,10 @@ import { sampleSpectralColumn } from '@/simulator/core/strip/spectralSampler';
 import type { StripCtx } from '@/simulator/core/stripEngine';
 import { buildFlowParams, sampleFlow } from '@/simulator/doppler/flow-primitives/flowField';
 import {
+  lvIsoTransientCmps,
+  rvIsoTransientCmps,
+} from '@/simulator/doppler/flow-primitives/regurgitantJets';
+import {
   displaySpectrum,
   SPECTRAL_BINS,
   spectralDefaultsFor,
@@ -671,6 +675,57 @@ describe('Cardiac cycle model & Doppler hemodynamic physiology', () => {
     assert.ok(
       hfRv.sCmps >= 7.5 && hfRv.sCmps <= 9.5,
       `HFrEF RV S' should reflect impaired RV systolic velocity (~8.3 cm/s), got ${hfRv.sCmps.toFixed(1)} cm/s`,
+    );
+
+    // Biphasic IVC/IVR annular transients exist cleanly in both LV and RV TDI, scale down in HFrEF, and stay 0 outside isovolumic windows
+    const normModels = buildCaseModels(loadCaseById('normal-excellent-window'), REST_PATIENT);
+    const hfModels = buildCaseModels(loadCaseById('hfref-severe-mr'), REST_PATIENT);
+    const scanIso = (
+      fn: typeof lvIsoTransientCmps,
+      models: typeof normModels,
+      t0: number,
+      t1: number,
+    ) => {
+      let hi = 0;
+      let lo = 0;
+      for (let i = 0; i <= 80; i++) {
+        const t = t0 + ((t1 - t0) * i) / 80;
+        const v = fn(models.heart, models.tables, t / models.tables.rrS);
+        hi = Math.max(hi, v);
+        lo = Math.min(lo, v);
+      }
+      return { hi, lo };
+    };
+    const tmN = normModels.tables.timings;
+    const lvIvcN = scanIso(lvIsoTransientCmps, normModels, 0.004, tmN.ejectionStartS);
+    const lvIvrN = scanIso(lvIsoTransientCmps, normModels, tmN.ejectionEndS, tmN.mitralOpenS);
+    const rvIvcN = scanIso(rvIsoTransientCmps, normModels, 0.004, tmN.pulmonaryOpenS);
+    const tmH = hfModels.tables.timings;
+    const lvIvcH = scanIso(lvIsoTransientCmps, hfModels, 0.004, tmH.ejectionStartS);
+    assert.ok(
+      lvIvcN.hi >= 3.2 && lvIvcN.lo <= -3.2,
+      `Normal LV TDI IVC should be clearly biphasic (±3.2–4.5 cm/s), got [${lvIvcN.lo.toFixed(1)}, ${lvIvcN.hi.toFixed(1)}]`,
+    );
+    assert.ok(
+      lvIvrN.hi >= 2.2 && lvIvrN.lo <= -2.2,
+      `Normal LV TDI IVR should be clearly biphasic (±2.2–3.5 cm/s), got [${lvIvrN.lo.toFixed(1)}, ${lvIvrN.hi.toFixed(1)}]`,
+    );
+    assert.ok(
+      rvIvcN.hi >= 3.2 && rvIvcN.lo <= -3.2,
+      `Normal RV TDI IVC should show biphasic pre-ejection spike, got [${rvIvcN.lo.toFixed(1)}, ${rvIvcN.hi.toFixed(1)}]`,
+    );
+    assert.ok(
+      lvIvcH.hi < lvIvcN.hi * 0.55,
+      `HFrEF LV IVC (${lvIvcH.hi.toFixed(1)}) should be proportionally blunted vs normal (${lvIvcN.hi.toFixed(1)})`,
+    );
+    assert.equal(
+      lvIsoTransientCmps(
+        normModels.heart,
+        normModels.tables,
+        (0.5 * (tmN.ejectionStartS + tmN.ejectionEndS)) / normModels.tables.rrS,
+      ),
+      0,
+      'IVC/IVR transient must stay strictly zero during mid-ejection',
     );
   });
 

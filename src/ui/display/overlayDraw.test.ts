@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { computeSectorMapping, polarToPixel } from '@/simulator/renderer/scanConvert';
 import { DEFAULT_ACQUISITION, polarSpecFor } from '@/simulator/renderer/types';
-import { orientationMarker } from './overlayDraw';
+import { computeMmodeDepthTicks, orientationMarker } from './overlayDraw';
 
 describe('orientation marker on the sector', () => {
   const spec = polarSpecFor(DEFAULT_ACQUISITION, 'medium');
@@ -34,5 +34,18 @@ describe('orientation marker on the sector', () => {
     assert.ok(mZoom.apexY < 0, '2× focalized zoom lifts apex above the top border');
     const mark = orientationMarker(mZoom);
     assert.ok(mark.y >= 14, `orientation marker must remain visible, got y=${mark.y}`);
+  });
+
+  it('generates clinical 1 cm minor and 5 cm major depth ticks for M-mode strips', () => {
+    const ticks = computeMmodeDepthTicks(16);
+    assert.equal(ticks.length, 16);
+    const majors = ticks.filter((t) => t.major);
+    assert.deepEqual(
+      majors.map((t) => t.label),
+      ['5 cm', '10', '15'],
+    );
+    assert.equal(ticks[0]!.major, false);
+    assert.equal(ticks[0]!.label, undefined);
+    assert.ok(Math.abs(majors[0]!.frac - 5 / 16) < 1e-6);
   });
 });

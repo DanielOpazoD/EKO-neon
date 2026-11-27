@@ -293,20 +293,25 @@ export function sampleSpectralColumn(
       for (const k of [-0.5, 0, 0.5]) clickPoint(inp.gateDepthCm + k * g);
     // Stratified 3D sample-volume quadrature (4 axial x 3 lateral x 2 elevation = 24 jittered taps)
     // scaled by true depth-dependent lateral beam width and elevational slice thickness.
+    // Standard focused PW gates (<= 0.5 cm) sample tightly around the laminar centerline so clean
+    // flows preserve a hollow spectral window; widening the gate physically pulls in outer shear.
     const rng = createRng(ctx.caseDef.seed ^ (col * 7919));
     const nAx = 4;
     const nLat = 3;
     const nEl = 2;
     const invN = 1 / (nAx * nLat * nEl);
+    const gateWiden = isTdi ? 1 : smoothstep(0.4, 1.0, g);
+    const latSpan = isTdi ? 2.0 : 1.15 + 0.85 * gateWiden;
+    const elSpan = isTdi ? 1.8 : 1.05 + 0.75 * gateWiden;
     for (let ia = 0; ia < nAx; ia++) {
       const dr = ((ia + rng.next()) / nAx - 0.5) * 1.4 * g;
       const r = Math.max(0.25, inp.gateDepthCm + dr);
       const wl = beamHalfWidthCm(r, focusCm);
       const we = sliceHalfWidthCm(r);
       for (let il = 0; il < nLat; il++) {
-        const du = ((il + rng.next()) / nLat - 0.5) * 2.0 * wl;
+        const du = ((il + rng.next()) / nLat - 0.5) * latSpan * wl;
         for (let ie = 0; ie < nEl; ie++) {
-          const dv = ((ie + rng.next()) / nEl - 0.5) * 1.8 * we;
+          const dv = ((ie + rng.next()) / nEl - 0.5) * elSpan * we;
           classify(r, dr, du, dv, invN);
         }
       }

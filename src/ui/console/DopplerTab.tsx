@@ -10,9 +10,9 @@ import {
   type ColorPaletteId,
 } from '@/simulator/renderer/postprocess/colorMap';
 import {
-  TINT_DEFAULT,
-  TINT_MAP_OPTIONS,
-  type TintMapId,
+  STRIP_TINT_DEFAULT,
+  STRIP_TINT_OPTIONS,
+  type StripTintMapChoice,
 } from '@/simulator/renderer/postprocess/tintMap';
 import {
   hasGate,
@@ -118,10 +118,10 @@ export function DopplerTab() {
       {s.frozen && (
         <p className="small" role="status">
           {mod === 'color' || mod === 'cmm'
-            ? `${mod === 'cmm' ? 'Tira congelada' : 'Imagen congelada'}: Paleta, Varianza y Línea base responden al instante; los demás ajustes se aplicarán al reanudar.`
+            ? `${mod === 'cmm' ? 'Tira congelada' : 'Imagen congelada'}: Paleta, Varianza${mod === 'cmm' ? ', Tinte de tira' : ''} y Línea base responden al instante; los demás ajustes se aplicarán al reanudar.`
             : isSpectralModality(mod)
-              ? 'Tira congelada: Rechazo y Tinte responden al instante; los demás ajustes se aplicarán al reanudar.'
-              : `${isStripModality(mod) ? 'Tira congelada' : 'Imagen congelada'}: los ajustes de adquisición se aplicarán al reanudar.`}
+              ? 'Tira congelada: Rechazo y Tinte de tira responden al instante; los demás ajustes se aplicarán al reanudar.'
+              : `${isStripModality(mod) ? 'Tira congelada: Tinte de tira responde al instante; los demás ajustes se aplicarán al reanudar.' : 'Imagen congelada: los ajustes de adquisición se aplicarán al reanudar.'}`}
         </p>
       )}
       {mod === 'color' && (
@@ -404,6 +404,15 @@ export function DopplerTab() {
             unit="°"
             onChange={(v) => s.setCursor((v * Math.PI) / 180)}
           />
+          <div className="row">
+            <label>Tinte de tira</label>
+            <Segmented
+              ariaLabel="Tinte independiente de la tira espectral"
+              value={s.spectral.stripTintMap ?? STRIP_TINT_DEFAULT}
+              onChange={(v) => s.setSpectral({ stripTintMap: v as StripTintMapChoice })}
+              options={STRIP_TINT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+            />
+          </div>
           <Toggle
             label="Invertir espectro"
             value={s.spectral.invert}
@@ -456,15 +465,6 @@ export function DopplerTab() {
                 ]}
               />
             </div>
-            <div className="row">
-              <label>Tinte</label>
-              <Segmented
-                ariaLabel="Tinte espectral"
-                value={s.settings.tintMap ?? TINT_DEFAULT}
-                onChange={(v) => s.setSettings({ tintMap: v as TintMapId })}
-                options={TINT_MAP_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
-              />
-            </div>
           </details>
         </Section>
       )}
@@ -491,6 +491,15 @@ export function DopplerTab() {
             unit="°"
             onChange={(v) => s.setCursor((v * Math.PI) / 180)}
           />
+          <div className="row">
+            <label>Tinte de tira</label>
+            <Segmented
+              ariaLabel="Tinte independiente de la tira Modo M"
+              value={s.spectral.stripTintMap ?? STRIP_TINT_DEFAULT}
+              onChange={(v) => s.setSpectral({ stripTintMap: v as StripTintMapChoice })}
+              options={STRIP_TINT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+            />
+          </div>
           {presetsEnabled && !s.closed && (
             <div className="doppler-quick-row">
               <button
@@ -581,6 +590,15 @@ export function DopplerTab() {
               value={s.color.palette ?? COLOR_PALETTE_DEFAULT}
               onChange={(v) => s.setColor({ palette: v as ColorPaletteId })}
               options={COLOR_PALETTE_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
+            />
+          </div>
+          <div className="row">
+            <label>Tinte de tira</label>
+            <Segmented
+              ariaLabel="Tinte independiente de la tira Modo M Color"
+              value={s.spectral.stripTintMap ?? STRIP_TINT_DEFAULT}
+              onChange={(v) => s.setSpectral({ stripTintMap: v as StripTintMapChoice })}
+              options={STRIP_TINT_OPTIONS.map((o) => ({ id: o.id, label: o.label }))}
             />
           </div>
           <Toggle

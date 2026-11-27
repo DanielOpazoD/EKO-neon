@@ -65,6 +65,31 @@ export interface SpectralAxisTick {
   label: string;
 }
 
+export interface MmodeDepthTick {
+  depthCm: number;
+  frac: number; // 0 = top of strip, 1 = bottom of strip
+  major: boolean;
+  label?: string;
+}
+
+/**
+ * Clinical 1 cm minor / 5 cm major depth ticks for M-mode & Color M-mode strips, matching the 2D
+ * sector depth ruler and tagging the first major tick with `cm` for immediate scale readability.
+ */
+export function computeMmodeDepthTicks(bottomDepthCm: number): MmodeDepthTick[] {
+  if (!(bottomDepthCm > 0)) return [];
+  const ticks: MmodeDepthTick[] = [];
+  const maxD = Math.floor(bottomDepthCm + 1e-6);
+  let labeledFirstMajor = false;
+  for (let d = 1; d <= maxD; d++) {
+    const major = d % 5 === 0;
+    const label = major ? (!labeledFirstMajor ? `${d} cm` : `${d}`) : undefined;
+    if (major) labeledFirstMajor = true;
+    ticks.push({ depthCm: d, frac: Math.max(0, Math.min(1, d / bottomDepthCm)), major, label });
+  }
+  return ticks;
+}
+
 const ASE_CMPS_STEPS = [5, 10, 20, 25, 50, 100, 200] as const;
 const ASE_MPS_STEPS = [0.2, 0.25, 0.5, 1, 1.5, 2, 3, 4] as const;
 
@@ -350,27 +375,64 @@ export function drawOverlay(
       }
       ctx.font = canvasFont(11);
     } else if (strip.kind === 'm-mode') {
+      const mTicks = computeMmodeDepthTicks(strip.bottomValue);
+      // Subtle horizontal 5 cm depth guides across the M-mode/CMM strip (dashed so leaflets stay unobstructed)
+      ctx.save();
+      ctx.setLineDash([2, 6]);
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+      ctx.lineWidth = 1;
+      for (const tick of mTicks) {
+        if (!tick.major) continue;
+        const y = strip.y + tick.frac * strip.height;
+        ctx.beginPath();
+        ctx.moveTo(strip.x, y);
+        ctx.lineTo(strip.x + strip.width - 28, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // Right-edge 1 cm minor / 5 cm major depth scale ticks and outlined labels
       ctx.font = canvasFont(10, 'mono');
       ctx.textAlign = 'right';
-      for (let d = 0; d <= strip.bottomValue; d += 5) {
-        const y = strip.y + (d / strip.bottomValue) * strip.height;
-        const labelY = Math.min(H - 8, Math.max(strip.y + 8, y));
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = 'rgba(0,0,0,0.82)';
-        ctx.strokeText(`${d}`, W - 5, labelY);
-        ctx.lineWidth = 1;
-        ctx.fillStyle = '#aeb8c7';
-        ctx.fillText(`${d}`, W - 5, labelY);
+      for (const tick of mTicks) {
+        const y = strip.y + tick.frac * strip.height;
+        ctx.strokeStyle = tick.major ? 'rgba(245, 158, 11, 0.85)' : 'rgba(245, 158, 11, 0.45)';
+        ctx.beginPath();
+        ctx.moveTo(W - (tick.major ? 8 : 4), y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+        if (tick.label) {
+          const labelY = Math.min(H - 8, Math.max(strip.y + 8, y));
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+          ctx.strokeText(tick.label, W - 10, labelY);
+          ctx.lineWidth = 1;
+          ctx.fillStyle = '#fbbf24';
+          ctx.fillText(tick.label, W - 10, labelY);
+        }
+      }
+      // ASE time-scale calibration ticks along the top of the M-mode/CMM strip (200 ms minor, 1000 ms major)
+      const cols200ms = strip.secondsPerColumn > 0 ? 0.2 / strip.secondsPerColumn : 0;
+      if (cols200ms > 4) {
+        for (let k = 1; k * cols200ms < strip.width; k++) {
+          const x = strip.x + k * cols200ms;
+          const major = k % 5 === 0;
+          const len = major ? 6 : 3;
+          ctx.strokeStyle = major ? 'rgba(165,220,175,0.62)' : 'rgba(130,190,145,0.34)';
+          ctx.beginPath();
+          ctx.moveTo(x, strip.y + 1);
+          ctx.lineTo(x, strip.y + 1 + len);
+          ctx.stroke();
+        }
       }
       ctx.textAlign = 'left';
       ctx.font = canvasFont(10.5, 'mono');
-      const mHeader = `${modality === 'cmm' ? 'COLOR M-MODE' : 'M-MODE'}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s`;
+      const mHeader = `${modality === 'cmm' ? 'COLOR M-MODE' : 'M-MODE'}  ${strip.sweepSpeedMmPerS ?? '—'} mm/s (200 ms/div)`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.82)';
-      ctx.strokeText(mHeader, 6, strip.y + 8);
+      ctx.strokeText(mHeader, 6, strip.y + 11);
       ctx.lineWidth = 1;
       ctx.fillStyle = '#aeb8c7';
-      ctx.fillText(mHeader, 6, strip.y + 8);
+      ctx.fillText(mHeader, 6, strip.y + 11);
       ctx.font = canvasFont(11);
     } else if (hud.frozen && hud.acquisition?.stripAcquisitionId != null) {
       ctx.fillStyle = '#9aa4b5';

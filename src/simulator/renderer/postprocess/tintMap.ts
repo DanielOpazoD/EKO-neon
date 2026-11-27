@@ -6,7 +6,15 @@
  */
 export type TintMapId = 'gray' | 'cool-blue' | 'sepia' | 'amber';
 
+/** Independent chroma selection for spectral & M-mode strips ('inherit' follows 2D B-mode tint). */
+export type StripTintMapChoice = 'inherit' | TintMapId;
+
+/** Resolved internal strip LUT id ('neutral-gray' renders pure achromatic grayscale on strips). */
+export type ResolvedStripTint = TintMapId | 'neutral-gray';
+
 export const TINT_DEFAULT: TintMapId = 'gray';
+
+export const STRIP_TINT_DEFAULT: StripTintMapChoice = 'inherit';
 
 export const TINT_MAP_OPTIONS: readonly { id: TintMapId; label: string }[] = [
   { id: 'gray', label: 'Gris' },
@@ -14,6 +22,24 @@ export const TINT_MAP_OPTIONS: readonly { id: TintMapId; label: string }[] = [
   { id: 'sepia', label: 'Sepia' },
   { id: 'amber', label: 'Ámbar' },
 ];
+
+export const STRIP_TINT_OPTIONS: readonly { id: StripTintMapChoice; label: string }[] = [
+  { id: 'inherit', label: '2D' },
+  { id: 'gray', label: 'Gris' },
+  { id: 'amber', label: 'Ámbar' },
+  { id: 'sepia', label: 'Sepia' },
+  { id: 'cool-blue', label: 'Azul' },
+];
+
+/** Resolve effective strip chroma LUT from independent strip preference and active 2D B-mode tint. */
+export function resolveStripTint(
+  stripTint: StripTintMapChoice | undefined,
+  bmodeTint: TintMapId | undefined,
+): ResolvedStripTint | undefined {
+  if (!stripTint || stripTint === 'inherit') return bmodeTint;
+  if (stripTint === 'gray') return 'neutral-gray';
+  return stripTint;
+}
 
 export function tintMapIndex(tint: TintMapId | undefined): number {
   switch (tint) {
