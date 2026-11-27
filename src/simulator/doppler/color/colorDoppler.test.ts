@@ -25,8 +25,14 @@ import { allocPolarFrame, type PolarFrameSpec } from '@/simulator/renderer/types
 import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
 import { loadCaseById } from '@/cases';
+import { normalExcellentCase } from '@/cases/normal-excellent';
+import { normalizeCase } from '@/cases/normalizeCase';
 import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
-import { aorticVelocityProfile } from '@/simulator/doppler/flow-primitives/aorticNetwork';
+import {
+  aorticSectionFlow,
+  aorticVelocityProfile,
+  buildAorticNetwork,
+} from '@/simulator/doppler/flow-primitives/aorticNetwork';
 import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
 import { colorWallFilterRangeMps } from './kasaiEstimator';
 import { computeHeartPose, heartAnchors } from '@/simulator/anatomy/heartModel';
@@ -1815,5 +1821,95 @@ test('HOCM SAM stays laminar in early systole and erupts into subaortic LVOT tur
   assert.ok(
     fs.dispersion < 0.25,
     `Valvular AS subaortic LVOT (-0.35 cm) must stay laminar vs HOCM SAM mosaic, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+});
+
+test('aortic regurgitation produces LVOT jet with 3D aortic PISA and holodiastolic descending-aorta flow reversal', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const arCase = normalizeCase({
+    ...normalExcellentCase,
+    id: 'test-severe-ar',
+    hemodynamics: {
+      ...normalExcellentCase.hemodynamics,
+      diastolicBpMmHg: 48,
+      regurgitation: { ar: { eroaCm2: 0.3 } },
+    },
+  });
+  const models = buildCaseModels(arCase, REST_PATIENT);
+  const flow = buildFlowParams(arCase, models.heart, models.tables, models.thorax);
+  const phase = 0.65; // mid-diastole
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phase, flow.flowPeaks));
+  const ax = flow.avAxis;
+  const cz = flow.avCenter.z + hp.zAnn * 0.65;
+  const qAr = sampleTable(models.tables.arFlowMlps, phase);
+  assert.ok(qAr > 50, `Expected substantial diastolic AR flow, got ${qAr.toFixed(1)} mL/s`);
+
+  // 1. AR jet inside LVOT (1.6 cm below aortic valve along -avAxis): high-velocity turbulent mosaic
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x - ax.x * 1.6,
+    flow.avCenter.y - ax.y * 1.6 - 0.1,
+    cz - ax.z * 1.6,
+    fs,
+    Structure.Lvot,
+  );
+  const vJet = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(
+    fs.present === 1 && vJet > 2.0 && fs.dispersion > 0.35,
+    `Expected turbulent high-velocity diastolic AR jet in LVOT, got v=${vJet.toFixed(2)}, d=${fs.dispersion.toFixed(2)}`,
+  );
+  // AR jet must stay contained to LVOT/LV (never leak into LA or RV)
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x - ax.x * 1.6,
+    flow.avCenter.y - ax.y * 1.6 - 0.1,
+    cz - ax.z * 1.6,
+    fs,
+    Structure.LaCavity,
+  );
+  assert.ok(fs.dispersion < 0.15, 'AR jet must never bleed turbulent flow into LaCavity');
+
+  // 2. 3D aortic-side PISA (d = 0.65 cm above aortic valve): laminar radial convergence conserving Q/(2πd²)
+  const d = 0.65;
+  sampleFlow(
+    flow,
+    models.tables,
+    hp,
+    phase,
+    flow.avCenter.x + ax.x * d,
+    flow.avCenter.y + ax.y * d,
+    cz + ax.z * d,
+    fs,
+    Structure.AorticRoot,
+  );
+  const expectedPisaV = qAr / (2 * Math.PI * d * d * 100);
+  // Note: AorticRoot blends with aortic network flow when inside arch, check strong retrograde acceleration toward valve
+  const towardValve = -(fs.vx * ax.x + fs.vy * ax.y + fs.vz * ax.z);
+  assert.ok(
+    fs.present === 1 && towardValve > Math.min(0.6, expectedPisaV * 0.6) && fs.dispersion < 0.12,
+    `Expected laminar aortic-side AR PISA toward valve, got towardValve=${towardValve.toFixed(2)} m/s`,
+  );
+
+  // 3. Holodiastolic retrograde flow reversal in proximal descending thoracic aorta (> 20 cm/s centerline in severe AR)
+  const net = buildAorticNetwork(models.heart, models.thorax, models.tables, hp, phase);
+  const qDesc = aorticSectionFlow(net, 51, 0.5);
+  const descR = net.edges[51]![0].radiusCm;
+  const vDescCenter = (qDesc / (Math.PI * descR * descR * 100)) * aorticVelocityProfile(0);
+  assert.ok(
+    vDescCenter < -0.2,
+    `Severe AR must produce ASE holodiastolic flow reversal (< -0.20 m/s) in descending aorta, got ${vDescCenter.toFixed(3)} m/s`,
+  );
+  // Exact mass conservation across outlets: inflow - totalStorage == sum(outlets)
+  const totalStorage = net.storageMlps.reduce((a, b) => a + b, 0);
+  const totalOutlets = net.outletsMlps.reduce((a, b) => a + b, 0);
+  assert.ok(
+    Math.abs(net.inflowMlps - totalStorage - totalOutlets) < 1e-6,
+    'Aortic network must strictly conserve mass during diastolic AR reversal',
   );
 });
