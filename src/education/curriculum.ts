@@ -291,6 +291,18 @@ export const CURRICULUM: Module[] = [
             requires: ['colour-low-scale'],
             check: (s) => s.modality === 'color' && s.colorScaleMps >= 0.55 && s.colorGainDb <= 3,
           },
+          {
+            id: 'mr-vc-pisa',
+            title: 'Cuantificar la IM severa: VC o PISA en color y Vmax por CW',
+            why: 'Combinar la vena contracta o el radio PISA (desplazando la línea base hacia el chorro) con la velocidad máxima por CW permite calcular el ORE sin depender sólo del área del chorro.',
+            caseId: 'mvp-primary-mr',
+            viewId: 'a4c',
+            requires: ['colour-normal-scale'],
+            check: (s) =>
+              s.caseId === 'mvp-primary-mr' &&
+              (measuredOk('mr-vena-contracta')(s) || measuredOk('mr-pisa-radius')(s)) &&
+              measuredOk('mr-vmax')(s),
+          },
         ],
       },
       {
@@ -419,6 +431,15 @@ export const CURRICULUM: Module[] = [
             check: measuredOk('e-prime-septal'),
           },
           {
+            id: 'pv-flow-ok',
+            title: 'Flujo venoso pulmonar: ondas S y D en A4C con técnica ≥ 0,75',
+            why: 'La relación S/D venosa pulmonar desempata la presión auricular izquierda en el algoritmo ASE 2025 y detecta inversión sistólica en la insuficiencia mitral severa.',
+            caseId: 'normal-excellent-window',
+            viewId: 'a4c',
+            requires: ['mitral-e-ok'],
+            check: (s) => measuredOk('pv-s')(s) && measuredOk('pv-d')(s),
+          },
+          {
             id: 'tapse-ok',
             title: 'TAPSE en modo M con técnica ≥ 0,75',
             why: 'El desplazamiento del anillo tricuspídeo hacia el ápex es la medida más reproducible de la función del VD.',
@@ -514,6 +535,30 @@ export const CURRICULUM: Module[] = [
             check: (s) =>
               s.caseId === 'mvp-primary-mr' &&
               measuredBiplane('la-volume')(s) &&
+              (s.impressionScore ?? 0) >= 70,
+          },
+          {
+            id: 'impression-ar',
+            title: 'Insuficiencia aórtica severa: PHT o Vmax por CW e impresión ≥ 70',
+            why: 'Un PHT corto (< 200 ms) refleja rápida igualación de presiones aorto-ventriculares; se integra con el chorro en color, la dilatación del VI y la inversión en aorta descendente.',
+            caseId: 'aortic-regurgitation-severe',
+            viewId: 'a5c',
+            requires: ['cw-as-vmax'],
+            check: (s) =>
+              s.caseId === 'aortic-regurgitation-severe' &&
+              (measuredOk('ar-pht')(s) || measuredOk('ar-vmax')(s)) &&
+              (s.impressionScore ?? 0) >= 70,
+          },
+          {
+            id: 'impression-ms',
+            title: 'Estenosis mitral severa: PHT mitral e impresión ≥ 70',
+            why: 'La pendiente lenta del flujo transmitral (PHT prolongado, AVM = 220 / PHT) cuantifica la severidad junto con la dilatación de la AI y la hipertensión pulmonar secundaria.',
+            caseId: 'mitral-stenosis-severe',
+            viewId: 'a4c',
+            requires: ['mitral-e-ok'],
+            check: (s) =>
+              s.caseId === 'mitral-stenosis-severe' &&
+              measuredOk('mitral-pht')(s) &&
               (s.impressionScore ?? 0) >= 70,
           },
         ],
