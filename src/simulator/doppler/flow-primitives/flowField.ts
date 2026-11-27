@@ -543,7 +543,7 @@ export function sampleFlow(
     samplePulmonaryRegurgitation(p, tables, hp, phase, x, y, z, out, structure);
   }
 
-  // ---- TR jet (systole) ----
+  // ---- TR jet (systole: vena contracta neck + septal-curving RA jet + true 3D hemispheric RV PISA) ----
   const allowTrJet = (mask & FLOW_MASK_TR_JET) !== 0;
   const allowTrPisa = (mask & FLOW_MASK_TR_PISA) !== 0;
   if ((allowTrJet || allowTrPisa) && p.enabled['tr-jet'] !== false && p.trVmaxMps) {
@@ -554,43 +554,71 @@ export function sampleFlow(
         oz = p.tvCenter.z + hp.tvZ + 0.3;
       const dx = x - ox,
         dy = y - oy,
-        dzj = oz - z;
-      const rho = Math.hypot(dx, dy);
+        dz = z - oz;
+      const dzj = -dz; // + into RA, − into RV
       // Physiologic trivial TR (normal hearts, no regurgitant EROA and low PASP/Vmax) stays compact right behind
       // coaptation so it never paints false mid-RA pathology while keeping full CW peak velocity at the orifice.
       const isTraceTr = p.trEroCm2 === null && p.trVmaxMps < 2.6;
-      const maxReach = isTraceTr ? 1.6 : 4.5;
-      const fadeStart = isTraceTr ? 0.7 : 3.3;
-      if (dzj > -1.4 && dzj < maxReach) {
-        const r0 = p.trEroCm2
-          ? Math.sqrt(p.trEroCm2 / Math.PI) * 1.1
-          : isTraceTr
-            ? 0.1
-            : 0.24;
-        const spreadSlope = isTraceTr ? 0.16 : 0.26 * (1 - 0.055 * Math.min(4, Math.max(0, dzj)));
-        const Rj = r0 + Math.max(0, dzj) * spreadSlope;
+      const rVc = p.trEroCm2
+        ? Math.sqrt(p.trEroCm2 / Math.PI)
+        : isTraceTr
+          ? 0.09
+          : 0.22;
+      const r0 = rVc * 1.1;
+      const maxReach = isTraceTr ? 1.6 : 4.6;
+      const fadeStart = isTraceTr ? 0.7 : 3.4;
+
+      if (dzj >= 0 && dzj < maxReach && allowTrJet) {
+        // Significant functional TR curves subtly medially (+x toward the IAS) past the vena contracta neck
+        // while keeping the orifice neck straight along −z so CW Vmax stays exact.
+        const septalBend = isTraceTr ? 0 : p.trEroCm2 && p.trEroCm2 >= 0.2 ? 0.15 : 0.06;
+        const bendProgress = smoothstep(0.35, 2.4, dzj);
+        const centerX = ox + septalBend * bendProgress * Math.max(0, dzj - 0.35);
+        const rhoJet = Math.hypot(x - centerX, dy);
+        const expandAlong = isTraceTr ? dzj : Math.max(0, dzj - 0.35);
+        const spreadSlope = isTraceTr
+          ? 0.16
+          : 0.26 * (1 - 0.055 * Math.min(4, expandAlong));
+        const Rj = (isTraceTr ? r0 : rVc) + expandAlong * spreadSlope;
         const rHalf = 0.84 * Rj;
-        if (dzj >= 0 && allowTrJet && rho < jetReach(rHalf, dzj, FAST_JET_SHEAR)) {
-          const prof = jetProfile(rho, rHalf, dzj, FAST_JET_SHEAR);
+        if (rhoJet < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
+          const prof = jetProfile(rhoJet, rHalf, expandAlong, FAST_JET_SHEAR);
           const decay =
-            freeJetCentreline(dzj, (2 * r0) / 1.1) * fadeOut(dzj, fadeStart, maxReach);
-          out.vz -= vmax * prof * decay;
+            freeJetCentreline(dzj, 2 * rVc) * fadeOut(dzj, fadeStart, maxReach);
+          const v = vmax * prof * decay;
+          const tx = septalBend * bendProgress;
+          const tz = -Math.sqrt(Math.max(0, 1 - tx * tx));
+          out.vx += tx * v;
+          out.vz += tz * v;
+          const neckBlend = isTraceTr ? 1 : smoothstep(0.15, 0.7, dzj);
+          const baseTurb =
+            (isTraceTr ? 0.16 : (p.turbulence['tr-jet'] ?? 0.25)) * (0.4 + 0.6 * neckBlend);
           out.dispersion = Math.max(
             out.dispersion,
-            (isTraceTr ? 0.16 : (p.turbulence['tr-jet'] ?? 0.25)) +
-              (isTraceTr ? 0.08 : 0.2) * Math.min(1, rho / Math.max(0.08, Rj)),
+            baseTurb +
+              (isTraceTr ? 0.08 : 0.22 * neckBlend) *
+                Math.min(1, rhoJet / Math.max(0.08, Rj)),
           );
           out.present = 1;
-        } else if (dzj < 0 && allowTrPisa && !isTraceTr) {
-          const d = Math.hypot(rho, -dzj) + 0.2;
-          if (d < 1.4) {
-            const conv =
-              Math.min(vmax * 0.5, (vmax * r0 * r0) / (2 * d * d)) *
-              fadeOut(d, 0.8, 1.4) *
-              convergenceWeight(rho, -dzj, r0);
-            out.vz -= conv;
+        }
+      } else if (dz > 0 && allowTrPisa && !isTraceTr) {
+        // True 3D hemispheric TR PISA on the RV side: v(d) = Q_TR / (2·π·d²·100), radial vectors toward orifice
+        const d = Math.hypot(dx, dy, dz);
+        const qTr = vmax * 100 * (p.trEroCm2 ?? Math.PI * rVc * rVc);
+        const rShell30 = Math.sqrt(qTr / (2 * Math.PI * 30));
+        const rMax = Math.min(2.4, Math.max(1.6, rShell30 * 1.9));
+        if (d > 0.05 && d < rMax) {
+          const vHemisphere = qTr / (2 * Math.PI * d * d * 100);
+          const rhoAnn = Math.hypot(dx, dy);
+          const hemiWeight = convergenceWeight(rhoAnn, dz, r0, 0.12, 0.38);
+          const v =
+            Math.min(vmax * 0.85, vHemisphere) * fadeOut(d, rMax * 0.78, rMax) * hemiWeight;
+          if (v > 0.03) {
+            out.vx += (-dx / d) * v;
+            out.vy += (-dy / d) * v;
+            out.vz += (-dz / d) * v;
+            out.dispersion = Math.max(out.dispersion, 0.06);
             out.present = 1;
-            out.dispersion = Math.max(out.dispersion, 0.1);
           }
         }
       }
