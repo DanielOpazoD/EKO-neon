@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { minPointsToFinish } from '@/ui/display/measurementPreview';
+import { pendingSession } from '@/ui/display/pendingSession';
 import { useSimStore } from './store';
 import { modePolicy } from './modePolicy';
 
@@ -283,9 +285,22 @@ export function useShortcuts(): void {
           else if (s.reviewLinkParentId) s.armReviewLink(null);
           else if (s.reviewSelectedId) s.selectReviewMarker(null);
           break;
+        case 'Enter':
+          if (
+            s.activeTool !== 'none' &&
+            pendingSession.getCount() >= minPointsToFinish(s.activeTool)
+          ) {
+            e.preventDefault();
+            pendingSession.finish();
+          } else return;
+          break;
         case 'Delete':
         case 'Backspace':
-          if (s.ui.reviewMode && s.reviewSelectedId) s.removeReviewMarker(s.reviewSelectedId);
+          if (s.activeTool !== 'none' && pendingSession.getCount() > 0) {
+            e.preventDefault();
+            pendingSession.undo();
+          } else if (s.ui.reviewMode && s.reviewSelectedId)
+            s.removeReviewMarker(s.reviewSelectedId);
           else return;
           break;
         case 'z':

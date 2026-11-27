@@ -393,37 +393,7 @@ export function handleMeasurementToolClick(
   if (st.activeTool === 'simpson') {
     if (p.y >= m.height) return;
     if (detail >= 2 && pend.points.length >= 5) {
-      const pts = [...pend.points];
-      const prof = discProfileFromContour(pts, m.pxPerCm);
-      if (prof) {
-        const isRv = spec?.id === 'rv-edv' || spec?.id === 'rv-esv';
-        const areaCm2 = polygonAreaCm2(pts, m.pxPerCm);
-        const vol = isRv && areaCm2 > 0 ? rvVolumeFromAreaMl(areaCm2) : volumeFromProfileMl(prof);
-        // the foreshortening check compares against the LV length: atrial and RV traces have none (decision 180)
-        const trueL =
-          st.lvLengthCm !== null && spec?.id !== 'la-volume' && !isRv
-            ? spec?.phase === 'es'
-              ? st.lvLengthCm - 1.2
-              : st.lvLengthCm
-            : null;
-        commit(
-          {
-            kind: 'volume',
-            label: isRv ? 'Volumen VD (2D)' : 'Volumen VI (Simpson monoplano)',
-            value: vol,
-            units: 'mL',
-            modality,
-            geometry: pts,
-            derived: {
-              longAxisCm: prof.longAxisCm,
-              discs: prof.diametersCm.length,
-              ...(areaCm2 > 0 ? { areaCm2 } : {}),
-            },
-          },
-          { contour: pts, longAxisCm: prof.longAxisCm, trueLongAxisCm: trueL },
-        );
-      } else pend.points = [];
-      redraw();
+      finalizePendingMeasurement(hud, pend, redrawOverlay);
       return;
     }
     pend.points.push(p);
@@ -482,25 +452,144 @@ export function handleMeasurementToolClick(
   if (st.activeTool === 'vti') {
     if (strip.kind !== 'spectral' || p.y < strip.y) return;
     if (detail >= 2 && pend.points.length >= 2) {
-      const { sorted, summary: s } = summarizeManualVti(pend.points, strip);
-      commit({
-        kind: 'vti',
-        label: 'VTI',
-        value: s.vtiCm,
-        units: 'cm',
-        modality,
-        geometry: sorted,
-        derived: {
-          vmaxMps: s.vmaxMps,
-          meanGradientMmHg: s.meanGradientMmHg,
-          peakGradientMmHg: s.peakGradientMmHg,
-        },
-      });
+      finalizePendingMeasurement(hud, pend, redrawOverlay);
       return;
     }
     pend.points.push(p);
     redraw();
   }
+}
+
+/**
+ * Commit an open multi-point trace (`simpson` ≥ 5 points, or manual `vti` ≥ 2 points) from
+ * double-click, the Enter key, or the "Finalizar" button through one single code path.
+ */
+export function finalizePendingMeasurement(
+  hud: SimOutput,
+  pend: PendingMeasurement,
+  redrawOverlay: () => void,
+): boolean {
+  const st = useSimStore.getState();
+  if (!hud.frozen) return false;
+  const spec = specFor(st.activeMeasurementId);
+  const acquiredMode = hud.acquisition?.modality ?? st.modality;
+  const modality =
+    acquiredMode === 'color' && spec?.modalities.includes('color')
+      ? 'color'
+      : acquiredMode === 'color'
+        ? '2d'
+        : acquiredMode;
+  const m = hud.sector;
+  const strip = hud.strip;
+
+  const commitMulti = (
+    sectorTool: boolean,
+    ms: Omit<
+      Measurement,
+      | 'id'
+      | 'createdAt'
+      | 'frameId'
+      | 'phase'
+      | 'timeS'
+      | 'sourceViewId'
+      | 'viewScore'
+      | 'imageQualityScore'
+      | 'userAssisted'
+      | 'referenceGuidelineIds'
+      | 'measurementId'
+      | 'technique'
+    >,
+    extras: CaptureExtras = {},
+  ) => {
+    pend.points = [];
+    st.addMeasurement({
+      ...ms,
+      captureSector: sectorTool ? { ...m } : undefined,
+      captureStrip: sectorTool ? undefined : { ...strip },
+      acquisition: hud.acquisition,
+      beatIndex: hud.beatIndex,
+      rrS: hud.rrS,
+      label: spec ? spec.label : ms.label,
+      measurementId: spec ? spec.id : null,
+      technique: evaluateCapture(
+        spec,
+        hud,
+        acquiredMode,
+        hud.acquisition?.phaseMarks ?? st.phaseMarks,
+        extras,
+      ),
+      id: `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
+      createdAt: new Date().toISOString(),
+      frameId: hud.frameId,
+      phase: hud.phase,
+      timeS: hud.timeS,
+      sourceViewId: hud.view?.bestViewId ?? null,
+      viewScore: hud.view?.score ?? null,
+      imageQualityScore: hud.view ? Math.round(hud.view.components.gain * 100) : null,
+      userAssisted: extras.userAssisted ?? false,
+      referenceGuidelineIds: spec ? spec.referenceIds : ['ase-tte-2019'],
+    });
+    if (spec) st.setActiveMeasurement(null);
+    redrawOverlay();
+    useHudStore.getState().setHud({ ...hud });
+  };
+
+  if (st.activeTool === 'simpson' && pend.points.length >= 5) {
+    const pts = reprojectGeometry([...pend.points], pend.captureSector, m);
+    const prof = discProfileFromContour(pts, m.pxPerCm);
+    if (!prof) {
+      pend.points = [];
+      redrawOverlay();
+      return false;
+    }
+    const isRv = spec?.id === 'rv-edv' || spec?.id === 'rv-esv';
+    const areaCm2 = polygonAreaCm2(pts, m.pxPerCm);
+    const vol = isRv && areaCm2 > 0 ? rvVolumeFromAreaMl(areaCm2) : volumeFromProfileMl(prof);
+    const trueL =
+      st.lvLengthCm !== null && spec?.id !== 'la-volume' && !isRv
+        ? spec?.phase === 'es'
+          ? st.lvLengthCm - 1.2
+          : st.lvLengthCm
+        : null;
+    commitMulti(
+      true,
+      {
+        kind: 'volume',
+        label: isRv ? 'Volumen VD (2D)' : 'Volumen VI (Simpson monoplano)',
+        value: vol,
+        units: 'mL',
+        modality,
+        geometry: pts,
+        derived: {
+          longAxisCm: prof.longAxisCm,
+          discs: prof.diametersCm.length,
+          ...(areaCm2 > 0 ? { areaCm2 } : {}),
+        },
+      },
+      { contour: pts, longAxisCm: prof.longAxisCm, trueLongAxisCm: trueL },
+    );
+    return true;
+  }
+
+  if (st.activeTool === 'vti' && strip.kind === 'spectral' && pend.points.length >= 2) {
+    const { sorted, summary: s } = summarizeManualVti(pend.points, strip);
+    commitMulti(false, {
+      kind: 'vti',
+      label: 'VTI',
+      value: s.vtiCm,
+      units: 'cm',
+      modality,
+      geometry: sorted,
+      derived: {
+        vmaxMps: s.vmaxMps,
+        meanGradientMmHg: s.meanGradientMmHg,
+        peakGradientMmHg: s.peakGradientMmHg,
+      },
+    });
+    return true;
+  }
+
+  return false;
 }
 
 /**

@@ -16,6 +16,7 @@ import { canvasFont } from '../canvasFonts';
 import { ecgLayoutOf, ecgTracePoints, ecgX } from '../ecgTrace';
 import { drawColorBar } from './colorBarOverlay';
 import { measurementGeometryOn } from './measurementPlacement';
+import type { LivePreview } from './measurementPreview';
 import { drawPickedRegion, drawSegmentLayer, drawStructureOutline } from './rasterLayers';
 
 /** Where an image marker sits on the current display: strip markers keep their pixel, sector markers reproject. */
@@ -109,6 +110,7 @@ export function drawOverlay(
   st: SimStore,
   pending: { x: number; y: number }[],
   lassoDraft: { x: number; y: number }[] = [],
+  livePreview: LivePreview | null = null,
 ): void {
   const { ui, activeTool, measurements, reviewMarkers } = st;
   const {
@@ -463,6 +465,7 @@ export function drawOverlay(
       '#5cc8ff',
       activeTool === 'vti' ? stripBaselineY : undefined,
     );
+  if (livePreview) drawLivePreview(ctx, livePreview);
   ctx.lineWidth = 1;
   // review markers (decision 134): numbered, with the structure the model holds under each one.
   if (ui.reviewMode) {
@@ -800,4 +803,63 @@ function drawAngleBadge(
   ctx.fillText(text, left + padX, top + h / 2 + 0.5);
   ctx.font = font;
   ctx.textAlign = textAlign;
+}
+
+/** Real-time cyan rubber-band guide and live clinical value chip while placing a measurement. */
+function drawLivePreview(ctx: CanvasRenderingContext2D, preview: LivePreview): void {
+  const pts = preview.points;
+  if (!pts.length) return;
+  ctx.save();
+  if (preview.shape === 'span' && pts.length >= 2) {
+    const x0 = Math.min(pts[0]!.x, pts[1]!.x);
+    const x1 = Math.max(pts[0]!.x, pts[1]!.x);
+    const y0 = pts[0]!.y;
+    const h = pts[1]!.y - y0;
+    ctx.fillStyle = 'rgba(92, 200, 255, 0.14)';
+    ctx.fillRect(x0, y0, Math.max(1, x1 - x0), h);
+    ctx.strokeStyle = 'rgba(92, 200, 255, 0.85)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x0, y0 + h);
+    ctx.moveTo(x1, y0);
+    ctx.lineTo(x1, y0 + h);
+    ctx.stroke();
+  } else if (preview.shape === 'guide' && pts.length >= 2) {
+    ctx.strokeStyle = 'rgba(92, 200, 255, 0.52)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0]!.x, pts[0]!.y);
+    ctx.lineTo(pts[1]!.x, pts[1]!.y);
+    ctx.stroke();
+  } else if (pts.length >= 2) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0]!.x, pts[0]!.y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y);
+    ctx.stroke();
+    ctx.strokeStyle = '#5cc8ff';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(pts[0]!.x, pts[0]!.y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y);
+    ctx.stroke();
+    const target = preview.anchor;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(target.x - 4, target.y);
+    ctx.lineTo(target.x + 4, target.y);
+    ctx.moveTo(target.x, target.y - 4);
+    ctx.lineTo(target.x, target.y + 4);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  drawValueChip(ctx, preview.label, preview.anchor.x, preview.anchor.y, '#5cc8ff');
+  ctx.restore();
 }

@@ -551,38 +551,91 @@
 .measure-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
-  padding: 4px 0;
+  padding: 5px 4px;
   border-bottom: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
+}
+.measure-row.on-screen {
+  background: var(--accent-soft);
 }
 .measure-row .m-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
+}
+.measure-row .m-title-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.measure-row .m-tech-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  cursor: help;
+}
+.measure-row .m-tech-dot.ok {
+  background: var(--ok);
+}
+.measure-row .m-tech-dot.warn {
+  background: var(--warn);
+}
+.measure-row .m-tech-dot.bad {
+  background: var(--bad);
+}
+.measure-row .m-meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  min-width: 0;
+}
 .measure-row .m-src {
-  margin-left: 6px;
   color: var(--faint);
-  font-size: var(--fs-xs);
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 .measure-row .m-sub {
-  display: block;
-  margin-top: 2px;
   font-family: var(--mono);
-  font-size: var(--fs-xs);
+  font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.measure-row .m-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
 .measure-row .m-value {
   font-family: var(--mono);
+  font-weight: 600;
   color: var(--text);
   white-space: nowrap;
+}
+.measure-row .m-inspect {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  color: var(--accent-strong);
+  background: transparent;
+  border: 1px solid var(--accent-line);
+}
+.measure-row .m-inspect.active {
+  background: var(--accent-soft);
+  font-weight: 650;
 }
 .measure-row .icon-btn {
   width: 20px;
