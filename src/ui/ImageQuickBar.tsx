@@ -9,6 +9,7 @@ import {
   stepColorScale,
   stepSpectralBaseline,
   stepSpectralScale,
+  toggleHdZoom,
 } from './imageQuickBarModel';
 
 /**
@@ -86,6 +87,16 @@ export function ImageQuickBar() {
           onLess={() => s.setSettings({ depthCm: s.settings.depthCm - 1 })}
           onMore={() => s.setSettings({ depthCm: s.settings.depthCm + 1 })}
         />
+        <i className="quick-sep" aria-hidden="true" />
+        <button
+          type="button"
+          className={`quick-auto${s.settings.zoom > 1.05 ? ' on' : ''}`}
+          aria-pressed={s.settings.zoom > 1.05}
+          data-tip="Zoom HD focalizado (centra el foco y aumenta resolución para medir válvulas/PISA)"
+          onClick={() => s.setSettings({ zoom: toggleHdZoom(s.settings.zoom) })}
+        >
+          {s.settings.zoom > 1.05 ? `HD ${s.settings.zoom.toFixed(1)}×` : 'Zoom 2×'}
+        </button>
       </div>
     );
   }
@@ -177,6 +188,16 @@ export function ImageQuickBar() {
         onLess={() => s.setSettings({ gainDb: s.settings.gainDb - 2 })}
         onMore={() => s.setSettings({ gainDb: s.settings.gainDb + 2 })}
       />
+      <i className="quick-sep" aria-hidden="true" />
+      <button
+        type="button"
+        className={`quick-auto${s.settings.zoom > 1.05 ? ' on' : ''}`}
+        aria-pressed={s.settings.zoom > 1.05}
+        data-tip="Zoom HD focalizado (centra el foco a 2× y aumenta densidad de líneas)"
+        onClick={() => s.setSettings({ zoom: toggleHdZoom(s.settings.zoom) })}
+      >
+        {s.settings.zoom > 1.05 ? `HD ${s.settings.zoom.toFixed(1)}×` : 'Zoom 2×'}
+      </button>
       <i className="quick-sep" aria-hidden="true" />
       <button
         type="button"

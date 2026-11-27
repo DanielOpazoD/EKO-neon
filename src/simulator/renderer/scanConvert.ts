@@ -32,9 +32,19 @@ export function computeSectorMapping(
   const pxByH = usableH / spec.depthCm;
   const pxByW = usableW / (2 * spec.depthCm * Math.sin(halfAngle));
   const pxPerCm = Math.min(pxByH, pxByW) * zoom;
+  let apexY = margin;
+  if (zoom > 1.001) {
+    // Focalized HD zoom (Write-Zoom): keep the focal depth centered in the viewport instead of
+    // pinning the transducer apex at the top edge and pushing mid/deep valves off-screen.
+    const rawFocus = spec.focusCm > 0 ? spec.focusCm : spec.depthCm * 0.5;
+    const centerR = Math.max(spec.depthCm * 0.2, Math.min(spec.depthCm * 0.88, rawFocus));
+    const targetApexY = height * 0.5 - centerR * pxPerCm;
+    const minApexY = Math.min(margin, height - margin - spec.depthCm * pxPerCm);
+    apexY = Math.max(minApexY, Math.min(margin, targetApexY));
+  }
   return {
     apexX: width / 2,
-    apexY: margin,
+    apexY,
     pxPerCm,
     width,
     height,
@@ -88,7 +98,7 @@ export interface ScanLut {
 }
 
 export function lutKey(spec: PolarFrameSpec, m: SectorMapping): string {
-  return `${spec.lines}x${spec.samples}|${spec.sectorRad.toFixed(4)}|${spec.depthCm}|${m.width}x${m.height}|${m.pxPerCm.toFixed(3)}|${m.invertLR ? 1 : 0}`;
+  return `${spec.lines}x${spec.samples}|${spec.sectorRad.toFixed(4)}|${spec.depthCm}|${m.width}x${m.height}|${m.apexX.toFixed(2)},${m.apexY.toFixed(2)}|${m.pxPerCm.toFixed(3)}|${m.invertLR ? 1 : 0}`;
 }
 
 export function buildScanLut(spec: PolarFrameSpec, m: SectorMapping): ScanLut {

@@ -11,7 +11,7 @@ import {
   scanConvertLutReference,
   LUT_TEXEL_INSIDE,
 } from './scanConvert';
-import type { PolarFrameSpec } from './types';
+import { DEFAULT_ACQUISITION, polarSpecFor, type PolarFrameSpec } from './types';
 
 const SPEC: PolarFrameSpec = {
   lines: 64,
@@ -118,4 +118,42 @@ test('scanConvertLut fast path preserves uniform fields and agrees with float re
     maxDiff = Math.max(maxDiff, Math.abs(rgbaFast[i]! - rgbaRef[i]!));
   }
   assert.ok(maxDiff <= 1, `fast vs reference maxDiff=${maxDiff} exceeded 1 gray level`);
+});
+
+test('focalized HD Write-Zoom centers focusCm, preserves exact caliper calibration, invalidates lutKey, and boosts polar resolution', () => {
+  const deepSpec: PolarFrameSpec = { ...SPEC, focusCm: 9 };
+  const shallowSpec: PolarFrameSpec = { ...SPEC, focusCm: 5 };
+  const m1x = computeSectorMapping(deepSpec, 640, 480, false, 1);
+  const m2x = computeSectorMapping(deepSpec, 640, 480, false, 2);
+  const m2xShallow = computeSectorMapping(shallowSpec, 640, 480, false, 2);
+
+  // At 2× zoom, pxPerCm doubles and focusCm sits comfortably near vertical canvas center (not pushed off bottom!)
+  assert.ok(Math.abs(m2x.pxPerCm - m1x.pxPerCm * 2) < 1e-6);
+  assert.ok(m2x.apexY < m1x.apexY, 'zooming on mid/deep focus shifts apex upward to keep focus centered');
+  const focusPt = polarToPixel(m2x, deepSpec.focusCm, 0);
+  assert.ok(
+    focusPt.y >= 480 * 0.3 && focusPt.y <= 480 * 0.7,
+    `expected focusCm centered in [144, 336], got y=${focusPt.y.toFixed(1)}`,
+  );
+
+  // Exact polarToPixel <-> pixelToPolar inversion at 2× zoom (caliper accuracy)
+  for (const rCm of [5, 9, 12.5]) {
+    for (const th of [-0.35, 0, 0.35]) {
+      const p = polarToPixel(m2x, rCm, th);
+      const back = pixelToPolar(m2x, p.x, p.y);
+      assert.ok(Math.abs(back.rCm - rCm) < 1e-9);
+      assert.ok(Math.abs(back.thetaRad - th) < 1e-9);
+    }
+  }
+
+  // Shifting focus while zoomed updates apexY and invalidates lutKey
+  assert.notEqual(m2x.apexY, m2xShallow.apexY);
+  assert.notEqual(lutKey(deepSpec, m2x), lutKey(shallowSpec, m2xShallow));
+
+  // Real Write-Zoom boosts polar scan-line & sample density cleanly within safe caps
+  const p1 = polarSpecFor({ ...DEFAULT_ACQUISITION, zoom: 1 }, 'high');
+  const p2 = polarSpecFor({ ...DEFAULT_ACQUISITION, zoom: 2 }, 'high');
+  assert.ok(p2.lines > p1.lines, `expected zoomed lines ${p2.lines} > ${p1.lines}`);
+  assert.ok(p2.samples > p1.samples, `expected zoomed samples ${p2.samples} > ${p1.samples}`);
+  assert.ok(p2.lines <= 320 && p2.samples <= 512, 'HD zoom grid must stay within bounded limits');
 });

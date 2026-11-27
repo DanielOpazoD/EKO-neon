@@ -6,6 +6,7 @@ import {
   stepColorScale,
   stepSpectralBaseline,
   stepSpectralScale,
+  toggleHdZoom,
 } from './imageQuickBarModel';
 
 describe('contextual ImageQuickBar modality stepping & clamping', () => {
@@ -43,5 +44,12 @@ describe('contextual ImageQuickBar modality stepping & clamping', () => {
     const tdi = stepSpectralScale('tdi', 0.2, 0, 0.5, 1);
     assert.equal(tdi.scaleMps, 0.24);
     assert.equal(stepSpectralBaseline('tdi', 0.2, 0, -1), -0.02);
+  });
+
+  it('toggles 1-click HD Write-Zoom cleanly between 1× and 2×', () => {
+    assert.equal(toggleHdZoom(1), 2);
+    assert.equal(toggleHdZoom(1.04), 2);
+    assert.equal(toggleHdZoom(1.5), 1);
+    assert.equal(toggleHdZoom(2), 1);
   });
 });

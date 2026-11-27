@@ -43,7 +43,7 @@ export function orientationMarker(m: SectorMapping): {
   const side = m.invertLR ? -1 : 1;
   return {
     x: m.apexX + 16 * side,
-    y: m.apexY + 4,
+    y: Math.max(14, m.apexY + 4),
     labelX: m.apexX + 24 * side,
     labelAlign: side > 0 ? 'left' : 'right',
   };
@@ -162,6 +162,7 @@ export function drawOverlay(
   ctx.textAlign = inward ? 'right' : 'left';
   for (let d = 1; d <= m.depthCm + 1e-6; d += 1) {
     const y = m.apexY + d * m.pxPerCm;
+    if (y < 6) continue;
     if (y > sectorH - 2) break;
     const major = d % 5 === 0;
     ctx.beginPath();
@@ -173,7 +174,7 @@ export function drawOverlay(
   ctx.textAlign = 'left';
   ctx.font = canvasFont(11);
   const fy = m.apexY + settings.focusCm * m.pxPerCm;
-  if (fy < sectorH) {
+  if (fy >= 6 && fy < sectorH) {
     ctx.fillStyle = '#ffc857';
     ctx.beginPath();
     ctx.moveTo(rightX - 2, fy);
@@ -191,6 +192,10 @@ export function drawOverlay(
   ctx.textAlign = mark.labelAlign;
   ctx.fillText('R', mark.labelX, mark.y);
   ctx.textAlign = 'left';
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, sectorH);
+  ctx.clip();
   ctx.strokeStyle = 'rgba(92,200,255,0.5)';
   ctx.beginPath();
   for (let i = 0; i <= 20; i++) {
@@ -202,23 +207,28 @@ export function drawOverlay(
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
+  if (modality === 'color') {
+    drawArcBox(
+      ctx,
+      m,
+      color.boxThetaMinRad,
+      color.boxThetaMaxRad,
+      color.boxRMinCm,
+      color.boxRMaxCm,
+      'rgba(102, 224, 160, 0.88)',
+    );
+  }
+  ctx.restore();
   if (modality === 'color' || modality === 'cmm') {
-    if (modality === 'color') {
-      drawArcBox(
-        ctx,
-        m,
-        color.boxThetaMinRad,
-        color.boxThetaMaxRad,
-        color.boxRMinCm,
-        color.boxRMaxCm,
-        'rgba(102, 224, 160, 0.88)',
-      );
-    }
     const rawHudBottom = canvas.parentElement?.style.getPropertyValue('--hud-tr-b');
     const hudTopClearY = rawHudBottom ? Number(rawHudBottom) || 0 : 0;
     drawColorBar(ctx, modality, color, m, W, sectorH, rightX, inward, hudTopClearY);
   }
   if (isStripModality(modality)) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, W, sectorH);
+    ctx.clip();
     const p0 = polarToPixel(m, 0.3, cursorTheta);
     const p1 = polarToPixel(m, m.depthCm, cursorTheta);
     ctx.strokeStyle = MODALITIES[modality].strip === 'm-mode' ? '#5cc8ff' : '#ffc857';
@@ -244,6 +254,7 @@ export function drawOverlay(
       }
       ctx.lineWidth = 1;
     }
+    ctx.restore();
     if (
       isSpectralModality(modality) &&
       hud.gate &&
@@ -255,7 +266,17 @@ export function drawOverlay(
       const quality = classifyDopplerAngle(hud.gate.flowAngleDeg);
       const anchorDepth = hasGate(modality) ? gateDepth : m.depthCm * 0.52;
       const anchor = polarToPixel(m, anchorDepth, cursorTheta);
-      drawAngleBadge(ctx, angleDeg, quality, anchor.x, anchor.y, W, m.apexY, sectorH, cursorTheta);
+      drawAngleBadge(
+        ctx,
+        angleDeg,
+        quality,
+        anchor.x,
+        anchor.y,
+        W,
+        Math.max(14, m.apexY),
+        sectorH,
+        cursorTheta,
+      );
     }
     const strip = hud.strip;
     if (strip.kind === 'spectral') {

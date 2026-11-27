@@ -78,14 +78,30 @@ export function ImageTab() {
         title={tip('Mejor resolución lateral cerca del foco.')}
       />
       <Slider
-        label="Zoom"
+        label="Zoom HD"
         value={s.settings.zoom}
         min={1}
         max={2.5}
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => s.setSettings({ zoom: v })}
+        title={tip('Write-Zoom focalizado: centra la zona focal y aumenta la densidad de líneas.')}
       />
+      <div className="row">
+        <label>Zoom rápido</label>
+        <Segmented
+          ariaLabel="Zoom rápido HD"
+          value={
+            s.settings.zoom >= 1.85 ? '2' : s.settings.zoom >= 1.25 ? '1.5' : '1'
+          }
+          onChange={(v) => s.setSettings({ zoom: Number(v) })}
+          options={[
+            { id: '1', label: '1×' },
+            { id: '1.5', label: '1,5×' },
+            { id: '2', label: '2× HD' },
+          ]}
+        />
+      </div>
       <Toggle
         label="Invertir izq/der"
         value={s.settings.invertLR}

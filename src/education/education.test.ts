@@ -10,8 +10,15 @@ import { allTasks, evaluateTasks, isUnlocked, type LearnerSnapshot } from './cur
 import { subcostalPostureHint } from './causes';
 import { expectedFindings, scoreImpression } from './impression';
 import { loadProgress, PROGRESS_KEY, summarizeProgress } from './progress';
-import { biplaneVolume, deriveCalculations, pathologyImpressions, rightAtrialPressure } from './report';
-import { truthFor } from './scoring/scoring';
+import {
+  aggregateProtocolMeasurement,
+  biplaneVolume,
+  deriveCalculations,
+  multiBeatAverages,
+  pathologyImpressions,
+  rightAtrialPressure,
+} from './report';
+import { scoreMeasurements, truthFor } from './scoring/scoring';
 import { evaluateTechnique, structureName } from './technique';
 
 function ellipseContour(cx: number, cy: number, rx: number, ry: number, n = 48) {
@@ -474,5 +481,81 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     });
     assert.deepEqual(evaluateTasks(msSnap, {}), []);
     assert.ok(evaluateTasks(msSnap, { 'mitral-e-ok': true }).includes('impression-ms'));
+  });
+
+  it('averages multi-beat ASE measurements in AF across distinct beats while deduplicating same-beat re-captures', () => {
+    const afCase = loadCaseById('af-diastolic');
+    const afTruth = computeGroundTruth(afCase);
+    const targetE = truthFor('mitral-e', afTruth)!.value;
+
+    const mkBeat = (
+      id: string,
+      measurementId: string,
+      value: number,
+      beatIndex: number | undefined,
+      units = 'm/s',
+      kind: Measurement['kind'] = 'velocity',
+      modality = 'pw',
+    ): Measurement => ({
+      id,
+      measurementId,
+      kind,
+      label: measurementId === 'mitral-e' ? 'Onda E mitral' : measurementId,
+      value,
+      units,
+      modality,
+      createdAt: '2026-01-01T00:00:00Z',
+      frameId: 10 + (beatIndex ?? 0),
+      phase: 0.55,
+      timeS: (beatIndex ?? 0) * 0.8,
+      beatIndex,
+      sourceViewId: 'a4c',
+      viewScore: 92,
+      imageQualityScore: 90,
+      userAssisted: false,
+      referenceGuidelineIds: ['ase-diastolic-2016'],
+      geometry: [],
+      technique: { score: 1, findings: [] },
+    });
+
+    // 3 distinct beats + 1 overwritten duplicate on beat 2 -> mean over beats 1, 2 (new), 3 = targetE
+    const eBeats = [
+      mkBeat('e1', 'mitral-e', targetE * 0.85, 1),
+      mkBeat('e2-old', 'mitral-e', targetE * 1.6, 2),
+      mkBeat('e2-new', 'mitral-e', targetE * 1.0, 2),
+      mkBeat('e3', 'mitral-e', targetE * 1.15, 3),
+    ];
+    const agg = aggregateProtocolMeasurement(eBeats, 'mitral-e');
+    assert.ok(agg && agg.isAveraged);
+    assert.equal(agg.beatCount, 3);
+    assert.ok(Math.abs(agg.value - targetE) < 1e-6, `Expected mean ${targetE}, got ${agg.value}`);
+
+    // Derived calculations surface both explicit avg-mitral-e row and averaged E/e′
+    const withEp = [
+      ...eBeats,
+      mkBeat('ep1', 'e-prime-septal', 6.0, 1, 'cm/s', 'velocity', 'tdi'),
+      mkBeat('ep2', 'e-prime-septal', 8.0, 2, 'cm/s', 'velocity', 'tdi'),
+    ];
+    assert.equal(multiBeatAverages(withEp).length, 2);
+    const derived = deriveCalculations(withEp);
+    const avgRow = derived.find((d) => d.id === 'avg-mitral-e');
+    assert.ok(avgRow && avgRow.label.includes('prom. 3 lat.'));
+    const eeRow = derived.find((d) => d.id === 'e-eprime');
+    assert.ok(eeRow && eeRow.inputs.includes('prom. 3 lat.'));
+    assert.ok(
+      Math.abs(Number(eeRow!.value) - (targetE * 100) / 7.0) < 0.15,
+      `Expected E/e′ from averaged beats, got ${eeRow?.value}`,
+    );
+
+    // Scoring evaluates the 3-beat mean against AF truth and notes ASE multi-beat averaging
+    const score = scoreMeasurements(afCase, afTruth, eBeats);
+    const eRow = score.rows.find((r) => r.measurementId === 'mitral-e');
+    assert.ok(eRow && eRow.points === 100, `Expected 100 pts on 3-beat mean, got ${eRow?.points}`);
+    assert.ok(eRow!.comment.includes('Promedio ASE (3 latidos)'));
+
+    // Legacy captures without beatIndex still fall back to latest-wins
+    const legacy = [mkBeat('l1', 'mitral-e', 0.5, undefined), mkBeat('l2', 'mitral-e', 1.1, undefined)];
+    const legacyAgg = aggregateProtocolMeasurement(legacy, 'mitral-e');
+    assert.ok(legacyAgg && !legacyAgg.isAveraged && legacyAgg.value === 1.1);
   });
 });

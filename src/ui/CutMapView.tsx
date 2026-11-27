@@ -109,10 +109,11 @@ export function CutMapView() {
         return;
       const st = useSimStore.getState();
       const invertLR = st.settings.invertLR;
-      const key = `${p.lines}x${p.samples}|${p.sectorRad.toFixed(4)}|${p.depthCm}|${cssW}x${cssH}|${invertLR ? 1 : 0}|${st.settings.zoom}`;
+      const focusCm = st.settings.focusCm;
+      const key = `${p.lines}x${p.samples}|${p.sectorRad.toFixed(4)}|${p.depthCm}|${cssW}x${cssH}|${invertLR ? 1 : 0}|${st.settings.zoom}|${focusCm}`;
       if (key !== lutKey || !lut || !mapping) {
         mapping = computeSectorMapping(
-          { ...p, elevationSamples: 1, focusCm: 0 },
+          { ...p, elevationSamples: 1, focusCm },
           cssW,
           cssH,
           invertLR,

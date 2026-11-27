@@ -3,6 +3,7 @@ import type { Measurement } from '@/simulator/measurements/types';
 import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type { CaseDefinition } from '@/cases/schema';
+import { aggregateProtocolMeasurement } from '../multiBeat';
 
 /**
  * Transparent, modular scoring (spec 28). Acquisition scores come from the ViewQualityEngine
@@ -107,9 +108,35 @@ function bestMatch(
   truth: MeasurementTruth,
   ms: Measurement[],
   freeMeasurements: boolean,
-): Measurement | null {
-  const semantic = ms.filter((m) => m.measurementId === id);
-  if (semantic.length) return semantic[semantic.length - 1]!;
+): { measurement: Measurement; beatCount: number } | null {
+  const agg = aggregateProtocolMeasurement(ms, id);
+  if (agg) {
+    if (!agg.isAveraged) return { measurement: agg.latest, beatCount: 1 };
+    const viewScores = agg.beats
+      .map((b) => b.viewScore)
+      .filter((v): v is number => v !== null && Number.isFinite(v));
+    const avgViewScore = viewScores.length
+      ? Math.round(viewScores.reduce((s, x) => s + x, 0) / viewScores.length)
+      : agg.latest.viewScore;
+    const techs = agg.beats
+      .map((b) => b.technique)
+      .filter((tq): tq is NonNullable<Measurement['technique']> => Boolean(tq));
+    const avgTech = techs.length
+      ? {
+          score: techs.reduce((s, tq) => s + tq.score, 0) / techs.length,
+          findings: agg.latest.technique?.findings ?? techs[techs.length - 1]!.findings,
+        }
+      : agg.latest.technique;
+    return {
+      measurement: {
+        ...agg.latest,
+        value: agg.value,
+        viewScore: avgViewScore,
+        technique: avgTech,
+      },
+      beatCount: agg.beatCount,
+    };
+  }
   if (!freeMeasurements) return null;
   let best: Measurement | null = null;
   for (const m of ms) {
@@ -117,7 +144,7 @@ function bestMatch(
     if (!truth.modalities.includes(m.modality)) continue;
     if (!best || Math.abs(m.value - truth.value) < Math.abs(best.value - truth.value)) best = m;
   }
-  return best;
+  return best ? { measurement: best, beatCount: 1 } : null;
 }
 
 export function scoreMeasurements(
@@ -130,8 +157,8 @@ export function scoreMeasurements(
   for (const req of caseDef.requiredMeasurements) {
     const t = truthFor(req.measurementId, truth);
     if (!t) continue;
-    const m = bestMatch(req.measurementId, t, measurements, freeMeasurements);
-    if (!m) {
+    const matched = bestMatch(req.measurementId, t, measurements, freeMeasurements);
+    if (!matched) {
       rows.push({
         measurementId: req.measurementId,
         label: t.label,
@@ -151,6 +178,7 @@ export function scoreMeasurements(
       });
       continue;
     }
+    const { measurement: m, beatCount } = matched;
     const errorPct = (Math.abs(m.value - t.value) / t.value) * 100;
     let points =
       errorPct <= req.tolerancePct ? 100 : Math.max(0, 100 - (errorPct - req.tolerancePct) * 3);
@@ -158,6 +186,9 @@ export function scoreMeasurements(
       errorPct <= req.tolerancePct
         ? 'Dentro de tolerancia.'
         : `Error ${errorPct.toFixed(0)} % (tolerancia ${req.tolerancePct} %).`;
+    if (beatCount >= 2) {
+      comment += ` Promedio ASE (${beatCount} latidos).`;
+    }
     let technicallyValid: boolean;
     if (m.technique) {
       // technique-graded measurement: the number only counts as much as the technique allows

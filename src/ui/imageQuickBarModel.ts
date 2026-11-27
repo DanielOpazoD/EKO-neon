@@ -55,6 +55,11 @@ export function stepSpectralScale(
   return { scaleMps: next, baselineShiftMps };
 }
 
+/** Toggle 1-click HD Write-Zoom between normal (1×) and focalized 2× magnification. */
+export function toggleHdZoom(currentZoom: number): number {
+  return currentZoom > 1.05 ? 1 : 2;
+}
+
 /** Step PW/CW/TDI baseline shift cleanly within ±80% of active velocity scale. */
 export function stepSpectralBaseline(
   modality: SpectralModality,
