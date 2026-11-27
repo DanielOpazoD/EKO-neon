@@ -13,6 +13,7 @@ import {
 import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   buildFlowParams,
+  cavalVenousVelocityMps,
   sampleFlow,
   sampleLeafletVelocity,
   sampleTissueVelocity,
@@ -1387,4 +1388,86 @@ test('diastolic pulmonary regurgitation reflects PA pressure gradient and stays 
     Structure.Rvot,
   );
   assert.equal(fs.present, 0, 'Normal physiological trace PR must not reach 2.0 cm into RVOT');
+});
+
+test('IVC and hepatic vein exhibit triphasic S/D/Ar return, TR systolic reversal, tamponade D blunting, and inspiratory augmentation', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+  // 1. Normal heart: antegrade S > D in IVC & hepatic vein, negative Ar, inspiratory augmentation
+  const normCase = loadCaseById('normal-excellent');
+  const normModels = buildCaseModels(normCase, REST_PATIENT);
+  const normFlow = buildFlowParams(normCase, normModels.heart, normModels.tables, normModels.thorax);
+  const normA = heartAnchors(normModels.heart);
+  const tmN = normModels.tables.timings;
+
+  const phSysN = (tmN.pulmonaryOpenS + 0.5 * (tmN.pulmonaryCloseS - tmN.pulmonaryOpenS)) / normModels.tables.rrS;
+  const phDiaN = (tmN.tricuspidOpenS + tmN.eAccelS) / normModels.tables.rrS;
+  const phArN = (tmN.aStartS + 0.5 * (tmN.aEndS - tmN.aStartS)) / normModels.tables.rrS;
+
+  const hpSysN = computeHeartPose(normModels.heart, cycleStateAt(normModels.tables, phSysN, normFlow.flowPeaks));
+  const hpDiaN = computeHeartPose(normModels.heart, cycleStateAt(normModels.tables, phDiaN, normFlow.flowPeaks));
+  const hpArN = computeHeartPose(normModels.heart, cycleStateAt(normModels.tables, phArN, normFlow.flowPeaks));
+
+  const vSysN = cavalVenousVelocityMps(normFlow, normModels.tables, hpSysN, phSysN);
+  const vDiaN = cavalVenousVelocityMps(normFlow, normModels.tables, hpDiaN, phDiaN);
+  const vArN = cavalVenousVelocityMps(normFlow, normModels.tables, hpArN, phArN);
+  assert.ok(vSysN > 0.35 && vDiaN > 0.2 && vSysN > vDiaN, `Expected normal S > D > 0, got S=${vSysN.toFixed(2)}, D=${vDiaN.toFixed(2)}`);
+  assert.ok(vArN < -0.1, `Expected retrograde Ar reversal during atrial kick, got ${vArN.toFixed(2)} m/s`);
+
+  // Inspiratory augmentation with ivcCollapse > 0
+  const vSysInsp = cavalVenousVelocityMps(normFlow, normModels.tables, { ...hpSysN, ivcCollapse: 0.5 }, phSysN);
+  assert.ok(vSysInsp > vSysN * 1.15, `Expected inspiratory augmentation in IVC return (${vSysInsp.toFixed(2)} vs ${vSysN.toFixed(2)})`);
+
+  // Spatial verification inside IVC and hepatic vein lumens (direction points toward RA / ivcA)
+  const ivcMid = { x: 0.5 * (normA.ivcA.x + normA.ivcB.x), y: 0.5 * (normA.ivcA.y + normA.ivcB.y), z: 0.5 * (normA.ivcA.z + normA.ivcB.z) };
+  const hvMid = { x: 0.5 * (normA.hvA.x + normA.hvB.x), y: 0.5 * (normA.hvA.y + normA.hvB.y), z: 0.5 * (normA.hvA.z + normA.hvB.z) };
+  sampleFlow(normFlow, normModels.tables, hpSysN, phSysN, ivcMid.x, ivcMid.y, ivcMid.z, fs, Structure.Ivc);
+  const ivcDx = normA.ivcA.x - normA.ivcB.x, ivcDy = normA.ivcA.y - normA.ivcB.y, ivcDz = normA.ivcA.z - normA.ivcB.z;
+  const ivcDot = fs.vx * ivcDx + fs.vy * ivcDy + fs.vz * ivcDz;
+  assert.ok(fs.present === 1 && ivcDot > 0 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.35, 'Expected antegrade systolic IVC flow toward RA');
+
+  sampleFlow(normFlow, normModels.tables, hpSysN, phSysN, hvMid.x, hvMid.y, hvMid.z, fs, Structure.HepaticVein);
+  const hvDx = normA.hvA.x - normA.hvB.x, hvDy = normA.hvA.y - normA.hvB.y, hvDz = normA.hvA.z - normA.hvB.z;
+  const hvDot = fs.vx * hvDx + fs.vy * hvDy + fs.vz * hvDz;
+  assert.ok(fs.present === 1 && hvDot > 0 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.38, 'Expected antegrade systolic hepatic vein flow toward IVC');
+
+  // 2. Severe TR (pulmonary-hypertension-rv): holosystolic flow reversal in hepatic vein & IVC + brisk diastolic D
+  const phCase = loadCaseById('pulmonary-hypertension-rv');
+  const phModels = buildCaseModels(phCase, REST_PATIENT);
+  const phFlow = buildFlowParams(phCase, phModels.heart, phModels.tables, phModels.thorax);
+  const phA = heartAnchors(phModels.heart);
+  const tmPh = phModels.tables.timings;
+  const phSysPh = (tmPh.pulmonaryOpenS + 0.5 * (tmPh.pulmonaryCloseS - tmPh.pulmonaryOpenS)) / phModels.tables.rrS;
+  const phDiaPh = (tmPh.tricuspidOpenS + tmPh.eAccelS) / phModels.tables.rrS;
+  const hpSysPh = computeHeartPose(phModels.heart, cycleStateAt(phModels.tables, phSysPh, phFlow.flowPeaks));
+  const hpDiaPh = computeHeartPose(phModels.heart, cycleStateAt(phModels.tables, phDiaPh, phFlow.flowPeaks));
+
+  const vSysPh = cavalVenousVelocityMps(phFlow, phModels.tables, hpSysPh, phSysPh);
+  const vDiaPh = cavalVenousVelocityMps(phFlow, phModels.tables, hpDiaPh, phDiaPh);
+  assert.ok(vSysPh < -0.25, `Expected severe-TR systolic reversal (< -0.25 m/s), got ${vSysPh.toFixed(2)} m/s`);
+  assert.ok(vDiaPh > 0.3, `Expected brisk diastolic forward D wave in severe TR, got ${vDiaPh.toFixed(2)} m/s`);
+
+  const phHvMid = { x: 0.5 * (phA.hvA.x + phA.hvB.x), y: 0.5 * (phA.hvA.y + phA.hvB.y), z: 0.5 * (phA.hvA.z + phA.hvB.z) };
+  sampleFlow(phFlow, phModels.tables, hpSysPh, phSysPh, phHvMid.x, phHvMid.y, phHvMid.z, fs, Structure.HepaticVein);
+  const phHvDot = fs.vx * (phA.hvA.x - phA.hvB.x) + fs.vy * (phA.hvA.y - phA.hvB.y) + fs.vz * (phA.hvA.z - phA.hvB.z);
+  assert.ok(fs.present === 1 && phHvDot < 0, 'Expected retrograde systolic flow in hepatic vein during severe TR');
+
+  // 3. Cardiac tamponade: dominant systolic S with markedly blunted diastolic D
+  const tampCase = loadCaseById('pericardial-effusion-tamponade');
+  const tampModels = buildCaseModels(tampCase, REST_PATIENT);
+  const tampFlow = buildFlowParams(tampCase, tampModels.heart, tampModels.tables, tampModels.thorax);
+  const tmT = tampModels.tables.timings;
+  const phSysT = (tmT.pulmonaryOpenS + 0.5 * (tmT.pulmonaryCloseS - tmT.pulmonaryOpenS)) / tampModels.tables.rrS;
+  const phDiaT = (tmT.tricuspidOpenS + tmT.eAccelS) / tampModels.tables.rrS;
+  const vSysT = cavalVenousVelocityMps(tampFlow, tampModels.tables, computeHeartPose(tampModels.heart, cycleStateAt(tampModels.tables, phSysT, tampFlow.flowPeaks)), phSysT);
+  const vDiaT = cavalVenousVelocityMps(tampFlow, tampModels.tables, computeHeartPose(tampModels.heart, cycleStateAt(tampModels.tables, phDiaT, tampFlow.flowPeaks)), phDiaT);
+  assert.ok(vSysT > 0.3 && vDiaT < 0.16 && vSysT > 2 * vDiaT, `Expected tamponade systolic-dominant venous return (S=${vSysT.toFixed(2)}, D=${vDiaT.toFixed(2)})`);
+
+  // 4. AF: no atrial Ar reversal
+  const afCase = loadCaseById('af-diastolic');
+  const afModels = buildCaseModels(afCase, REST_PATIENT);
+  const afFlow = buildFlowParams(afCase, afModels.heart, afModels.tables, afModels.thorax);
+  const hpLateAf = computeHeartPose(afModels.heart, cycleStateAt(afModels.tables, 0.92, afFlow.flowPeaks));
+  const vLateAf = cavalVenousVelocityMps(afFlow, afModels.tables, hpLateAf, 0.92);
+  assert.ok(vLateAf >= -0.01, `AF must have no atrial-kick Ar reversal, got ${vLateAf.toFixed(3)} m/s`);
 });
