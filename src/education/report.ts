@@ -15,7 +15,7 @@ import {
 } from '@/clinical/reference-values';
 import { discProfileFromContour } from '@/simulator/measurements/simpson';
 import { truthFor } from './scoring/scoring';
-import { rvspFromTr, simpsonBiplaneVolume } from '@/clinical/formulas';
+import { mvaFromPht, pisaEroaCm2, rvspFromTr, simpsonBiplaneVolume } from '@/clinical/formulas';
 
 /**
  * Educational report assembly (spec 26). Deterministic; compares user measurements with the model
@@ -312,6 +312,47 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       value: `${(4 * mrVmax * mrVmax).toFixed(0)} mmHg`,
       formula: '4·Vmax²',
       inputs: `Vmax IM ${mrVmax.toFixed(2)} m/s`,
+    });
+  const mrPisa = latest(ms, 'mr-pisa-radius');
+  if (mrPisa && mrPisa.value > 0 && mrVmax !== null && mrVmax > 0) {
+    const va = mrPisa.derived?.aliasingVelocityMps ?? 0.4;
+    const eroa = pisaEroaCm2(mrPisa.value, va, mrVmax);
+    rows.push({
+      id: 'mr-eroa-pisa',
+      label: 'ORE de la IM (PISA)',
+      value: `${eroa.toFixed(2)} cm²`,
+      formula: '2π·r²·v_a / Vmax IM',
+      inputs: `r ${mrPisa.value.toFixed(2)} cm, v_a ${va.toFixed(2)} m/s, Vmax ${mrVmax.toFixed(2)} m/s`,
+    });
+    const mrVti = v('mr-vti');
+    if (mrVti !== null && mrVti > 0) {
+      rows.push({
+        id: 'mr-rvol-pisa',
+        label: 'Volumen regurgitante IM (PISA)',
+        value: `${(eroa * mrVti).toFixed(0)} mL`,
+        formula: 'ORE × VTI IM',
+        inputs: `ORE ${eroa.toFixed(2)} cm² × VTI ${mrVti.toFixed(0)} cm`,
+      });
+    }
+  }
+  const mitralPht = v('mitral-pht');
+  if (mitralPht !== null && mitralPht > 0)
+    rows.push({
+      id: 'mva-pht',
+      label: 'Área valvular mitral (PHT)',
+      value: `${mvaFromPht(mitralPht).toFixed(2)} cm²`,
+      formula: '220 / PHT',
+      inputs: `PHT ${mitralPht.toFixed(0)} ms`,
+    });
+  const pvS = v('pv-s'),
+    pvD = v('pv-d');
+  if (pvS !== null && pvD !== null && pvD > 0)
+    rows.push({
+      id: 'pv-sd-ratio',
+      label: 'Relación S/D venosa pulmonar',
+      value: (pvS / pvD).toFixed(2),
+      formula: 'S / D',
+      inputs: `S ${pvS.toFixed(2)} m/s, D ${pvD.toFixed(2)} m/s`,
     });
   const e = v('mitral-e'),
     a = v('mitral-a');

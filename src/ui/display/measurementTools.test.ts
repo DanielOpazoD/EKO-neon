@@ -11,15 +11,18 @@ import { summarizeEnvelope } from '@/simulator/measurements/vti';
 import { useSimStore } from '@/app/store';
 import type { SimOutput } from '@/simulator/core/protocol';
 import {
+  colorPisaAliasingVelocityMps,
   computeDecelerationTime,
   computeLinearCm,
   computeMModeExcursionCm,
   handleMeasurementToolClick,
+  pressureHalfTimeFromDtMs,
   resampleManualVti,
   stripVelocityAtY,
   summarizeManualVti,
   toolActsAt,
 } from './measurementTools';
+import { Structure } from '@/simulator/anatomy/tissue';
 import { computeSpectralTicks } from './overlayDraw';
 
 describe('measurement tools on the live image', () => {
@@ -56,6 +59,90 @@ describe('measurement tools on the live image', () => {
     assert.equal(useSimStore.getState().measurements.length, 0);
     assert.equal(pend.points.length, 0);
     useSimStore.getState().setActiveTool('none');
+  });
+
+  it('records Color modality & PISA aliasing velocity on Color calipers and converts slope DT to PHT for PHT specs', () => {
+    const st = useSimStore.getState();
+    st.setMode('sandbox');
+    st.loadCase('mvp-primary-mr');
+    st.setModality('color');
+    st.setColor({ scaleMps: 0.68, baselineShiftMps: -0.28 });
+    st.setActiveMeasurement('mr-pisa-radius');
+    const polar = { lines: 8, samples: 8, depthCm: 16, sectorRad: 1.4 };
+    const structure = new Uint8Array(64).fill(Structure.LvCavity);
+    const colorHud = {
+      frozen: true,
+      frameId: 10,
+      phase: 0.2,
+      timeS: 0.2,
+      sector: {
+        width: 400,
+        height: 300,
+        apexX: 200,
+        apexY: 10,
+        pxPerCm: 20,
+        depthCm: 16,
+        sectorRad: 1.4,
+        invertLR: false,
+      },
+      polar,
+      structure,
+      strip: { kind: null, y: 300, height: 0, topValue: 0, bottomValue: 0, secondsPerColumn: 0.005 },
+      view: { bestViewId: 'a4c', score: 92, components: { gain: 0.9 } },
+      gate: null,
+      acquisition: {
+        modality: 'color',
+        color: { scaleMps: 0.68, baselineShiftMps: -0.28 },
+        phaseMarks: {
+          ejectionStart: 0.08,
+          ejectionEnd: 0.38,
+          mitralOpen: 0.45,
+          eEnd: 0.68,
+          aStart: 0.82,
+          aEnd: 0.96,
+          hasAWave: true,
+        },
+      },
+    } as unknown as SimOutput;
+    const pend = { points: [] as { x: number; y: number }[] };
+    handleMeasurementToolClick({ x: 200, y: 120 }, 1, colorHud, pend, () => {});
+    handleMeasurementToolClick({ x: 200, y: 140 }, 1, colorHud, pend, () => {});
+    const pisa = useSimStore.getState().measurements.at(-1)!;
+    assert.equal(pisa.measurementId, 'mr-pisa-radius');
+    assert.equal(pisa.modality, 'color', 'Color-only protocol measurement must preserve color modality');
+    assert.ok(Math.abs(pisa.value - 1.0) < 1e-6);
+    assert.ok(
+      Math.abs((pisa.derived?.aliasingVelocityMps ?? 0) - 0.4) < 1e-6,
+      `Expected v_a = 0.40 m/s, got ${pisa.derived?.aliasingVelocityMps}`,
+    );
+    assert.equal(
+      pisa.technique?.findings.find((f) => f.code === 'modality')?.level,
+      'ok',
+      'Color caliper must pass Color modality technique check instead of collapsing to 2d',
+    );
+    assert.ok(Math.abs(colorPisaAliasingVelocityMps({ scaleMps: 0.68, baselineShiftMps: -0.28 }) - 0.4) < 1e-9);
+
+    // PHT spec converts linear DT (200 ms) into Hatle PHT (58 ms) using the same slope tool
+    assert.ok(Math.abs(pressureHalfTimeFromDtMs(200) - 58) < 1e-9);
+    useSimStore.getState().setModality('cw');
+    useSimStore.getState().setActiveMeasurement('ar-pht');
+    const cwHud = {
+      ...colorHud,
+      strip: { kind: 'spectral', y: 300, height: 200, topValue: 4.0, bottomValue: -4.0, secondsPerColumn: 0.005 },
+      view: { bestViewId: 'a5c', score: 90, components: { gain: 0.9 } },
+      gate: { structure: Structure.Lvot, tissue: 1, flowPresent: true, flowAngleDeg: 10, lineStructures: [Structure.AorticValve, Structure.Lvot] },
+      acquisition: { ...colorHud.acquisition, modality: 'cw' },
+    } as unknown as SimOutput;
+    const pendSlope = { points: [] as { x: number; y: number }[] };
+    // topValue=+4, bottomValue=-4 across 200px => 0 m/s at y=400, +4 m/s at y=300, +2 m/s at y=350
+    // Drop +4 -> +2 over 20 px (100 ms) => DT = 200 ms => PHT = 58 ms
+    handleMeasurementToolClick({ x: 100, y: 300 }, 1, cwHud, pendSlope, () => {});
+    handleMeasurementToolClick({ x: 120, y: 350 }, 1, cwHud, pendSlope, () => {});
+    const pht = useSimStore.getState().measurements.at(-1)!;
+    assert.equal(pht.measurementId, 'ar-pht');
+    assert.ok(Math.abs(pht.value - 58) < 1e-6, `Expected PHT 58 ms, got ${pht.value}`);
+    assert.ok(Math.abs((pht.derived?.dtMs ?? 0) - 200) < 1e-6);
+    useSimStore.getState().clearMeasurements();
   });
 });
 
