@@ -1,4 +1,5 @@
 import type { Vec3 } from '@/core/vec3';
+import { smoothstep } from '@/core/vec3';
 import { heartToTorso, torsoToHeart } from '@/simulator/anatomy/heartFrame';
 import { computeHeartPose, type HeartModel, type HeartPose } from '@/simulator/anatomy/heartModel';
 import {
@@ -96,7 +97,28 @@ export function buildAorticNetwork(
     edges,
     (_, i) => (vascularEdgeVolume(after[i]!) - vascularEdgeVolume(before[i]!)) / dtS,
   );
-  const inflowMlps = sampleTable(tables.aorticFlowMlps, p) - sampleTable(tables.arFlowMlps, p);
+  const qAo = sampleTable(tables.aorticFlowMlps, p);
+  const qAr = sampleTable(tables.arFlowMlps, p);
+  // Elastic Windkessel recoil of the pressurized aortic root & proximal ascending aorta sustains
+  // continuous antegrade diastolic peripheral runoff into the arch, cerebral branches, and descending
+  // thoracic aorta when the aortic valve is competent (superseded by retrograde runoff in AR).
+  let qWindkessel = 0;
+  if (qAo <= 1 && qAr <= 1 && tables.pulmonaryStrokeVolumeMl > 1) {
+    const tm = tables.timings;
+    const rr = tables.rrS;
+    const t = p * rr;
+    const dtSinceClose = (((t - tm.ejectionEndS) % rr) + rr) % rr;
+    const diaDur = (((tm.ejectionStartS - tm.ejectionEndS) % rr) + rr) % rr;
+    if (diaDur > 0.08 && dtSinceClose < diaDur) {
+      const uDia = dtSinceClose / diaDur;
+      // Exponential Windkessel decay (tau = 0.55·diaDur, mean factor 0.4607) discharging ~32% of forward SV
+      const qMeanDia = (0.32 * tables.pulmonaryStrokeVolumeMl) / diaDur;
+      const env =
+        smoothstep(0, 0.035, dtSinceClose) * (1 - smoothstep(diaDur - 0.025, diaDur, dtSinceClose));
+      qWindkessel = (qMeanDia / 0.4607) * Math.exp(-uDia / 0.55) * env;
+    }
+  }
+  const inflowMlps = qAo - qAr + qWindkessel;
   const available = inflowMlps - storageMlps.reduce((a, b) => a + b, 0);
   // Poiseuille r⁴ weights in antegrade systole; during diastolic AR retrograde runoff (available < 0),
   // the large-capacitance descending aorta reservoir supplies ~78% of retrograde return (while
