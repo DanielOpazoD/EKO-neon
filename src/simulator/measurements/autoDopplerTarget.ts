@@ -9,7 +9,9 @@ export type DopplerTargetId =
   | 'tdi-septal'
   | 'tdi-lateral'
   | 'tapse'
-  | 'tr-cw';
+  | 'rv-s-prime'
+  | 'tr-cw'
+  | 'rvot-pw';
 
 export interface AutoDopplerTargetSuccess {
   ok: true;
@@ -233,6 +235,74 @@ export function findDopplerTargetFromPolar(
 
   const lut = makeLookup(spec);
 
+  // --- PSAX-AV RVOT / Pulmonary valve PW target (for Pulmonary Acceleration Time & RVOT VTI) ---
+  if (target === 'rvot-pw') {
+    const pvCells = collectCells(structure, lut, (s) => s === Structure.PulmonaryValve);
+    const rvotCells = collectCells(structure, lut, (s) => s === Structure.Rvot);
+    const paCells = collectCells(structure, lut, (s) => s === Structure.PulmonaryArtery);
+    const aoCells = collectCells(structure, lut, (s) => s === Structure.AorticRoot);
+    if (
+      aoCells.length < 25 ||
+      (pvCells.length === 0 && (rvotCells.length < 12 || paCells.length < 20))
+    ) {
+      return {
+        ok: false,
+        target,
+        reason: 'structure-not-visible',
+        message:
+          'No se visualiza el TSVD y la válvula pulmonar en este corte. Usa eje corto de grandes vasos (PSAX Ao).',
+      };
+    }
+
+    // Prefer the pulmonary valve orifice or the immediate RVOT-PA junction (ASE 2025 TAc pulmonar)
+    let targetCell: PolarCell | null = null;
+    if (pvCells.length >= 2) {
+      const pvC = areaCentroid(pvCells)!;
+      let bestD = Infinity;
+      for (const c of pvCells) {
+        const d = Math.hypot(c.x - pvC.x, c.y - pvC.y);
+        if (d < bestD) {
+          bestD = d;
+          targetCell = c;
+        }
+      }
+    } else {
+      const junction = rvotCells.filter((c) =>
+        hasNeighbor(structure, lut, c.li, c.si, 4, (s) => s === Structure.PulmonaryArtery),
+      );
+      const pool = junction.length >= 2 ? junction : paCells;
+      const cMid = areaCentroid(pool);
+      if (cMid) {
+        let bestD = Infinity;
+        for (const c of pool) {
+          const d = Math.hypot(c.x - cMid.x, c.y - cMid.y);
+          if (d < bestD) {
+            bestD = d;
+            targetCell = c;
+          }
+        }
+      }
+    }
+    if (!targetCell) {
+      return {
+        ok: false,
+        target,
+        reason: 'structure-not-visible',
+        message: 'No se pudo localizar el plano valvular pulmonar en el TSVD.',
+      };
+    }
+    const p = clampPolar(lut, targetCell.x, targetCell.y);
+    return {
+      ok: true,
+      target,
+      modality: 'pw',
+      rCm: p.rCm,
+      thetaRad: p.thetaRad,
+      recommendedBaselineShiftMps: -0.25,
+      summary: `Gate PW en TSVD / válvula pulmonar (${p.rCm.toFixed(1)} cm) listo para TAc pulmonar.`,
+    };
+  }
+
   // --- Left-heart apical targets (Mitral inflow PW, TDI septal e′, TDI lateral e′) ---
   if (target === 'mitral-inflow' || target === 'tdi-septal' || target === 'tdi-lateral') {
     const lvCells = collectCells(structure, lut, (s) => s === Structure.LvCavity);
@@ -399,13 +469,16 @@ export function findDopplerTargetFromPolar(
   const midLen = Math.hypot(midX, midY) || 1;
   const align = Math.abs((rx * midX + ry * midY) / (rDist * midLen));
 
-  if (target === 'tapse') {
+  if (target === 'tapse' || target === 'rv-s-prime') {
     if (ry / rDist < 0.65) {
       return {
         ok: false,
         target,
         reason: 'misaligned-view',
-        message: 'TAPSE requiere vista apical A4C o enfocada en VD alineada con la pared libre.',
+        message:
+          target === 'tapse'
+            ? 'TAPSE requiere vista apical A4C o enfocada en VD alineada con la pared libre.'
+            : 'S′ VD requiere vista apical A4C o enfocada en VD alineada con el anillo tricuspídeo lateral.',
       };
     }
     const rvWallCells = collectCells(structure, lut, (s) => s === Structure.RvWall);
@@ -443,6 +516,55 @@ export function findDopplerTargetFromPolar(
         bestScore = score;
         best = c;
       }
+    }
+    if (target === 'rv-s-prime') {
+      // Strictly target the lateral RV free wall (`RvWall`) inside the basal annular cuff
+      // (never the septal tricuspid hinge adjacent to LvWallSeptal).
+      const rvPool = basalRvWall.length >= 4 ? basalRvWall : rvWallCells;
+      if (!rvPool.length) {
+        return {
+          ok: false,
+          target,
+          reason: 'structure-not-visible',
+          message: 'No se identifica la pared libre basal del VD en este corte. Usa A4C o vista enfocada en VD.',
+        };
+      }
+      let maxY = -Infinity;
+      for (const c of rvPool) if (c.y > maxY) maxY = c.y;
+      const desiredY = maxY - 0.35;
+      const band = rvWallCells.filter((c) => c.y >= maxY - 0.9 && c.y <= maxY - 0.05);
+      const candPool = band.length >= 3 ? band : rvPool;
+      const bandC = areaCentroid(candPool);
+      const midWallX = bandC ? bandC.x : candPool[0]!.x;
+      let bestRv = candPool[0]!;
+      let bestRvScore = Infinity;
+      for (const c of candPool) {
+        const clear = sameStructClearance(structure, lut, c.li, c.si, Structure.RvWall);
+        const nearFat = hasNeighbor(
+          structure,
+          lut,
+          c.li,
+          c.si,
+          1,
+          (s) => s === Structure.EpicardialFat || s === Structure.Pericardium,
+        );
+        const wallPen = (clear >= 1 ? 0 : 0.35) + (nearFat ? 0.5 : 0);
+        const score = (c.y - desiredY) ** 2 * 2.5 + (c.x - midWallX) ** 2 * 2.0 + wallPen;
+        if (score < bestRvScore) {
+          bestRvScore = score;
+          bestRv = c;
+        }
+      }
+      const p = clampPolar(lut, bestRv.x, bestRv.y);
+      return {
+        ok: true,
+        target,
+        modality: 'tdi',
+        rCm: p.rCm,
+        thetaRad: p.thetaRad,
+        recommendedBaselineShiftMps: 0,
+        summary: `Gate TDI en anillo tricuspídeo lateral (${p.rCm.toFixed(1)} cm) listo para S′ VD.`,
+      };
     }
     const p = clampPolar(lut, best.x, best.y);
     return {

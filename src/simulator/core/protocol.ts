@@ -10,6 +10,7 @@ import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import type { CaseDefinition } from '@/cases/schema';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type { AutoChamberVolumeResult, ChamberId } from '@/simulator/measurements/autoVolume';
+import type { AutoIvcResult } from '@/simulator/measurements/autoIvc';
 import type { AutoLaVolumeResult } from '@/simulator/measurements/autoLaVolume';
 import type { AutoPlaxResult } from '@/simulator/measurements/autoPlax';
 import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
@@ -280,6 +281,8 @@ export type SimRequest =
   | { kind: 'autoLaVolume' }
   /** Automatic 2D PLAX linear dimensions across ED, mid-systole (LVOT), and ES over the acquired cine loop. */
   | { kind: 'autoPlax' }
+  /** Automatic 2D subcostal IVC lumen diameter (expiration or sniff inspiration) from the displayed frame. */
+  | { kind: 'autoIvc' }
   /** Locate the optimal ASE LVOT PW gate position from the rendered 2D polar structure map. */
   | { kind: 'autoLvotGate' }
   /** Locate a clinical Doppler/M-mode gate or cursor target from the rendered 2D polar structure map. */
@@ -310,6 +313,7 @@ export type SimResponse =
   | { kind: 'autoChamberVolume'; result: AutoChamberVolumeResult }
   | { kind: 'autoLaVolume'; result: AutoLaVolumeResult }
   | { kind: 'autoPlax'; result: AutoPlaxResult }
+  | { kind: 'autoIvc'; result: AutoIvcResult }
   | { kind: 'autoLvotGate'; result: AutoLvotGateResult }
   | { kind: 'autoDopplerTarget'; result: AutoDopplerTargetResult }
   | { kind: 'autoTraceBeat'; result: AutoTraceBeatResult }

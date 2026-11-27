@@ -173,6 +173,58 @@ describe('measurement context & compatibility helpers', () => {
     assert.equal(sExam.rv.viewReady, null);
     assert.equal(sExam.plax.viewReady, null);
     assert.equal(sExam.la.viewReady, null);
+    assert.equal(sExam.ivc.viewReady, null);
+  });
+
+  it('summarizes IVC expiratory/inspiratory collapse, ASE RAP (3 vs 15 mmHg), and RV basal diameter', () => {
+    const mkIvc = (id: 'ivc-diameter' | 'ivc-diameter-inspiration', value: number, frameId: number): Measurement => ({
+      ...makeSimp('rv-edv', 'subcostal-ivc', value, frameId),
+      kind: 'linear',
+      measurementId: id,
+      units: 'cm',
+      geometry: [
+        { x: 100, y: 120 },
+        { x: 100, y: 155 },
+      ],
+    });
+    const mkRvBasal = (value: number, frameId: number): Measurement => ({
+      ...makeSimp('rv-edv', 'rv-focused', value, frameId),
+      kind: 'linear',
+      measurementId: 'rv-basal',
+      units: 'cm',
+      geometry: [
+        { x: 120, y: 160 },
+        { x: 200, y: 160 },
+      ],
+    });
+
+    // Normal collapsible IVC (1.7 cm -> 0.5 cm = 71% collapse => RAP 3 mmHg) + RV basal 3.5 cm
+    const sNorm = summarizeAutoEf(
+      [mkIvc('ivc-diameter', 1.7, 10), mkIvc('ivc-diameter-inspiration', 0.5, 20), mkRvBasal(3.5, 30)],
+      'subcostal-ivc',
+      '2d',
+      true,
+    );
+    assert.equal(sNorm.ivc.viewReady, true);
+    assert.equal(sNorm.ivc.hasResult, true);
+    assert.equal(sNorm.ivc.rapMmHg, 3);
+    assert.ok((sNorm.ivc.collapsePct ?? 0) > 65);
+    assert.equal(sNorm.rv.basalCm, 3.5);
+    assert.equal(sNorm.rv.hasResult, true);
+
+    // Dilated plethoric IVC (2.5 cm -> 2.1 cm = 16% collapse => RAP 15 mmHg)
+    const sHigh = summarizeAutoEf(
+      [mkIvc('ivc-diameter', 2.5, 40), mkIvc('ivc-diameter-inspiration', 2.1, 50)],
+      'subcostal-ivc',
+      '2d',
+      true,
+    );
+    assert.equal(sHigh.ivc.rapMmHg, 15);
+    assert.ok((sHigh.ivc.collapsePct ?? 0) < 25);
+
+    // Exam privacy hides IVC view readiness
+    const sExam = summarizeAutoEf([mkIvc('ivc-diameter', 1.7, 10)], 'subcostal-ivc', '2d', false);
+    assert.equal(sExam.ivc.viewReady, null);
   });
 
   it('summarizes PLAX linear dimensions (with Devereux mass/RWT/FS) and LA monoplane/biplane progression', () => {

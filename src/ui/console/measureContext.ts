@@ -4,7 +4,7 @@ import {
   lvMassDevereuxG,
   relativeWallThickness,
 } from '@/clinical/formulas';
-import { biplaneVolume } from '@/education/report';
+import { biplaneVolume, rightAtrialPressure } from '@/education/report';
 import {
   MEASUREMENT_SPECS,
   type MeasurementSpec,
@@ -199,6 +199,20 @@ export interface AutoPlaxSummary {
   viewReady: boolean | null;
 }
 
+export interface AutoIvcSummary {
+  hasResult: boolean;
+  expCm: number | null;
+  inspCm: number | null;
+  collapsePct: number | null;
+  rapMmHg: number | null;
+  expFrameId: number | null;
+  expTimeS: number | null;
+  inspFrameId: number | null;
+  inspTimeS: number | null;
+  /** Ready on the current 2D subcostal IVC view (always null in exam mode so view identity stays hidden). */
+  viewReady: boolean | null;
+}
+
 export interface AutoEfPanelState {
   is2dReady: boolean;
   plax: AutoPlaxSummary;
@@ -216,7 +230,11 @@ export interface AutoEfPanelState {
     facPct: number | null;
     edAreaCm2: number | null;
     esAreaCm2: number | null;
+    basalCm: number | null;
+    basalFrameId: number | null;
+    basalTimeS: number | null;
   };
+  ivc: AutoIvcSummary;
 }
 
 function latestByMeasurementId(ms: readonly Measurement[], id: string): Measurement | null {
@@ -337,6 +355,7 @@ export function summarizeAutoEf(
 
   const rvEdvM = latestByMeasurementId(measurements, 'rv-edv');
   const rvEsvM = latestByMeasurementId(measurements, 'rv-esv');
+  const rvBasalM = latestByMeasurementId(measurements, 'rv-basal');
   const rvEdv = rvEdvM?.value ?? null;
   const rvEsv = rvEsvM?.value ?? null;
   const rvEf = rvEdv !== null && rvEsv !== null && rvEdv > 0 ? ((rvEdv - rvEsv) / rvEdv) * 100 : null;
@@ -346,6 +365,17 @@ export function summarizeAutoEf(
     rvEdArea !== null && rvEsArea !== null && rvEdArea > 0
       ? fractionalAreaChange(rvEdArea, rvEsArea)
       : null;
+
+  const ivcExpM = latestByMeasurementId(measurements, 'ivc-diameter');
+  const ivcInspM = latestByMeasurementId(measurements, 'ivc-diameter-inspiration');
+  const ivcExp = ivcExpM?.value ?? null;
+  const ivcInsp = ivcInspM?.value ?? null;
+  const ivcCollapsePct =
+    ivcExp !== null && ivcExp > 0 && ivcInsp !== null
+      ? Math.max(0, (1 - ivcInsp / ivcExp) * 100)
+      : null;
+  const ivcRapMmHg =
+    ivcExp !== null && ivcExp > 0 ? rightAtrialPressure(ivcExp, ivcInsp).rapMmHg : null;
 
   const plaxViewReady = showViewFeedback ? is2dReady && currentViewId === 'plax' : null;
   const lvViewReady = showViewFeedback
@@ -357,6 +387,7 @@ export function summarizeAutoEf(
   const rvViewReady = showViewFeedback
     ? is2dReady && (currentViewId === 'rv-focused' || currentViewId === 'a4c')
     : null;
+  const ivcViewReady = showViewFeedback ? is2dReady && currentViewId === 'subcostal-ivc' : null;
 
   return {
     is2dReady,
@@ -412,19 +443,34 @@ export function summarizeAutoEf(
       viewReady: laViewReady,
     },
     rv: {
-      hasResult: rvEf !== null && rvEdv !== null && rvEsv !== null,
+      hasResult: (rvEf !== null && rvEdv !== null && rvEsv !== null) || rvBasalM !== null,
       edvMl: rvEdv,
       esvMl: rvEsv,
       svMl: rvEdv !== null && rvEsv !== null ? rvEdv - rvEsv : null,
       efPct: rvEf,
-      edFrameId: rvEdvM?.frameId ?? null,
+      edFrameId: rvEdvM?.frameId ?? rvBasalM?.frameId ?? null,
       esFrameId: rvEsvM?.frameId ?? null,
-      edTimeS: rvEdvM?.timeS ?? null,
+      edTimeS: rvEdvM?.timeS ?? rvBasalM?.timeS ?? null,
       esTimeS: rvEsvM?.timeS ?? null,
       viewReady: rvViewReady,
       facPct: rvFac,
       edAreaCm2: rvEdArea,
       esAreaCm2: rvEsArea,
+      basalCm: rvBasalM?.value ?? null,
+      basalFrameId: rvBasalM?.frameId ?? null,
+      basalTimeS: rvBasalM?.timeS ?? null,
+    },
+    ivc: {
+      hasResult: ivcExp !== null || ivcInsp !== null,
+      expCm: ivcExp,
+      inspCm: ivcInsp,
+      collapsePct: ivcCollapsePct,
+      rapMmHg: ivcRapMmHg,
+      expFrameId: ivcExpM?.frameId ?? null,
+      expTimeS: ivcExpM?.timeS ?? null,
+      inspFrameId: ivcInspM?.frameId ?? null,
+      inspTimeS: ivcInspM?.timeS ?? null,
+      viewReady: ivcViewReady,
     },
   };
 }
