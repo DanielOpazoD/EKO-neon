@@ -22,7 +22,12 @@ import {
 import type { AcquisitionSettings, PolarFrame } from '@/simulator/renderer/types';
 import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { CAMUS_GOOD } from '@/clinical/reference-values/camusImageStats';
-import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
+import {
+  ATTEN_NP_PER_DB,
+  attenuationFrequencyMHz,
+  CHEST_WALL_ATTEN_DB,
+  softTissueTransmission,
+} from '@/simulator/renderer/acoustic/acoustics';
 import { hiddenSegmentCodes, segmentCoverage, type SegmentCoverage } from './segmentCoverage';
 
 /**
@@ -129,16 +134,29 @@ interface LandmarkTest {
 }
 
 /**
- * Two-way transmission expected through average soft tissue at depth r for the acquisition: the harmonic factor only
- * with harmonics on. It applied the harmonic factor always, and with harmonics off it expected 1.2 times the soft tissue
- * loss, so a sample had to lose that much more before it counted as shadowed.
+ * Two-way transmission expected through average soft tissue (plus the patient's uniform superficial
+ * chest-wall habitus attenuation when supplied) at depth r for the acquisition: focal rib, lung, or
+ * calcium shadows drop far below this baseline, whereas diffuse chest-wall obesity does not falsely
+ * trigger focal-shadowing penalties or rib/lung hints.
  */
 export function expectedTransmission(
   rCm: number,
   frequencyMHz: number,
   harmonics: boolean,
+  windowAttenuation = 0,
+  chestWallCm = 0,
 ): number {
-  return softTissueTransmission(rCm, frequencyMHz, harmonics);
+  const base = softTissueTransmission(rCm, frequencyMHz, harmonics);
+  if (!(windowAttenuation > 0) || !(chestWallCm > 0)) return base;
+  const wallDepthCm = Math.min(rCm, chestWallCm);
+  const wallLoss = Math.exp(
+    -ATTEN_NP_PER_DB *
+      CHEST_WALL_ATTEN_DB *
+      windowAttenuation *
+      attenuationFrequencyMHz(frequencyMHz, harmonics) *
+      wallDepthCm,
+  );
+  return base * wallLoss;
 }
 
 function testLandmark(
@@ -148,6 +166,8 @@ function testLandmark(
   frame: PolarFrame,
   frequencyMHz: number,
   harmonics: boolean,
+  windowAttenuation: number,
+  chestWallCm: number,
 ): LandmarkTest & { thetaRad: number; rCm: number } {
   const d = sub(p, beam.origin);
   const depth = dot(d, beam.forward);
@@ -168,8 +188,8 @@ function testLandmark(
   }
   const planeDist = Math.abs(elev);
   const tol = landmarkReachCm(radius);
-  // shadow test is relative to the expected soft-tissue attenuation at this depth
-  const expected = expectedTransmission(r, frequencyMHz, harmonics);
+  // shadow test is relative to the expected soft-tissue + habitus chest-wall attenuation at this depth
+  const expected = expectedTransmission(r, frequencyMHz, harmonics, windowAttenuation, chestWallCm);
   const lit = transmission > 0.2 * expected;
   return {
     id: '',
@@ -197,10 +217,14 @@ export interface AnalyzeInput {
   settings: AcquisitionSettings;
   /** Heart pose of the frame: with it, the LV segments the lung hides count as in the plane (decision 152). */
   heartPose?: HeartPose;
+  /** Active scene chest-wall habitus attenuation (0..1) from `scenePhysicsFor`. */
+  windowAttenuation?: number;
 }
 
 export function analyzeView(input: AnalyzeInput): ViewAnalysis {
   const { heart, control, beam, frame, settings } = input;
+  const windowAtten = input.windowAttenuation ?? 0;
+  const chestWallCm = input.thorax.chestWall;
   const window = windowFromSkin(control.u, control.v);
   const landmarks = heartLandmarks(heart);
   const lmTorso = new Map<string, { p: Vec3; radius: number }>();
@@ -208,7 +232,16 @@ export function analyzeView(input: AnalyzeInput): ViewAnalysis {
     lmTorso.set(l.id, { p: heartToTorso(heart.frame, l.p), radius: l.radius });
   const lmTests = new Map<string, ReturnType<typeof testLandmark>>();
   for (const [id, l] of lmTorso) {
-    const t = testLandmark(l.p, l.radius, beam, frame, settings.frequencyMHz, settings.harmonics);
+    const t = testLandmark(
+      l.p,
+      l.radius,
+      beam,
+      frame,
+      settings.frequencyMHz,
+      settings.harmonics,
+      windowAtten,
+      chestWallCm,
+    );
     t.id = id;
     lmTests.set(id, t);
   }
@@ -237,7 +270,8 @@ export function analyzeView(input: AnalyzeInput): ViewAnalysis {
       const r = ((i % samples) + 0.5) * dr;
       if (
         (frame.transmission[i] ?? 0) <
-        0.2 * expectedTransmission(r, settings.frequencyMHz, settings.harmonics)
+        0.2 *
+          expectedTransmission(r, settings.frequencyMHz, settings.harmonics, windowAtten, chestWallCm)
       )
         shadowed++;
       if (input.display) {

@@ -848,6 +848,7 @@ export class SimulatorCore {
           display: this.display,
           settings: inp.settings,
           heartPose: scene.heartPose,
+          windowAttenuation: scene.physics.windowAttenuation,
         }),
         // the next frames carry this analysis too, possibly at other poses: the score is this pose's
         probe: { ...inp.probe },
