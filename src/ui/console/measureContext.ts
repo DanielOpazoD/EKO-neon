@@ -136,12 +136,28 @@ export function isTimeInCineWindow(
   return timeS >= cineWindow.startS - 0.02 && timeS <= cineWindow.endS + 0.02;
 }
 
+export interface PlaneSimpsonSummary {
+  edvMl: number;
+  esvMl: number;
+  efPct: number;
+  edLengthCm: number | null;
+  esLengthCm: number | null;
+  edFrameId: number;
+  esFrameId: number;
+  edTimeS: number;
+  esTimeS: number;
+}
+
 export interface AutoEfPanelState {
   is2dReady: boolean;
   lv: AutoEfChamberSummary & {
     a4cDone: boolean;
     a2cDone: boolean;
     biplane: boolean;
+    a4c: PlaneSimpsonSummary | null;
+    a2c: PlaneSimpsonSummary | null;
+    /** True when A4C and A2C ED long axes differ by >10% (ASE/EACVI foreshortening alert). */
+    lengthMismatch: boolean;
   };
   rv: AutoEfChamberSummary & {
     facPct: number | null;
@@ -157,15 +173,36 @@ function latestByMeasurementId(ms: readonly Measurement[], id: string): Measurem
   return null;
 }
 
-function hasPlanePair(ms: readonly Measurement[], edId: string, esId: string, view: string): boolean {
-  let hasEd = false;
-  let hasEs = false;
-  for (const m of ms) {
-    if (m.sourceViewId !== view) continue;
-    if (m.measurementId === edId) hasEd = true;
-    if (m.measurementId === esId) hasEs = true;
+function latestByIdAndView(
+  ms: readonly Measurement[],
+  id: string,
+  view: string,
+): Measurement | null {
+  for (let i = ms.length - 1; i >= 0; i--) {
+    const m = ms[i]!;
+    if (m.measurementId === id && m.sourceViewId === view) return m;
   }
-  return hasEd && hasEs;
+  return null;
+}
+
+function planeSimpsonSummary(
+  ms: readonly Measurement[],
+  view: 'a4c' | 'a2c',
+): PlaneSimpsonSummary | null {
+  const ed = latestByIdAndView(ms, 'lv-edv-simpson', view);
+  const es = latestByIdAndView(ms, 'lv-esv-simpson', view);
+  if (!ed || !es || !(ed.value > 0)) return null;
+  return {
+    edvMl: ed.value,
+    esvMl: es.value,
+    efPct: ((ed.value - es.value) / ed.value) * 100,
+    edLengthCm: ed.derived?.longAxisCm ?? null,
+    esLengthCm: es.derived?.longAxisCm ?? null,
+    edFrameId: ed.frameId,
+    esFrameId: es.frameId,
+    edTimeS: ed.timeS,
+    esTimeS: es.timeS,
+  };
 }
 
 /** Structured summary for the Auto-FE VI/VD workspace, respecting exam privacy when `showViewFeedback` is false. */
@@ -185,8 +222,15 @@ export function summarizeAutoEf(
   const lvEdv = biplane ? lvEdvBi!.volumeMl : (lvEdvM?.value ?? null);
   const lvEsv = biplane ? lvEsvBi!.volumeMl : (lvEsvM?.value ?? null);
   const lvEf = lvEdv !== null && lvEsv !== null && lvEdv > 0 ? ((lvEdv - lvEsv) / lvEdv) * 100 : null;
-  const a4cDone = hasPlanePair(measurements, 'lv-edv-simpson', 'lv-esv-simpson', 'a4c');
-  const a2cDone = hasPlanePair(measurements, 'lv-edv-simpson', 'lv-esv-simpson', 'a2c');
+  const a4c = planeSimpsonSummary(measurements, 'a4c');
+  const a2c = planeSimpsonSummary(measurements, 'a2c');
+  const a4cDone = a4c !== null;
+  const a2cDone = a2c !== null;
+  const lengthMismatch = Boolean(
+    lvEdvBi &&
+      Math.abs(lvEdvBi.a4cLongAxisCm - lvEdvBi.a2cLongAxisCm) >
+        0.1 * Math.max(lvEdvBi.a4cLongAxisCm, lvEdvBi.a2cLongAxisCm),
+  );
 
   const rvEdvM = latestByMeasurementId(measurements, 'rv-edv');
   const rvEsvM = latestByMeasurementId(measurements, 'rv-esv');
@@ -223,6 +267,9 @@ export function summarizeAutoEf(
       a4cDone,
       a2cDone,
       biplane,
+      a4c,
+      a2c,
+      lengthMismatch,
     },
     rv: {
       hasResult: rvEf !== null && rvEdv !== null && rvEsv !== null,

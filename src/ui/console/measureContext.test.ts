@@ -130,7 +130,7 @@ describe('measurement context & compatibility helpers', () => {
     assert.equal(s1.rv.hasResult, true);
     assert.ok((s1.rv.facPct ?? 0) > 50 && (s1.rv.facPct ?? 0) < 58);
 
-    // Adding A2C upgrades automatically to biplane.
+    // Adding A2C upgrades automatically to biplane and exposes explicit A4C vs A2C breakdown.
     const withA2c = [
       ...a4cOnly,
       makeSimp('lv-edv-simpson', 'a2c', 118, 50),
@@ -141,6 +141,30 @@ describe('measurement context & compatibility helpers', () => {
     assert.equal(sBi.lv.a2cDone, true);
     assert.equal(sBi.lv.biplane, true);
     assert.equal(sBi.lv.viewReady, false);
+    assert.equal(sBi.lv.a4c?.edvMl, 122);
+    assert.equal(sBi.lv.a4c?.esvMl, 45);
+    assert.equal(sBi.lv.a2c?.edvMl, 118);
+    assert.equal(sBi.lv.a2c?.esvMl, 44);
+    assert.equal(sBi.lv.lengthMismatch, false);
+
+    // Foreshortened A2C contour (>10% shorter long axis) triggers ASE lengthMismatch alert.
+    const shortA2cEd = makeSimp('lv-edv-simpson', 'a2c', 90, 70);
+    shortA2cEd.geometry = [
+      { x: 160, y: 200 },
+      { x: 155, y: 170 },
+      { x: 165, y: 140 },
+      { x: 190, y: 110 },
+      { x: 215, y: 140 },
+      { x: 225, y: 170 },
+      { x: 220, y: 200 },
+    ];
+    const sShort = summarizeAutoEf(
+      [...a4cOnly, shortA2cEd, makeSimp('lv-esv-simpson', 'a2c', 36, 75)],
+      'a2c',
+      '2d',
+      true,
+    );
+    assert.equal(sShort.lv.lengthMismatch, true);
 
     // In exam mode (`showViewFeedback = false`), view readiness stays strictly null.
     const sExam = summarizeAutoEf(withA2c, 'a4c', '2d', false);

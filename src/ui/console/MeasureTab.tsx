@@ -1,7 +1,9 @@
 import { examClosed, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
 import { useHudStore, useSimStore, type SimStore } from '@/app/store';
 import { loadCaseById } from '@/cases';
+import { strokeVolume } from '@/clinical/formulas';
 import { deriveCalculations } from '@/education/report';
+import { Structure } from '@/simulator/anatomy/tissue';
 import {
   MEASUREMENT_SPECS,
   type MeasurementSpec,
@@ -13,7 +15,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { Section } from '../controls';
 import { captureStepPrompt, minPointsToFinish } from '../display/measurementPreview';
-import { runAutoChamberVolume } from '../display/measurementTools';
+import {
+  runAutoChamberVolume,
+  runAutoLvotGate,
+  runAutoSpectralVti,
+} from '../display/measurementTools';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
 import {
@@ -377,13 +383,26 @@ export function MeasureTab() {
           <Section
             title="Volumen y FE automáticos"
             tip={tip(
-              'Traza automáticamente el endocardio en TD y TS sobre el cine 2D actual (A4C/A2C para VI · enfocada en VD o A4C para VD).',
+              'Traza automáticamente el endocardio en TD y TS sobre el cine 2D actual (A4C y A2C para Simpson biplano del VI · enfocada en VD o A4C para VD).',
             )}
           >
             <AutoEfPanel
               currentViewId={currentViewId}
               displayedFrameId={displayedFrameId}
               cineWindow={cineWindow}
+              showViewFeedback={showView}
+              presetsEnabled={policy.presetsEnabled}
+            />
+          </Section>
+
+          <Section
+            title="Auto-VTI del TSVI (A5C)"
+            tip={tip(
+              'Coloca el volumen de muestra PW a 0,5 cm proximal a la válvula aórtica en A5C/A3C y traza automáticamente el latido sistólico más reciente.',
+            )}
+          >
+            <AutoLvotVtiPanel
+              currentViewId={currentViewId}
               showViewFeedback={showView}
               presetsEnabled={policy.presetsEnabled}
             />
@@ -836,6 +855,22 @@ function AutoEfPanel({
     !summary.rv.hasResult &&
     !summary.rv.viewReady &&
     summary.lv.hasResult;
+  const lvA4cEdInCine =
+    summary.lv.a4c !== null &&
+    (displayedFrameId === summary.lv.a4c.edFrameId ||
+      isTimeInCineWindow(summary.lv.a4c.edTimeS, cineWindow));
+  const lvA4cEsInCine =
+    summary.lv.a4c !== null &&
+    (displayedFrameId === summary.lv.a4c.esFrameId ||
+      isTimeInCineWindow(summary.lv.a4c.esTimeS, cineWindow));
+  const lvA2cEdInCine =
+    summary.lv.a2c !== null &&
+    (displayedFrameId === summary.lv.a2c.edFrameId ||
+      isTimeInCineWindow(summary.lv.a2c.edTimeS, cineWindow));
+  const lvA2cEsInCine =
+    summary.lv.a2c !== null &&
+    (displayedFrameId === summary.lv.a2c.esFrameId ||
+      isTimeInCineWindow(summary.lv.a2c.esTimeS, cineWindow));
   const lvEdInCine =
     displayedFrameId === summary.lv.edFrameId || isTimeInCineWindow(summary.lv.edTimeS, cineWindow);
   const lvEsInCine =
@@ -892,39 +927,117 @@ function AutoEfPanel({
                   <span>VS {summary.lv.svMl.toFixed(0)} mL</span>
                 </span>
               </div>
-              {summary.lv.edFrameId !== null && summary.lv.esFrameId !== null && (
-                <div className="auto-ef-jump">
-                  <button
-                    type="button"
-                    className={`ghost${displayedFrameId === summary.lv.edFrameId ? ' active' : ''}`}
-                    disabled={s.closed || !lvEdInCine}
-                    data-tip={lvEdInCine ? 'Inspeccionar contorno en TD' : 'El cuadro TD salió del bucle de cine actual'}
-                    onClick={() => inspectFrame('ed', summary.lv.edFrameId!)}
-                  >
-                    Ver TD
-                  </button>
-                  <button
-                    type="button"
-                    className={`ghost${displayedFrameId === summary.lv.esFrameId ? ' active' : ''}`}
-                    disabled={s.closed || !lvEsInCine}
-                    data-tip={lvEsInCine ? 'Inspeccionar contorno en TS' : 'El cuadro TS salió del bucle de cine actual'}
-                    onClick={() => inspectFrame('es', summary.lv.esFrameId!)}
-                  >
-                    Ver TS
-                  </button>
-                  {showBiplanePrompt && (
-                    <button
-                      type="button"
-                      className="ghost auto-ef-next"
-                      disabled={s.closed}
-                      onClick={() => jumpPreset('a2c')}
-                      data-tip="Mueve la sonda a A2C para completar Simpson biplano"
-                    >
-                      + A2C biplano
-                    </button>
+
+              {/* Explicit A4C & A2C component breakdown so biplane provenance is crystal clear */}
+              {(summary.lv.a4c || summary.lv.a2c) && (
+                <div className="biplane-breakdown" aria-label="Desglose Simpson A4C y A2C">
+                  {([
+                    {
+                      id: 'a4c' as const,
+                      label: 'A4C',
+                      plane: summary.lv.a4c,
+                      edIn: lvA4cEdInCine,
+                      esIn: lvA4cEsInCine,
+                    },
+                    {
+                      id: 'a2c' as const,
+                      label: 'A2C',
+                      plane: summary.lv.a2c,
+                      edIn: lvA2cEdInCine,
+                      esIn: lvA2cEsInCine,
+                    },
+                  ]).map(({ id, label, plane, edIn, esIn }) => (
+                    <div key={id} className={`biplane-row${plane ? ' done' : ''}`}>
+                      <span className="bp-tag">{plane ? `✓ ${label}` : `○ ${label}`}</span>
+                      {plane ? (
+                        <>
+                          <span className="bp-vals">
+                            {plane.edvMl.toFixed(0)}/{plane.esvMl.toFixed(0)} mL ·{' '}
+                            <b>{plane.efPct.toFixed(0)}%</b>
+                            {plane.edLengthCm !== null ? ` · L ${plane.edLengthCm.toFixed(1)}` : ''}
+                          </span>
+                          <span className="bp-jumps">
+                            <button
+                              type="button"
+                              className={`ghost${displayedFrameId === plane.edFrameId ? ' active' : ''}`}
+                              disabled={s.closed || !edIn}
+                              data-tip={edIn ? `Ver ${label} en TD` : 'Fuera del cine actual'}
+                              onClick={() => inspectFrame('ed', plane.edFrameId)}
+                            >
+                              TD
+                            </button>
+                            <button
+                              type="button"
+                              className={`ghost${displayedFrameId === plane.esFrameId ? ' active' : ''}`}
+                              disabled={s.closed || !esIn}
+                              data-tip={esIn ? `Ver ${label} en TS` : 'Fuera del cine actual'}
+                              onClick={() => inspectFrame('es', plane.esFrameId)}
+                            >
+                              TS
+                            </button>
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="bp-pending">Pendiente para biplano</span>
+                          {presetsEnabled && showViewFeedback && !s.closed && (
+                            <button
+                              type="button"
+                              className="ghost bp-go"
+                              onClick={() => jumpPreset(id)}
+                            >
+                              Ir a {label}
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  {summary.lv.lengthMismatch && (
+                    <div className="biplane-warn" role="status">
+                      ⚠ Longitud dispar entre A4C y A2C: revisa acortamiento apical.
+                    </div>
                   )}
                 </div>
               )}
+
+              {/* Fallback TD/TS buttons when LV Simpson was traced outside A4C/A2C (e.g. exam mode or A3C) */}
+              {!summary.lv.a4c &&
+                !summary.lv.a2c &&
+                summary.lv.edFrameId !== null &&
+                summary.lv.esFrameId !== null && (
+                  <div className="auto-ef-jump">
+                    <button
+                      type="button"
+                      className={`ghost${displayedFrameId === summary.lv.edFrameId ? ' active' : ''}`}
+                      disabled={s.closed || !lvEdInCine}
+                      data-tip={lvEdInCine ? 'Inspeccionar contorno en TD' : 'El cuadro TD salió del bucle de cine actual'}
+                      onClick={() => inspectFrame('ed', summary.lv.edFrameId!)}
+                    >
+                      Ver TD
+                    </button>
+                    <button
+                      type="button"
+                      className={`ghost${displayedFrameId === summary.lv.esFrameId ? ' active' : ''}`}
+                      disabled={s.closed || !lvEsInCine}
+                      data-tip={lvEsInCine ? 'Inspeccionar contorno en TS' : 'El cuadro TS salió del bucle de cine actual'}
+                      onClick={() => inspectFrame('es', summary.lv.esFrameId!)}
+                    >
+                      Ver TS
+                    </button>
+                    {showBiplanePrompt && (
+                      <button
+                        type="button"
+                        className="ghost auto-ef-next"
+                        disabled={s.closed}
+                        onClick={() => jumpPreset('a2c')}
+                        data-tip="Mueve la sonda a A2C para completar Simpson biplano"
+                      >
+                        + A2C biplano
+                      </button>
+                    )}
+                  </div>
+                )}
             </>
           )}
       </div>
@@ -1039,6 +1152,196 @@ function AutoEfPanel({
           </div>
         </div>
       )}
+
+      {notice && (
+        <div
+          className={`auto-ef-notice ${notice.kind === 'err' ? 'err' : 'ok'}`}
+          role="status"
+        >
+          {notice.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Guided LVOT PW gate placement in A5C/A3C + one-click automatic systolic VTI tracing. */
+function AutoLvotVtiPanel({
+  currentViewId,
+  showViewFeedback,
+  presetsEnabled,
+}: {
+  currentViewId: string | null;
+  showViewFeedback: boolean;
+  presetsEnabled: boolean;
+}) {
+  const s = useSimStore(
+    useShallow((st) => ({
+      measurements: st.measurements,
+      modality: st.modality,
+      closed: examClosed(st),
+      startPresetView: st.startPresetView,
+      setModality: st.setModality,
+    })),
+  );
+  // Quantized gate status selector (re-renders only when gate structure or rounded angle actually changes)
+  const gateState = useHudStore(
+    useShallow((h) => {
+      const g = h.hud?.gate;
+      if (!g) return { inLvot: false, angleDeg: null as number | null };
+      return {
+        inLvot: g.structure === Structure.Lvot || g.peakFlowStructure === Structure.Lvot,
+        angleDeg: g.flowAngleDeg !== null ? Math.round(g.flowAngleDeg) : null,
+      };
+    }),
+  );
+  const [busy, setBusy] = useState<'gate' | 'vti' | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const isPw = s.modality === 'pw';
+  const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
+  const latestVti = useMemo(() => {
+    for (let i = s.measurements.length - 1; i >= 0; i--) {
+      if (s.measurements[i]!.measurementId === 'lvot-vti') return s.measurements[i]!;
+    }
+    return null;
+  }, [s.measurements]);
+  const latestLvotDiam = useMemo(() => {
+    for (let i = s.measurements.length - 1; i >= 0; i--) {
+      if (s.measurements[i]!.measurementId === 'lvot-diameter') return s.measurements[i]!;
+    }
+    return null;
+  }, [s.measurements]);
+  const dopplerSvMl =
+    latestVti && latestLvotDiam && latestLvotDiam.value > 0
+      ? strokeVolume(latestLvotDiam.value, latestVti.value)
+      : null;
+
+  const placeGate = async () => {
+    if (busy || s.closed || !presetsEnabled) return;
+    setBusy('gate');
+    setNotice(null);
+    try {
+      const res = await runAutoLvotGate();
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        setNotice({
+          kind: 'ok',
+          text: `Gate PW colocado en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm proximal a VAo). Espera 1 latido y pulsa Auto-VTI.`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al colocar el gate en el TSVI.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const traceVti = async () => {
+    if (busy || s.closed) return;
+    setBusy('vti');
+    setNotice(null);
+    try {
+      const res = await runAutoSpectralVti('lvot-vti');
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        setNotice({
+          kind: 'ok',
+          text: `VTI TSVI ${res.vtiCm.toFixed(1)} cm (Vmáx ${Math.round(res.vmaxMps * 100)} cm/s).`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al trazar el VTI automático.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const goA5c = () => {
+    if (s.closed || !presetsEnabled) return;
+    setNotice(null);
+    if (s.modality !== '2d' && s.modality !== 'pw') s.setModality('2d');
+    s.startPresetView('a5c');
+  };
+
+  return (
+    <div className="auto-ef" data-auto-lvot="panel">
+      <div className="auto-ef-card">
+        <div className="auto-ef-row-head">
+          <span className="auto-ef-title">TSVI · PW</span>
+          {showViewFeedback && isPw && (
+            <span
+              className={`plane-pill${
+                gateState.inLvot && (gateState.angleDeg ?? 0) <= 20
+                  ? ' done'
+                  : gateState.inLvot
+                    ? ' here'
+                    : ''
+              }`}
+            >
+              {gateState.inLvot
+                ? `✓ Gate TSVI${gateState.angleDeg !== null ? ` · θ ${gateState.angleDeg}°` : ''}`
+                : 'Gate fuera TSVI'}
+            </span>
+          )}
+        </div>
+        <div className="auto-lvot-actions">
+          {presetsEnabled && showViewFeedback && !onOutflowView && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={s.closed || busy !== null}
+              onClick={goA5c}
+              data-tip="Mueve la sonda a A5C para alinear el TSVI"
+            >
+              Ir a A5C
+            </button>
+          )}
+          {presetsEnabled && (
+            <button
+              type="button"
+              className={onOutflowView && !isPw ? 'btn-primary-soft' : ''}
+              disabled={s.closed || busy !== null}
+              onClick={() => void placeGate()}
+              data-tip="Detecta el TSVI en el corte 2D actual, coloca el gate PW a ~0,5 cm de la válvula aórtica y activa PW"
+            >
+              {busy === 'gate' ? 'Buscando…' : 'Gate TSVI'}
+            </button>
+          )}
+          <button
+            type="button"
+            className={isPw ? 'btn-primary-soft' : ''}
+            disabled={s.closed || busy !== null}
+            onClick={() => void traceVti()}
+            data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI, Vmáx y gradientes)"
+          >
+            {busy === 'vti' ? 'Trazando…' : 'Auto-VTI'}
+          </button>
+        </div>
+
+        {latestVti && (
+          <div className="auto-ef-result-line">
+            <span className="auto-ef-primary">VTI {latestVti.value.toFixed(1)} cm</span>
+            <span className="auto-ef-metrics">
+              {latestVti.derived?.vmaxMps !== undefined && (
+                <span>Vmáx {Math.round(latestVti.derived.vmaxMps * 100)} cm/s</span>
+              )}
+              {latestVti.derived?.meanGradientMmHg !== undefined && (
+                <span>ΔPm {latestVti.derived.meanGradientMmHg.toFixed(1)} mmHg</span>
+              )}
+              {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
+            </span>
+          </div>
+        )}
+      </div>
 
       {notice && (
         <div
