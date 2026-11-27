@@ -15,6 +15,7 @@ import {
   buildFlowParams,
   cavalVenousVelocityMps,
   coronarySinusVelocityMps,
+  mrJetInitialDirection,
   sampleFlow,
   sampleLeafletVelocity,
   sampleTissueVelocity,
@@ -1212,10 +1213,11 @@ test('sampleFlow anatomical chamber containment blocks cross-septal and cross-wa
   const mrModels = buildCaseModels(mrCase, REST_PATIENT);
   const mrFlow = buildFlowParams(mrCase, mrModels.heart, mrModels.tables, mrModels.thorax);
   const mrHp = computeHeartPose(mrModels.heart, cycleStateAt(mrModels.tables, 0.2, mrFlow.flowPeaks));
-  // Point along the -35 deg MR jet trajectory 2.5 cm into the atrial level
-  const jx = mrFlow.mvCenter.x + Math.sin(mrFlow.mrJetDirRad) * 2.5;
-  const jy = mrFlow.mvCenter.y;
-  const jz = mrHp.zAnn - 0.1 - Math.cos(mrFlow.mrJetDirRad) * 2.5;
+  // Point along the 3D anteromedial MR jet trajectory 1.5 cm into the atrial level
+  const mrDir = mrJetInitialDirection(mrFlow.mrJetDirRad);
+  const jx = mrFlow.mvCenter.x + mrDir.x * 1.5;
+  const jy = mrFlow.mvCenter.y + mrDir.y * 1.5;
+  const jz = mrHp.zAnn - 0.1 + mrDir.z * 1.5;
   sampleFlow(mrFlow, mrModels.tables, mrHp, 0.2, jx, jy, jz, fs, Structure.LaCavity);
   const laSpeed = Math.hypot(fs.vx, fs.vy, fs.vz);
   assert.ok(laSpeed > 1.5, `Expected strong MR jet in LaCavity, got ${laSpeed.toFixed(2)} m/s`);
@@ -1569,5 +1571,72 @@ test('TR PISA obeys 3D radial hemispheric continuity Q = 2·π·r²·v and jet c
   assert.ok(
     fs.present === 1 && fs.vx > 0.15 && fs.vz < -1.0 && fs.dispersion > 0.35,
     `Expected distal TR jet curving gently toward IAS (+x, -z) with turbulence, got (${fs.vx.toFixed(2)}, ${fs.vz.toFixed(2)}, d=${fs.dispersion.toFixed(2)})`,
+  );
+});
+
+test('eccentric MR steers in 3D (anteromedial prolapse, posterolateral SAM) with Coanda roof curvature while central MR stays symmetric', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+
+  // 1. Posterior leaflet prolapse (mvp-primary-mr): anteromedial 3D jet (+y anterior toward aortic root, -x medial)
+  const mvpCase = loadCaseById('mvp-primary-mr');
+  const mvpModels = buildCaseModels(mvpCase, REST_PATIENT);
+  const mvpFlow = buildFlowParams(mvpCase, mvpModels.heart, mvpModels.tables, mvpModels.thorax);
+  const mvpHp = computeHeartPose(mvpModels.heart, cycleStateAt(mvpModels.tables, 0.2, mvpFlow.flowPeaks));
+  const mvpDir = mrJetInitialDirection(mvpFlow.mrJetDirRad);
+  assert.ok(mvpDir.x < -0.3 && mvpDir.y > 0.3 && mvpDir.z < -0.75, 'MVP MR should steer anteromedially (+y, -x, -z)');
+
+  // Sample in anterior LA (PLAX anteromedial Coanda zone, y > mvCenter.y, z < zAnn)
+  const pX = mvpFlow.mvCenter.x + mvpDir.x * 1.4;
+  const pY = mvpFlow.mvCenter.y + mvpDir.y * 1.4;
+  const pZ = mvpHp.zAnn - 0.1 + mvpDir.z * 1.4;
+  sampleFlow(mvpFlow, mvpModels.tables, mvpHp, 0.2, pX, pY, pZ, fs, Structure.LaCavity);
+  assert.ok(
+    fs.present === 1 && fs.vy > 0.8 && fs.vx < -0.8 && fs.dispersion > 0.35,
+    `Expected strong anteromedial turbulent MVP MR jet in anterior LA, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
+  );
+
+  // Coanda wall-hugging curvature distally (along = 3.2 cm): turns upward along LA dome (|vx/vz| decreases vs orifice)
+  const bend = 0.42 * 0.9 * (3.2 - 1.0);
+  const cX = mvpFlow.mvCenter.x + mvpDir.x * (3.2 - bend);
+  const cY = mvpFlow.mvCenter.y + mvpDir.y * (3.2 - bend);
+  const cZ = mvpHp.zAnn - 0.1 + mvpDir.z * 3.2 - 0.14 * bend;
+  sampleFlow(mvpFlow, mvpModels.tables, mvpHp, 0.2, cX, cY, cZ, fs, Structure.LaCavity);
+  assert.ok(
+    fs.present === 1 && Math.hypot(fs.vx, fs.vy, fs.vz) > 1.5 && Math.abs(fs.vy / fs.vz) < Math.abs(mvpDir.y / mvpDir.z),
+    `Expected Coanda wall-hugging curvature turning toward LA roof distally, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
+  );
+
+  // 2. SAM-related MR (hocm-sam): posterolateral jet (-y posterior toward posterior LA wall, +x lateral)
+  const hocmCase = loadCaseById('hocm-sam');
+  const hocmModels = buildCaseModels(hocmCase, REST_PATIENT);
+  const hocmFlow = buildFlowParams(hocmCase, hocmModels.heart, hocmModels.tables, hocmModels.thorax);
+  const hocmHp = computeHeartPose(hocmModels.heart, cycleStateAt(hocmModels.tables, 0.34, hocmFlow.flowPeaks));
+  const samDir = mrJetInitialDirection(hocmFlow.mrJetDirRad);
+  assert.ok(samDir.x > 0.3 && samDir.y < -0.3, 'SAM MR should steer posterolaterally (+x, -y, -z)');
+  sampleFlow(
+    hocmFlow,
+    hocmModels.tables,
+    hocmHp,
+    0.34,
+    hocmFlow.mvCenter.x + samDir.x * 1.4,
+    hocmFlow.mvCenter.y + samDir.y * 1.4,
+    hocmHp.zAnn - 0.1 + samDir.z * 1.4,
+    fs,
+    Structure.LaCavity,
+  );
+  assert.ok(
+    fs.present === 1 && fs.vy < -0.8 && fs.vx > 0.6,
+    `Expected posterolateral SAM MR jet in posterior LA, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
+  );
+
+  // 3. Functional central MR (hfref-severe-mr): symmetric central jet with zero lateral/AP bias
+  const hfCase = loadCaseById('hfref-severe-mr');
+  const hfModels = buildCaseModels(hfCase, REST_PATIENT);
+  const hfFlow = buildFlowParams(hfCase, hfModels.heart, hfModels.tables, hfModels.thorax);
+  const hfHp = computeHeartPose(hfModels.heart, cycleStateAt(hfModels.tables, 0.25, hfFlow.flowPeaks));
+  sampleFlow(hfFlow, hfModels.tables, hfHp, 0.25, hfFlow.mvCenter.x, hfFlow.mvCenter.y, hfHp.zAnn - 1.6, fs, Structure.LaCavity);
+  assert.ok(
+    fs.present === 1 && Math.abs(fs.vx) < 0.05 && Math.abs(fs.vy) < 0.05 && fs.vz < -2.0,
+    `Expected symmetric central functional MR jet along -z, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
   );
 });

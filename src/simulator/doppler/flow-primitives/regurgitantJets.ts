@@ -113,6 +113,27 @@ export function samplePulmonaryVeins(
   }
 }
 
+/**
+ * Initial 3D unit direction (heart frame, into the LA) of a mitral regurgitant jet from its
+ * declared eccentricity angle `mrJetDirRad`:
+ * - `|angle| < 0.05`: symmetric central jet `(0, 0, -1)` (functional MR).
+ * - `angle < 0` (posterior leaflet prolapse): anteromedial (`-x` septal, `+y` anterior toward aortic root).
+ * - `angle > 0` (SAM-related MR): posterolateral (`+x` lateral, `-y` posterior toward posterior LA wall).
+ * Preserves exact `z = -cos(angle)` so apical CW alignment stays consistent with the declared angle.
+ */
+export function mrJetInitialDirection(mrJetDirRad: number): { x: number; y: number; z: number } {
+  const theta = Math.abs(mrJetDirRad);
+  if (theta < 0.05) return { x: 0, y: 0, z: -1 };
+  const sinT = Math.sin(theta);
+  const cosT = Math.cos(theta);
+  if (mrJetDirRad < 0) {
+    // Posterior leaflet prolapse: anteromedial toward the aortic root (+y) and IAS (-x)
+    return { x: -0.72 * sinT, y: 0.693974 * sinT, z: -cosT };
+  }
+  // SAM-related MR: posterolateral toward the posterior LA wall (-y) and lateral wall (+x)
+  return { x: 0.64 * sinT, y: -0.768375 * sinT, z: -cosT };
+}
+
 /** Regurgitant jets (MR in systole into the LA, AR in diastole into the LV) with proximal flow convergence (PISA). */
 export function sampleRegurgitantJets(
   p: FlowFieldParams,
@@ -126,7 +147,7 @@ export function sampleRegurgitantJets(
   mask = FLOW_MASK_ALL,
 ): void {
   const zAnn = hp.zAnn;
-  // ---- MR jet (vena contracta neck + turbulent LA free jet + hemispheric LV PISA) ----
+  // ---- MR jet (vena contracta neck + 3D eccentric Coanda LA jet + hemispheric LV PISA) ----
   const allowMrJet = (mask & FLOW_MASK_MR_JET) !== 0;
   const allowMrPisa = (mask & FLOW_MASK_MR_PISA) !== 0;
   if ((allowMrJet || allowMrPisa) && p.enabled['mr-jet'] !== false && p.mrEroCm2 > 0) {
@@ -140,27 +161,42 @@ export function sampleRegurgitantJets(
       const ox = p.mvCenter.x,
         oy = p.mvCenter.y,
         oz = zAnn - 0.1;
-      const dirX = Math.sin(p.mrJetDirRad),
-        dirZ = -Math.cos(p.mrJetDirRad);
+      const dir = mrJetInitialDirection(p.mrJetDirRad);
       const dx = x - ox,
         dy = y - oy,
         dz = z - oz;
-      const along = dx * dirX + dz * dirZ; // distance along the jet (into the LA)
-      const px = dx - dirX * along,
-        pz = dz - dirZ * along;
-      const rho = Math.hypot(px, dy, pz);
-      if (dz <= 0 && allowMrJet && along >= 0 && along < 5.5) {
+      const along = dx * dir.x + dy * dir.y + dz * dir.z; // initial projection into the LA
+      if (dz <= 0 && allowMrJet && along >= 0 && along < 5.8) {
+        // Eccentric jets impinge on the anteromedial (prolapse) or posterolateral (SAM) LA wall and
+        // wrap smoothly upward along the curved atrial dome (Coanda wall attachment).
+        const ecc = smoothstep(0.18, 0.55, Math.abs(p.mrJetDirRad));
+        const coandaU = ecc > 0 ? smoothstep(1.0, 3.6, along) : 0;
+        const bend = ecc * 0.42 * coandaU * Math.max(0, along - 1.0);
+        const sHoriz = along - bend;
+        const cx = ox + dir.x * sHoriz;
+        const cy = oy + dir.y * sHoriz;
+        const cz = oz + dir.z * along - 0.14 * bend;
+        const rho = Math.hypot(x - cx, y - cy, z - cz);
+
         // Vena contracta neck (first 0.35 cm beyond coaptation): collimated core matching rVc before
-        // organic free-jet shear expansion into the LA.
+        // organic free-jet / Coanda shear expansion into the LA.
         const expandAlong = Math.max(0, along - 0.35);
         const spreadSlope = 0.28 * (1 - 0.055 * Math.min(4, expandAlong));
-        const rHalf = 0.84 * (rVc + expandAlong * spreadSlope);
+        const coandaBroaden = 1 + 0.26 * ecc * smoothstep(1.2, 3.5, along);
+        const rHalf = 0.84 * (rVc + expandAlong * spreadSlope) * coandaBroaden;
         if (rho < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, expandAlong, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 3.8, 5.4);
+          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 4.0, 5.7);
           const v = vj * prof * decay;
-          out.vx += dirX * v;
-          out.vz += dirZ * v;
+          // Local tangent follows the Coanda wall curve toward the LA roof
+          const hSlope = Math.max(0.18, 1 - ecc * 0.58 * smoothstep(1.0, 3.2, along));
+          const txRaw = dir.x * hSlope;
+          const tyRaw = dir.y * hSlope;
+          const tzRaw = dir.z - 0.14 * ecc * smoothstep(1.0, 3.2, along);
+          const tLen = Math.hypot(txRaw, tyRaw, tzRaw) || 1;
+          out.vx += (txRaw / tLen) * v;
+          out.vy += (tyRaw / tLen) * v;
+          out.vz += (tzRaw / tLen) * v;
           // Laminar core inside the vena contracta, ramping smoothly into turbulent variance distally
           const neckBlend = smoothstep(0.15, 0.7, along);
           const baseTurb = (p.turbulence['mr-jet'] ?? 0.3) * (0.35 + 0.65 * neckBlend);
