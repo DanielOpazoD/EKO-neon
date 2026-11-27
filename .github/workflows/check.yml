@@ -24,6 +24,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: lts/*
-      # no lockfile is versioned yet (bun.lock predates package.json), so install resolves within package.json's ranges
-      - run: npm install --no-audit --no-fund
+          cache: npm
+      - run: npm ci --no-audit --no-fund
       - run: npm run check
