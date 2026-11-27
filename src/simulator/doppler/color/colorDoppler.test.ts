@@ -14,6 +14,7 @@ import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   buildFlowParams,
   cavalVenousVelocityMps,
+  coronarySinusVelocityMps,
   sampleFlow,
   sampleLeafletVelocity,
   sampleTissueVelocity,
@@ -1470,4 +1471,61 @@ test('IVC and hepatic vein exhibit triphasic S/D/Ar return, TR systolic reversal
   const hpLateAf = computeHeartPose(afModels.heart, cycleStateAt(afModels.tables, 0.92, afFlow.flowPeaks));
   const vLateAf = cavalVenousVelocityMps(afFlow, afModels.tables, hpLateAf, 0.92);
   assert.ok(vLateAf >= -0.01, `AF must have no atrial-kick Ar reversal, got ${vLateAf.toFixed(3)} m/s`);
+});
+
+test('SVC and coronary sinus carry physiological antegrade venous return into the RA without leaking across chambers', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const c = loadCaseById('normal-excellent');
+  const models = buildCaseModels(c, REST_PATIENT);
+  const flow = buildFlowParams(c, models.heart, models.tables, models.thorax);
+  const A = heartAnchors(models.heart);
+  const tm = models.tables.timings;
+
+  const phSys = (tm.pulmonaryOpenS + 0.5 * (tm.pulmonaryCloseS - tm.pulmonaryOpenS)) / models.tables.rrS;
+  const phDia = (tm.mitralOpenS + tm.eAccelS) / models.tables.rrS;
+  const hpSys = computeHeartPose(models.heart, cycleStateAt(models.tables, phSys, flow.flowPeaks));
+  const hpDia = computeHeartPose(models.heart, cycleStateAt(models.tables, phDia, flow.flowPeaks));
+
+  // 1. SVC antegrade systolic return toward RA roof (svcM -> svcA)
+  const svcMid = { x: 0.5 * (A.svcM.x + A.svcA.x), y: 0.5 * (A.svcM.y + A.svcA.y), z: 0.5 * (A.svcM.z + A.svcA.z) };
+  sampleFlow(flow, models.tables, hpSys, phSys, svcMid.x, svcMid.y, svcMid.z, fs, Structure.Svc);
+  const svcDot = fs.vx * (A.svcA.x - A.svcM.x) + fs.vy * (A.svcA.y - A.svcM.y) + fs.vz * (A.svcA.z - A.svcM.z);
+  assert.ok(
+    fs.present === 1 && svcDot > 0 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.35,
+    `Expected antegrade systolic SVC flow toward RA roof, got v=${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)} m/s`,
+  );
+
+  // SVC flow must never leak into LaCavity or PulmonaryVein
+  sampleFlow(flow, models.tables, hpSys, phSys, svcMid.x, svcMid.y, svcMid.z, fs, Structure.LaCavity);
+  assert.ok(Math.hypot(fs.vx, fs.vy, fs.vz) < 0.05, 'SVC flow must not bleed into LaCavity');
+
+  // 2. Coronary sinus biphasic systolic + diastolic medial drainage toward RA ostium
+  const vCsSys = coronarySinusVelocityMps(models.tables, phSys);
+  const vCsDia = coronarySinusVelocityMps(models.tables, phDia);
+  assert.ok(vCsSys > 0.25 && vCsDia > 0.15, `Expected biphasic CS drainage (S=${vCsSys.toFixed(2)}, D=${vCsDia.toFixed(2)})`);
+
+  // Sample at the anatomical coronary sinus ostium entering the inferomedial RA (anteromedial: vx < 0, vy > 0)
+  const csX = A.iasX - 1.2;
+  const csY = -1.2;
+  const csZ = hpSys.zAnn - 0.4;
+  sampleFlow(flow, models.tables, hpSys, phSys, csX, csY, csZ, fs, Structure.CoronarySinus);
+  assert.ok(
+    fs.present === 1 && fs.vx < -0.15 && fs.vy > 0.1 && fs.dispersion < 0.1,
+    `Expected laminar anteromedial coronary sinus flow at RA ostium, got vx=${fs.vx.toFixed(2)}, vy=${fs.vy.toFixed(2)} m/s`,
+  );
+
+  // 3. Severe TR (pulmonary-hypertension-rv) reverses SVC systolic flow as well
+  const phCase = loadCaseById('pulmonary-hypertension-rv');
+  const phModels = buildCaseModels(phCase, REST_PATIENT);
+  const phFlow = buildFlowParams(phCase, phModels.heart, phModels.tables, phModels.thorax);
+  const phA = heartAnchors(phModels.heart);
+  const phSysPh =
+    (phModels.tables.timings.pulmonaryOpenS +
+      0.5 * (phModels.tables.timings.pulmonaryCloseS - phModels.tables.timings.pulmonaryOpenS)) /
+    phModels.tables.rrS;
+  const hpSysPh = computeHeartPose(phModels.heart, cycleStateAt(phModels.tables, phSysPh, phFlow.flowPeaks));
+  const phSvcMid = { x: 0.5 * (phA.svcM.x + phA.svcA.x), y: 0.5 * (phA.svcM.y + phA.svcA.y), z: 0.5 * (phA.svcM.z + phA.svcA.z) };
+  sampleFlow(phFlow, phModels.tables, hpSysPh, phSysPh, phSvcMid.x, phSvcMid.y, phSvcMid.z, fs, Structure.Svc);
+  const phSvcDot = fs.vx * (phA.svcA.x - phA.svcM.x) + fs.vy * (phA.svcA.y - phA.svcM.y) + fs.vz * (phA.svcA.z - phA.svcM.z);
+  assert.ok(fs.present === 1 && phSvcDot < 0, 'Expected systolic SVC flow reversal in severe TR');
 });
