@@ -61,6 +61,8 @@ const SCALARS = [
   'FOCUS',
   'BLOOD_SHIFT',
   'SPATIAL_COMP',
+  'SEC_LA',
+  'SEC_LV',
   // LV geometry & pose
   'BOUND_CX',
   'BOUND_CY',
@@ -411,6 +413,8 @@ export function packScene(
   set('FOCUS', spec.focusCm);
   set('BLOOD_SHIFT', bloodShiftCells(physics.bloodFrame ?? 0));
   set('SPATIAL_COMP', Math.max(0, Math.min(1, physics.spatialCompound ?? 0)));
+  set('SEC_LA', Math.max(0, Math.min(1, physics.secLa ?? 0)));
+  set('SEC_LV', Math.max(0, Math.min(1, physics.secLv ?? 0)));
   const lv = heart.lv;
   set('BOUND_CX', heart.boundCenter.x);
   set('BOUND_CY', heart.boundCenter.y);

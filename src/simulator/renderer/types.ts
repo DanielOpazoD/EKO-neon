@@ -121,6 +121,10 @@ export interface ScenePhysics {
   bloodFrame?: number;
   /** Multi-angle spatial compounding strength (0..1): steers ±14°·c virtual beams for specular/anisotropy/shadow compounding. */
   spatialCompound?: number;
+  /** Left atrial / LAA blood-stasis spontaneous echo contrast intensity (0..1), derived purely from chamber hemodynamics. */
+  secLa?: number;
+  /** Left ventricular mid-apical low-flow spontaneous echo contrast intensity (0..1), derived purely from LV EF & dilation. */
+  secLv?: number;
 }
 
 export interface Scene {

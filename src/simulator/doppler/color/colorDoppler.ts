@@ -6,6 +6,8 @@ import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   COLOR_BLEND,
   COLOR_PALETTE_DEFAULT,
+  COLOR_TISSUE_PRIO_HI,
+  COLOR_TISSUE_PRIO_LO,
   colorMap,
   type ColorPaletteId,
 } from '@/simulator/renderer/postprocess/colorMap';
@@ -571,7 +573,10 @@ export function overlayColorField(
     const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
     // Clinical tissue write priority: full color over dark blood pool, smoothly dropping to 0 on bright
     // endocardium/valves, relaxed only when real clutter flash or extreme overgain carries breakthrough > 0.
-    const tpU = Math.min(1, Math.max(0, (lum - 98) / 74));
+    const tpU = Math.min(
+      1,
+      Math.max(0, (lum - COLOR_TISSUE_PRIO_LO) / (COLOR_TISSUE_PRIO_HI - COLOR_TISSUE_PRIO_LO)),
+    );
     const tissuePrio = 1 - tpU * tpU * (3 - 2 * tpU);
     const effTwp = tissuePrio + (1 - tissuePrio) * breakthrough;
     // Gentle low-velocity opacity feathering so near-baseline flow dissolves organically into dark chamber blood

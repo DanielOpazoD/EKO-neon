@@ -125,6 +125,20 @@ export const PLEURA_Z = 1;
 
 /** Blood backscatter with harmonic imaging (fundamental suppressed). */
 export const BLOOD_HARMONIC_SIGMA = 0.6;
+/**
+ * Spontaneous echo contrast ("smoke" / SEC) in low-flow stasis chambers (severe mitral stenosis LA/LAA,
+ * fibrillating dilated LA, severely hypokinetic dilated LV apex). Purely hemodynamic (no case-ID branches):
+ * adds slowly swirling, low-frequency erythrocyte rouleaux backscatter well below myocardial reflectivity.
+ */
+export const SEC_GAIN = 0.095;
+export const SEC_FREQ = 0.95;
+export const SEC_DRIFT_X = 0.035;
+export const SEC_DRIFT_Y = 0.022;
+/** 3D smoothstep value noise concentrates in ~[0.28, 0.76] (std ≈ 0.185); map that band cleanly to [0, 1] plumes. */
+export const SEC_CLOUD_THRESH = 0.28;
+export const SEC_CLOUD_SPAN = 0.48;
+export const SEC_BASE_FLOOR = 0.18;
+export const SEC_LAA_BOOST = 1.15;
 /** Lattice offsets of the heterogeneity noise (material coordinates · HETERO_FREQ + offset). */
 export const HETERO_OFFSET: readonly [number, number, number] = [5.3, 1.7, 9.1];
 /**
@@ -481,6 +495,14 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   PLEURA_DEPTH_FREQ,
   PLEURA_Z,
   BLOOD_HARMONIC_SIGMA,
+  SEC_GAIN,
+  SEC_FREQ,
+  SEC_DRIFT_X,
+  SEC_DRIFT_Y,
+  SEC_CLOUD_THRESH,
+  SEC_CLOUD_SPAN,
+  SEC_BASE_FLOOR,
+  SEC_LAA_BOOST,
   CALCIUM_GAIN,
   CALCIUM_BASE,
   CALCIUM_AMP,

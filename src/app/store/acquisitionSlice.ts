@@ -89,6 +89,8 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
         frozen: false,
         cineOffset: 0,
         cinePlaying: false,
+        teachingPointerOn: false,
+        teachingArrows: [],
       };
       // each spectral mode opens with its own velocity window, or with the one the learner left it with (decision 230)
       const from = isSpectralModality(s.modality) ? (s.modality as SpectralModality) : null;
@@ -115,7 +117,16 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
       return constrainAcquisition({ ...s, ...out });
     }),
   toggleFreeze: () =>
-    set((s) => (examClosed(s) ? s : { frozen: !s.frozen, cineOffset: 0, cinePlaying: false })),
+    set((s) => {
+      if (examClosed(s)) return s;
+      const nextFrozen = !s.frozen;
+      return {
+        frozen: nextFrozen,
+        cineOffset: 0,
+        cinePlaying: false,
+        ...(!nextFrozen ? { teachingPointerOn: false, teachingArrows: [] } : {}),
+      };
+    }),
   setCineOffset: (o) =>
     set(() => ({
       cineOffset: Math.min(0, Math.max(-((useHudStore.getState().hud?.cineLength ?? 1) - 1), o)),
@@ -231,6 +242,8 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
           },
           targetViewId: viewId,
           frozen: false,
+          teachingPointerOn: false,
+          teachingArrows: [],
           color: { ...s.color, ...box },
           colorBoxCustom: false,
         });

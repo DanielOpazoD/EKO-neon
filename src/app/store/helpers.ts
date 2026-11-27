@@ -189,6 +189,8 @@ export function freshSession() {
     impressionChecked: false,
     artifactLab: null,
     colorBoxCustom: false,
+    teachingPointerOn: false,
+    teachingArrows: [],
   };
 }
 

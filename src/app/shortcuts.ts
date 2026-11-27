@@ -29,7 +29,7 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
     action: 'Revisión: borrar el marcador seleccionado (Ctrl+Z deshace)',
   },
   { keys: '. / ,', action: 'Cine: cuadro siguiente/anterior (congelada)' },
-  { keys: 'Esc', action: 'Cancelar la medición en curso' },
+  { keys: 'Esc', action: 'Cancelar la medición o el puntero docente' },
   { keys: '?', action: 'Mostrar u ocultar esta lista de atajos' },
 ];
 
@@ -300,6 +300,8 @@ export function useShortcuts(): void {
           if (s.ui.shortcutsOpen) s.setUi({ shortcutsOpen: false });
           else if (s.activeMeasurementId) s.setActiveMeasurement(null);
           else if (s.activeTool !== 'none') s.setActiveTool('none');
+          else if (s.teachingPointerOn) s.setTeachingPointer(false);
+          else if (s.teachingArrows.length > 0) s.clearTeachingArrows();
           else if (s.reviewLinkParentId) s.armReviewLink(null);
           else if (s.reviewSelectedId) s.selectReviewMarker(null);
           break;

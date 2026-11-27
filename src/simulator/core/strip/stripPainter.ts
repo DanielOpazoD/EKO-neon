@@ -8,7 +8,11 @@ import {
   ST_POW_ALPHA_MIN,
 } from '@/simulator/doppler/color/spatiotemporalFilter';
 import { SPECTRAL_BINS, spectralRange, type SpectralSettings } from '@/simulator/doppler/spectral/spectrum';
-import { COLOR_BLEND } from '@/simulator/renderer/postprocess/colorMap';
+import {
+  COLOR_BLEND,
+  COLOR_TISSUE_PRIO_HI,
+  COLOR_TISSUE_PRIO_LO,
+} from '@/simulator/renderer/postprocess/colorMap';
 import {
   tintGrayByte,
   type ResolvedStripTint,
@@ -124,7 +128,10 @@ export function paintMmodeStripColumn(
       const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
       // Clinical tissue write priority: preserves bright specular leaflet excursion lines through color plumes,
       // relaxed only when real clutter flash or extreme overgain carries breakthrough > 0.
-      const tpU = Math.min(1, Math.max(0, (lum - 98) / 74));
+      const tpU = Math.min(
+        1,
+        Math.max(0, (lum - COLOR_TISSUE_PRIO_LO) / (COLOR_TISSUE_PRIO_HI - COLOR_TISSUE_PRIO_LO)),
+      );
       const tissuePrio = 1 - tpU * tpU * (3 - 2 * tpU);
       const effTwp = tissuePrio + (1 - tissuePrio) * breakthrough;
       const velU = Math.min(1, Math.max(0, (Math.abs(v) / scale - 0.05) / 0.17));

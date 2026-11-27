@@ -259,3 +259,13 @@ export function IconAnatomyTag({ size }: { size?: number }) {
     </I>
   );
 }
+
+/** Teaching pointer arrow: draw ephemeral callout arrows on frozen ultrasound frames. */
+export function IconArrowPointer({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M5 19 19 5" />
+      <path d="M11 5h8v8" />
+    </I>
+  );
+}

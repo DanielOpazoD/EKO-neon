@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import type { SimOutput } from '@/simulator/core/protocol';
+import { examClosed } from '../modePolicy';
 import { loadPrefs, savePrefs } from './helpers';
 import type { SimSliceCreator, UiSlice } from './types';
+
+/** Upper bound on ephemeral teaching arrows drawn on a single frozen frame. */
+export const MAX_TEACHING_ARROWS = 5;
+let teachingArrowSeq = 0;
 
 /** The structure under the pointer on the cut map (decision 202): the image outlines it in return. */
 export const useStructureHover = create<{
@@ -118,6 +123,8 @@ export const createUiSlice: SimSliceCreator<UiSlice> = (set) => {
     workerMode: 'starting',
     navigatorReady: false,
     fpsUi: 0,
+    teachingPointerOn: false,
+    teachingArrows: [],
 
     setUi: (u) =>
       set((s) => {
@@ -131,12 +138,36 @@ export const createUiSlice: SimSliceCreator<UiSlice> = (set) => {
           }
         }
         savePrefs(ui);
-        return u.reviewMode ? { ui, cinePlaying: false } : { ui };
+        return u.reviewMode ? { ui, cinePlaying: false, teachingPointerOn: false } : { ui };
       }),
     setCycleInfo: (marks, lvLengthCm) => set({ phaseMarks: marks, lvLengthCm }),
     setError: (e) => set({ error: e }),
     setWorkerMode: (m) => set({ workerMode: m }),
     setNavigatorReady: (ready) => set({ navigatorReady: ready }),
     setFpsUi: (f) => set({ fpsUi: f }),
+    setTeachingPointer: (on) =>
+      set((s) => {
+        if (!on) return s.teachingPointerOn ? { teachingPointerOn: false } : s;
+        if (!s.frozen || examClosed(s) || s.mode === 'exam') return s;
+        return {
+          teachingPointerOn: true,
+          activeTool: 'none',
+          activeMeasurementId: null,
+          cinePlaying: false,
+        };
+      }),
+    addTeachingArrow: (arrow) =>
+      set((s) => {
+        if (!s.frozen || examClosed(s) || s.mode === 'exam') return s;
+        const next = [...s.teachingArrows, { ...arrow, id: `ta-${++teachingArrowSeq}` }];
+        return {
+          teachingArrows:
+            next.length > MAX_TEACHING_ARROWS
+              ? next.slice(next.length - MAX_TEACHING_ARROWS)
+              : next,
+        };
+      }),
+    clearTeachingArrows: () =>
+      set((s) => (s.teachingArrows.length ? { teachingArrows: [] } : s)),
   };
 };

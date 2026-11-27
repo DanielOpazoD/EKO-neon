@@ -138,14 +138,19 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
         : {
             activeTool: t,
             activeMeasurementId: null,
-            ...(t !== 'none' ? { cinePlaying: false } : {}),
+            ...(t !== 'none' ? { cinePlaying: false, teachingPointerOn: false } : {}),
           },
     ),
   setActiveMeasurement: (id) => {
     if (!id) return set({ activeMeasurementId: null, activeTool: 'none' });
     const spec = getMeasurementSpec(id);
     if (!spec || examClosed(get())) return set({ activeMeasurementId: null, activeTool: 'none' });
-    set({ activeMeasurementId: id, activeTool: spec.tool, cinePlaying: false });
+    set({
+      activeMeasurementId: id,
+      activeTool: spec.tool,
+      cinePlaying: false,
+      teachingPointerOn: false,
+    });
   },
   completeTasks: (ids) =>
     set((s) => {
@@ -252,6 +257,8 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
         frozen: true,
         activeTool: 'none',
         activeMeasurementId: null,
+        teachingPointerOn: false,
+        teachingArrows: [],
         progress,
         ui: { ...s.ui, screen: 'report' },
       };

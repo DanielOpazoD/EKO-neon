@@ -8,6 +8,8 @@ import {
   COLOR_MAP,
   COLOR_PALETTE_IDS,
   COLOR_PALETTES,
+  COLOR_TISSUE_PRIO_HI,
+  COLOR_TISSUE_PRIO_LO,
   colorMap,
   colorMapDefinesGlsl,
   type ColorPaletteId,
@@ -1125,10 +1127,12 @@ test('Doppler GLSL passes stay synchronized with TypeScript physical constants a
     assert.ok(defs.includes(def), `missing Doppler GLSL define: ${def}`);
   }
 
-  // Tissue write priority bounds (98..172) and breakthrough blend structure must match CPU overlayColorField
+  // Tissue write priority bounds and breakthrough blend structure must stay locked via shared defines
   assert.ok(
-    GLSL_PRESENT_FRAG.includes('smoothstep(98.0, 172.0, lum)'),
-    'GLSL_PRESENT_FRAG tissue write priority bounds must match CPU overlayColorField (98..172)',
+    GLSL_PRESENT_FRAG.includes(`#define COLOR_TISSUE_PRIO_LO ${COLOR_TISSUE_PRIO_LO}.0`) &&
+      GLSL_PRESENT_FRAG.includes(`#define COLOR_TISSUE_PRIO_HI ${COLOR_TISSUE_PRIO_HI}.0`) &&
+      GLSL_PRESENT_FRAG.includes('smoothstep(COLOR_TISSUE_PRIO_LO, COLOR_TISSUE_PRIO_HI, lum)'),
+    'GLSL_PRESENT_FRAG tissue write priority bounds must stay locked to shared COLOR_TISSUE_PRIO_LO/HI constants',
   );
   assert.ok(
     GLSL_PRESENT_FRAG.includes('mix(tissuePrio, 1.0, breakthrough)'),

@@ -343,7 +343,7 @@ void main() {
         float v = baseline + (scale / 3.141592653589793) * atan(ph.y, ph.x);
         float edgeAlpha = smoothstep(0.18, 0.72, wSum);
         float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
-        float tissuePrio = 1.0 - smoothstep(98.0, 172.0, lum);
+        float tissuePrio = 1.0 - smoothstep(COLOR_TISSUE_PRIO_LO, COLOR_TISSUE_PRIO_HI, lum);
         float effTwp = mix(tissuePrio, 1.0, breakthrough);
         float velAlpha = 0.62 + 0.38 * smoothstep(0.05, 0.22, abs(v) / scale);
         float blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * effTwp;

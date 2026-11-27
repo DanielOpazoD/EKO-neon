@@ -24,6 +24,12 @@ import {
   type PendingMeasurement,
 } from './display/measurementTools';
 import { CaptureBar } from './display/CaptureBar';
+import {
+  colorBoxHandleCursor,
+  hitTestColorBoxHandle,
+  resizeColorBoxFromHandle,
+  type ColorBoxHandleId,
+} from './display/colorBoxHandles';
 import { hitTestMeasurementVertex, recomputeEditedMeasurement } from './display/measurementEdit';
 import { computeLivePreview } from './display/measurementPreview';
 import { drawOverlay } from './display/overlayDraw';
@@ -57,6 +63,10 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
   const hoverPtRef = useRef<{ x: number; y: number } | null>(null);
   /** Hovered or dragged measurement caliper vertex on a frozen frame (ref-only: zero React re-renders). */
   const hoveredHandleRef = useRef<{ measurementId: string; vertexIndex: number } | null>(null);
+  /** Hovered or dragged Color Doppler ROI corner handle (ref-only: zero React re-renders). */
+  const hoveredColorHandleRef = useRef<ColorBoxHandleId | 'move' | null>(null);
+  /** Ephemeral teaching arrow currently being dragged on a frozen frame (ref-only). */
+  const arrowDraftRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const lastOutRef = useRef<SimOutput | null>(null);
   /** the overlay redraw of the drawing effect, so tool clicks refresh the overlay without waiting for a frame */
   const redrawOverlayRef = useRef<() => void>(() => {});
@@ -64,15 +74,18 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     kind:
       | 'box-move'
       | 'box-resize'
+      | 'box-handle'
       | 'cursor'
       | 'marker'
       | 'cine'
       | 'lasso'
       | 'measure-vertex'
+      | 'teach-arrow'
       | 'none';
     startX: number;
     startY: number;
     box?: { t0: number; t1: number; r0: number; r1: number };
+    handleId?: ColorBoxHandleId;
     /** review marker being dragged (decision 135) and whether it has moved */
     markerId?: string;
     /** measurement vertex being dragged on a frozen image */
@@ -86,6 +99,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
   const reviewTool = useSimStore((s) => s.ui.reviewTool);
   const frozen = useSimStore((s) => s.frozen);
   const armed = useSimStore((s) => s.activeTool !== 'none');
+  const pointerOn = useSimStore((s) => s.teachingPointerOn);
   const segTipRef = useRef<HTMLDivElement>(null);
   const onSize = props.onSize;
 
@@ -133,9 +147,18 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       if (!out || !canvas) return;
       const state = useSimStore.getState();
       // the ↔ of the ECG strip goes with the scrub: live again, a tool or review mode, before the pointer moves
+      const keepColorCursor =
+        !out.frozen &&
+        state.modality === 'color' &&
+        (hoveredColorHandleRef.current !== null ||
+          dragRef.current.kind === 'box-handle' ||
+          dragRef.current.kind === 'box-move');
       if (
         canvas.style.cursor &&
-        (!out.frozen || state.activeTool !== 'none' || state.ui.reviewMode)
+        (state.activeTool !== 'none' ||
+          state.ui.reviewMode ||
+          state.teachingPointerOn ||
+          (!out.frozen && !keepColorCursor))
       )
         canvas.style.cursor = '';
       const pending = pendingRef.current;
@@ -162,7 +185,11 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         state.modality,
       );
       const activeHandle =
-        out.frozen && state.activeTool === 'none' && !state.ui.reviewMode && !examClosed(state)
+        out.frozen &&
+        state.activeTool === 'none' &&
+        !state.teachingPointerOn &&
+        !state.ui.reviewMode &&
+        !examClosed(state)
           ? dragRef.current.kind === 'measure-vertex' &&
             dragRef.current.measureId !== undefined &&
             dragRef.current.vertexIndex !== undefined
@@ -175,6 +202,14 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
               ? { ...hoveredHandleRef.current, dragging: false }
               : null
           : null;
+      const activeColorHover =
+        !out.frozen && state.modality === 'color' && state.activeTool === 'none' && !state.ui.reviewMode
+          ? dragRef.current.kind === 'box-handle' && dragRef.current.handleId
+            ? dragRef.current.handleId
+            : dragRef.current.kind === 'box-move'
+              ? 'move'
+              : hoveredColorHandleRef.current
+          : null;
       drawOverlay(
         canvas,
         out,
@@ -183,6 +218,8 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         lassoRef.current.map((q) => polarToPixel(out.sector, q.rCm, q.thetaRad)),
         livePreview,
         activeHandle,
+        activeColorHover,
+        arrowDraftRef.current,
       );
     };
     const unsubFrame = frameBus.subscribe((out) => {
@@ -229,6 +266,8 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         next.measurements === prev.measurements &&
         next.reviewMarkers === prev.reviewMarkers &&
         next.reviewSelectedId === prev.reviewSelectedId &&
+        next.teachingPointerOn === prev.teachingPointerOn &&
+        next.teachingArrows === prev.teachingArrows &&
         next.ui === prev.ui
       ) {
         return;
@@ -298,6 +337,13 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       pendingSession.setCount(pendingRef.current.points.length);
       return;
     }
+    // frozen teaching pointer: drag anywhere on the sector or strip to draw an ephemeral callout arrow
+    if (hud.frozen && st.teachingPointerOn && !examClosed(st) && st.mode !== 'exam') {
+      arrowDraftRef.current = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+      dragRef.current = { kind: 'teach-arrow', startX: p.x, startY: p.y };
+      redrawOverlayRef.current();
+      return;
+    }
     // frozen, dragging any caliper/velocity/time/manual-contour vertex edits the measurement live
     if (hud.frozen && !examClosed(st)) {
       const handle = hitTestMeasurementVertex(p, st.measurements, hud, st.modality);
@@ -328,6 +374,21 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     if (!hud.frozen && st.modality === 'color' && inSector) {
       const { rCm, thetaRad } = pixelToPolar(m, p.x, p.y);
       const c = st.color;
+      const box = { t0: c.boxThetaMinRad, t1: c.boxThetaMaxRad, r0: c.boxRMinCm, r1: c.boxRMaxCm };
+      const corner = hitTestColorBoxHandle(p, m, box);
+      if (corner) {
+        dragRef.current = {
+          kind: 'box-handle',
+          handleId: corner,
+          startX: p.x,
+          startY: p.y,
+          box,
+        };
+        hoveredColorHandleRef.current = corner;
+        if (ovRef.current) ovRef.current.style.cursor = colorBoxHandleCursor(corner, m.invertLR);
+        redrawOverlayRef.current();
+        return;
+      }
       const inside =
         rCm >= c.boxRMinCm &&
         rCm <= c.boxRMaxCm &&
@@ -337,7 +398,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         kind: inside && !e.shiftKey ? 'box-move' : 'box-resize',
         startX: p.x,
         startY: p.y,
-        box: { t0: c.boxThetaMinRad, t1: c.boxThetaMaxRad, r0: c.boxRMinCm, r1: c.boxRMaxCm },
+        box,
       };
       if (!inside && !e.shiftKey) {
         // start a new box centred on the click
@@ -413,7 +474,15 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         hoverPtRef.current = null;
       }
       // Highlight draggable caliper handles on frozen images (zero React re-renders)
-      if (hud && p && hud.frozen && st.activeTool === 'none' && !st.ui.reviewMode && !examClosed(st)) {
+      if (
+        hud &&
+        p &&
+        hud.frozen &&
+        st.activeTool === 'none' &&
+        !st.teachingPointerOn &&
+        !st.ui.reviewMode &&
+        !examClosed(st)
+      ) {
         const handle = hitTestMeasurementVertex(p, st.measurements, hud, st.modality);
         const prev = hoveredHandleRef.current;
         const changed =
@@ -434,6 +503,48 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       }
       if (hoveredHandleRef.current !== null) {
         hoveredHandleRef.current = null;
+        redrawOverlayRef.current();
+      }
+      // Highlight draggable Color Doppler ROI box corners and body on live color frames
+      if (
+        hud &&
+        p &&
+        !hud.frozen &&
+        st.modality === 'color' &&
+        st.activeTool === 'none' &&
+        !st.ui.reviewMode &&
+        p.y < hud.sector.height
+      ) {
+        const m = hud.sector;
+        const c = st.color;
+        const box = { t0: c.boxThetaMinRad, t1: c.boxThetaMaxRad, r0: c.boxRMinCm, r1: c.boxRMaxCm };
+        const corner = hitTestColorBoxHandle(p, m, box);
+        let nextColorHover: ColorBoxHandleId | 'move' | null = corner;
+        if (!nextColorHover) {
+          const { rCm, thetaRad } = pixelToPolar(m, p.x, p.y);
+          const inside =
+            rCm >= c.boxRMinCm &&
+            rCm <= c.boxRMaxCm &&
+            thetaRad >= c.boxThetaMinRad &&
+            thetaRad <= c.boxThetaMaxRad;
+          if (inside) nextColorHover = 'move';
+        }
+        if (nextColorHover !== hoveredColorHandleRef.current) {
+          hoveredColorHandleRef.current = nextColorHover;
+          redrawOverlayRef.current();
+        }
+        if (ovRef.current) {
+          ovRef.current.style.cursor =
+            nextColorHover && nextColorHover !== 'move'
+              ? colorBoxHandleCursor(nextColorHover, m.invertLR)
+              : nextColorHover === 'move'
+                ? 'move'
+                : '';
+        }
+        return;
+      }
+      if (hoveredColorHandleRef.current !== null) {
+        hoveredColorHandleRef.current = null;
         redrawOverlayRef.current();
       }
       // the strip says it can be scrubbed; an armed tool keeps its crosshair from the stylesheet
@@ -466,6 +577,21 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
           st.updateMeasurement(ms.id, edited.patch);
         }
       }
+      return;
+    }
+    if (dragRef.current.kind === 'teach-arrow') {
+      arrowDraftRef.current = {
+        x0: dragRef.current.startX,
+        y0: dragRef.current.startY,
+        x1: p.x,
+        y1: p.y,
+      };
+      redrawOverlayRef.current();
+      return;
+    }
+    if (dragRef.current.kind === 'box-handle' && dragRef.current.box && dragRef.current.handleId) {
+      const b = pixelToPolar(m, p.x, Math.min(p.y, m.height - 1));
+      st.setColor(resizeColorBoxFromHandle(dragRef.current.handleId, dragRef.current.box, b, m));
       return;
     }
     if (dragRef.current.kind === 'cine') {
@@ -537,6 +663,30 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       redrawOverlayRef.current();
       commitReviewLasso(drawn, lastOutRef.current, imgRef.current);
     }
+    if (d.kind === 'teach-arrow') {
+      const draft = arrowDraftRef.current;
+      arrowDraftRef.current = null;
+      dragRef.current = { kind: 'none', startX: 0, startY: 0 };
+      if (draft && Math.hypot(draft.x1 - draft.x0, draft.y1 - draft.y0) >= 8) {
+        const hud = lastOutRef.current;
+        const onStrip = hud ? draft.y0 >= hud.sector.height && draft.y1 >= hud.sector.height : false;
+        useSimStore.getState().addTeachingArrow({
+          x0: draft.x0,
+          y0: draft.y0,
+          x1: draft.x1,
+          y1: draft.y1,
+          onStrip,
+          ...(hud && !onStrip ? { captureSector: hud.sector } : {}),
+        });
+      }
+      redrawOverlayRef.current();
+      return;
+    }
+    if (d.kind === 'box-handle') {
+      dragRef.current = { kind: 'none', startX: 0, startY: 0 };
+      redrawOverlayRef.current();
+      return;
+    }
     if (d.kind === 'measure-vertex') {
       dragRef.current = { kind: 'none', startX: 0, startY: 0 };
       if (ovRef.current) ovRef.current.style.cursor = hoveredHandleRef.current ? 'grab' : '';
@@ -553,7 +703,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       <canvas ref={imgRef} aria-label="Imagen ecográfica simulada" />
       <canvas
         ref={ovRef}
-        className={`overlay${reviewMode ? ' review' : ''}${reviewMode && reviewTool === 'lasso' ? ' lasso' : ''}${armed ? ' armed' : ''}`}
+        className={`overlay${reviewMode ? ' review' : ''}${reviewMode && reviewTool === 'lasso' ? ' lasso' : ''}${armed ? ' armed' : ''}${pointerOn ? ' pointer' : ''}`}
         style={{ width: '100%', height: '100%' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
@@ -567,6 +717,10 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
           }
           if (hoveredHandleRef.current !== null) {
             hoveredHandleRef.current = null;
+            redrawOverlayRef.current();
+          }
+          if (hoveredColorHandleRef.current !== null) {
+            hoveredColorHandleRef.current = null;
             redrawOverlayRef.current();
           }
         }}

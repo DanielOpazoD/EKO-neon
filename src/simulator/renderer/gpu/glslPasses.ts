@@ -37,7 +37,24 @@ float grainAbove(float g) { return g > GRAIN_THRESHOLD ? (g - GRAIN_THRESHOLD) /
 void acoustic(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
-  if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
+  if (tissue == T_BLOOD) {
+    if (HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
+    float sec = 0.0;
+    if (structure == S_LA_CAV) {
+      sec = SEC_LA;
+    } else if (structure == S_LAA) {
+      sec = min(1.0, SEC_LA * SEC_LAA_BOOST);
+    } else if (structure == S_LV_CAV && SEC_LV > 0.0) {
+      float lvApex = 1.0 + m.z / max(1.0, LV_LEN);
+      float lvFrac = 0.2 + 0.8 * clamp(lvApex / 0.75, 0.0, 1.0);
+      sec = SEC_LV * lvFrac;
+    }
+    if (sec > 0.0) {
+      float cloud = lat(vec3(m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X, m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y, m.z * SEC_FREQ), 1);
+      float w = clamp((cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN, 0.0, 1.0);
+      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * w * w);
+    }
+  }
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);
@@ -225,7 +242,24 @@ float heteroDb(int t) {
 void acousticSide(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
-  if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
+  if (tissue == T_BLOOD) {
+    if (HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
+    float sec = 0.0;
+    if (structure == S_LA_CAV) {
+      sec = SEC_LA;
+    } else if (structure == S_LAA) {
+      sec = min(1.0, SEC_LA * SEC_LAA_BOOST);
+    } else if (structure == S_LV_CAV && SEC_LV > 0.0) {
+      float lvApex = 1.0 + m.z / max(1.0, LV_LEN);
+      float lvFrac = 0.2 + 0.8 * clamp(lvApex / 0.75, 0.0, 1.0);
+      sec = SEC_LV * lvFrac;
+    }
+    if (sec > 0.0) {
+      float cloud = lat(vec3(m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X, m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y, m.z * SEC_FREQ), 1);
+      float w = clamp((cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN, 0.0, 1.0);
+      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * w * w);
+    }
+  }
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);

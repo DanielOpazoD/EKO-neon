@@ -30,6 +30,14 @@ import {
   SOFT_TISSUE_ATTEN_DB,
   BLOOD_HARMONIC_SIGMA,
   bloodShiftCells,
+  SEC_BASE_FLOOR,
+  SEC_CLOUD_SPAN,
+  SEC_CLOUD_THRESH,
+  SEC_DRIFT_X,
+  SEC_DRIFT_Y,
+  SEC_FREQ,
+  SEC_GAIN,
+  SEC_LAA_BOOST,
   CALCIUM_AMP,
   calciumAttenDb,
   CALCIUM_BASE,
@@ -333,6 +341,8 @@ export class ProceduralSliceRenderer implements RendererBackend {
       nrmH: torsoToHeartDir(hf, beam.normal),
       bloodShift: bloodShiftCells(physics.bloodFrame ?? 0),
       spatialCompound: Math.max(0, Math.min(1, physics.spatialCompound ?? 0)),
+      secLa: Math.max(0, Math.min(1, physics.secLa ?? 0)),
+      secLv: Math.max(0, Math.min(1, physics.secLv ?? 0)),
       ...speckleLattices(physics.seed),
       line: null,
     };
@@ -466,7 +476,30 @@ export class ProceduralSliceRenderer implements RendererBackend {
         ndM = q.tissue === Tissue.Chordae ? cordAlignment(ndM0) : ndM0;
       }
       let sigma = props.reflect;
-      if (q.tissue === Tissue.Blood && harm) sigma *= BLOOD_HARMONIC_SIGMA;
+      if (q.tissue === Tissue.Blood) {
+        if (harm) sigma *= BLOOD_HARMONIC_SIGMA;
+        let sec = 0;
+        if (q.structure === Structure.LaCavity) {
+          sec = ctx.secLa;
+        } else if (q.structure === Structure.LaAppendage) {
+          sec = Math.min(1, ctx.secLa * SEC_LAA_BOOST);
+        } else if (q.structure === Structure.LvCavity && ctx.secLv > 0) {
+          // Material z runs from −LV_LEN at the mitral base to 0 at the apex: 1 + mz/LV_LEN is 0 (base) → 1 (apex).
+          const lvApex = 1 + q.mz / Math.max(1, heart.lv.lengthCm);
+          const lvFrac = 0.2 + 0.8 * Math.max(0, Math.min(1, lvApex / 0.75));
+          sec = ctx.secLv * lvFrac;
+        }
+        if (sec > 0) {
+          const cloud = latticeNoise3(
+            q.mx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X,
+            q.my * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y,
+            q.mz * SEC_FREQ,
+            latB,
+          );
+          const w = Math.max(0, Math.min(1, (cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN));
+          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * w * w);
+        }
+      }
       if (q.tissue === Tissue.Myocardium) {
         if (
           inH &&

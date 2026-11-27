@@ -3,6 +3,7 @@ import { TINT_MAP_OPTIONS } from '@/simulator/renderer/postprocess/tintMap';
 import { useShallow } from 'zustand/shallow';
 import { Section, Segmented, Slider, Toggle } from '../controls';
 import { formatMHz } from '../format';
+import { activeBmodePresetId, BMODE_IMAGE_PRESETS } from './imagePresets';
 import { useTip } from './useTip';
 
 /** B-mode image controls: the frequent ones up front, the fine-tuning set under "Ajustes finos". */
@@ -18,6 +19,7 @@ export function ImageTab() {
     })),
   );
   const tip = useTip();
+  const activePreset = activeBmodePresetId(s.settings);
   return (
     <>
       {s.frozen && (
@@ -27,6 +29,24 @@ export function ImageTab() {
         </p>
       )}
       <Section title="Imagen 2D">
+      <div className="image-preset-wrap">
+        <span className="image-preset-cap">Perfil de textura 2D</span>
+        <div className="preset-grid image-preset-grid" role="group" aria-label="Perfil de textura 2D">
+          {BMODE_IMAGE_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={activePreset === preset.id ? 'active' : ''}
+              aria-pressed={activePreset === preset.id}
+              title={tip(preset.description)}
+              onClick={() => s.setSettings(preset.patch)}
+            >
+              <span>{preset.label}</span>
+              <small>{preset.subtitle}</small>
+            </button>
+          ))}
+        </div>
+      </div>
       <Slider
         label="Profundidad"
         tour="depth"

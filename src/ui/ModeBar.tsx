@@ -6,6 +6,7 @@ import { examClosed, exportCaseTag, modePolicy } from '@/app/modePolicy';
 import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
 import { captureCurrentStudyStill } from '@/app/studyCapture';
 import {
+  IconArrowPointer,
   IconCamera,
   IconPause,
   IconPlay,
@@ -29,10 +30,15 @@ export function ModeBar() {
       closed: examClosed(st),
       captureCount: st.captures.length,
       frozen: st.frozen,
+      mode: st.mode,
       modality: st.modality,
       setModality: st.setModality,
       setUi: st.setUi,
       toggleFreeze: st.toggleFreeze,
+      teachingPointerOn: st.teachingPointerOn,
+      teachingArrowCount: st.teachingArrows.length,
+      setTeachingPointer: st.setTeachingPointer,
+      clearTeachingArrows: st.clearTeachingArrows,
       showTorso: st.ui.showTorso,
       minimal: st.ui.minimal,
       roomMode: st.ui.roomMode,
@@ -110,6 +116,35 @@ export function ModeBar() {
         <span>{savedFlash ? 'Guardada' : 'Guardar'}</span>
         {s.captureCount > 0 && <span className="store-badge">{s.captureCount}</span>}
       </button>
+      {s.frozen && !s.closed && s.mode !== 'exam' && (
+        <div className="pointer-group">
+          <button
+            type="button"
+            className={`pointer-btn${s.teachingPointerOn ? ' active' : ''}`}
+            onClick={() => s.setTeachingPointer(!s.teachingPointerOn)}
+            aria-pressed={s.teachingPointerOn}
+            data-tip={
+              s.teachingPointerOn
+                ? 'Arrastrá sobre la imagen congelada para señalar con una flecha (Esc para salir)'
+                : 'Señalar sobre el cuadro congelado con flechas temporales para clase (se capturan al Guardar)'
+            }
+          >
+            <IconArrowPointer size={13} />
+            <span>Señalar</span>
+          </button>
+          {s.teachingArrowCount > 0 && (
+            <button
+              type="button"
+              className="pointer-clear-btn"
+              onClick={() => s.clearTeachingArrows()}
+              aria-label={`Borrar ${s.teachingArrowCount} flechas docentes`}
+              data-tip="Borrar todas las flechas temporales de este cuadro (Esc)"
+            >
+              ×{s.teachingArrowCount}
+            </button>
+          )}
+        </div>
+      )}
       {s.frozen && <CineControls />}
       <span className="spacer" style={{ flex: 1 }} />
       {/* 1-click classroom / projector presentation mode: clean maximized image + dark room chrome */}

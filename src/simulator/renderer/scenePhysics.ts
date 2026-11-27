@@ -33,6 +33,32 @@ export interface ScenePhysicsOptions {
   bloodFrame?: number;
 }
 
+const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+
+/**
+ * Derive spontaneous echo contrast ("smoke" / SEC) intensity in the LA/LAA and mid-apical LV strictly
+ * from chamber anatomy and hemodynamics (no case-ID checks):
+ *  - LA stasis rises when significant LA dilation (>65 mL) coincides with mitral inflow obstruction
+ *    (MVA < 1.8 cm²) or atrial fibrillation.
+ *  - LV stasis rises when severe LV dilation (EDV > 165 mL) coincides with severe systolic dysfunction
+ *    (EF < 34 %).
+ */
+export function computeChamberStasis(c: CaseDefinition): { secLa: number; secLv: number } {
+  const laDil = clamp01((c.anatomy.la.volumeMl - 65) / 40);
+  const mvArea = c.hemodynamics.mvEffectiveAreaCm2;
+  const msObstr = mvArea !== undefined && mvArea < 1.8 ? clamp01((1.8 - mvArea) / 0.8) : 0;
+  const afStasis = c.rhythm.type === 'atrial-fibrillation' ? 0.72 : 0;
+  const secLa = clamp01(laDil * Math.max(msObstr, afStasis));
+
+  const edv = Math.max(1, c.physiology.edvMl);
+  const efPct = Math.max(0, ((edv - c.physiology.esvMl) / edv) * 100);
+  const lvDil = clamp01((edv - 165) / 90);
+  const lvHypo = clamp01((34 - efPct) / 14);
+  const secLv = clamp01(lvDil * lvHypo * 0.85);
+
+  return { secLa, secLv };
+}
+
 /**
  * The physics of a case's scene, the one the app renders (decision 238). The clinical calibration, the goldens, the
  * backend comparison and the offline tools each wrote their own, and none carried the case's near-field clutter: the
@@ -45,6 +71,7 @@ export function scenePhysicsFor(
 ): ScenePhysics {
   const a = opts.artifacts ?? caseArtifactLevels(c);
   const w = c.acousticWindow;
+  const stasis = computeChamberStasis(c);
   return {
     frequencyMHz: settings.frequencyMHz,
     harmonics: settings.harmonics,
@@ -55,6 +82,8 @@ export function scenePhysicsFor(
     sideLobe: a.sideLobe,
     bloodFrame: opts.bloodFrame ?? 0,
     spatialCompound: Math.max(0, Math.min(1, settings.spatialCompound ?? 0)),
+    secLa: stasis.secLa,
+    secLv: stasis.secLv,
   };
 }
 

@@ -144,6 +144,14 @@ export const COLOR_PALETTES: Record<ColorPaletteId, ColorPaletteParams> = {
 
 /** Colour over grey inside the colour box: lets subtle chamber speckle texture breathe through. */
 export const COLOR_BLEND = 0.78;
+/**
+ * Clinical tissue write-priority luminance window (0..255), shared between CPU `overlayColorField`,
+ * Color M-mode `paintMmodeStripColumn`, and GPU `GLSL_PRESENT_FRAG`. Keeps full color over dark blood
+ * (`lum <= LO`) while letting bright valve cusps, calcified leaflets, and crisp endocardium cut cleanly
+ * through color plumes (`lum >= HI`), relaxed only by clutter flash / overgain breakthrough.
+ */
+export const COLOR_TISSUE_PRIO_LO = 86;
+export const COLOR_TISSUE_PRIO_HI = 154;
 
 /**
  * Velocity → RGB using the selected clinical palette (`vivid` default).
@@ -191,11 +199,13 @@ export function colorMap(
 
 const glslFloat = (v: number): string => (Number.isInteger(v) ? `${v}.0` : `${v}`);
 
-/** `#define CM_<NAME>` for default colour-map constants plus `COLOR_BLEND`. */
+/** `#define CM_<NAME>` for default colour-map constants plus `COLOR_BLEND` and tissue write-priority bounds. */
 export function colorMapDefinesGlsl(): string {
   return [
     ...Object.entries(COLOR_MAP).map(([k, v]) => `#define CM_${k} ${glslFloat(v)}`),
     `#define COLOR_BLEND ${glslFloat(COLOR_BLEND)}`,
+    `#define COLOR_TISSUE_PRIO_LO ${glslFloat(COLOR_TISSUE_PRIO_LO)}`,
+    `#define COLOR_TISSUE_PRIO_HI ${glslFloat(COLOR_TISSUE_PRIO_HI)}`,
   ].join('\n');
 }
 
