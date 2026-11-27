@@ -121,31 +121,58 @@ export class CineBuffer {
     return this.at(Math.max(0, Math.min(this.count - 1, this.count - 1 + safeOffset)));
   }
 
+  /** Find the cine offset (`-(count-1)..0`) of a specific `frameId`, or null if no longer in the buffer. */
+  findFrameOffset(frameId: number): { offset: number; phase: number } | null {
+    for (let i = this.count - 1; i >= 0; i--) {
+      const f = this.at(i);
+      if (f && f.frameId === frameId) {
+        return { offset: i - (this.count - 1), phase: f.phase };
+      }
+    }
+    return null;
+  }
+
   /**
    * Find the cine offset (`-(count-1)..0`) closest to `targetPhase` (0..1, circular distance),
    * preferring the most recent cardiac cycle when multiple beats match closely.
    */
   findNearestPhaseOffset(targetPhase: number): { offset: number; phase: number } | null {
+    const match = this.findNearestPhaseOffsetMatching(targetPhase, () => true);
+    return match ? { offset: match.offset, phase: match.phase } : null;
+  }
+
+  /**
+   * Find the cine offset closest to `targetPhase` among frames satisfying `predicate`, returning
+   * its circular phase distance so callers can reject incomplete cardiac cycles or pose mismatches.
+   */
+  findNearestPhaseOffsetMatching(
+    targetPhase: number,
+    predicate: (frame: CineFrame) => boolean,
+  ): { offset: number; phase: number; distance: number } | null {
     if (this.count === 0) return null;
     const t = ((targetPhase % 1) + 1) % 1;
+    let found = false;
     let bestOffset = 0;
     let bestPhase = 0;
+    let bestDist = Infinity;
     let bestScore = Infinity;
     // Search newest → oldest; tiny recency tie-breaker (0.012) picks the latest beat's ED/ES cleanly
     for (let i = this.count - 1; i >= 0; i--) {
       const f = this.at(i);
-      if (!f) continue;
+      if (!f || !predicate(f)) continue;
       const dRaw = Math.abs(f.phase - t);
       const d = Math.min(dRaw, 1 - dRaw);
       const agePenalty = ((this.count - 1 - i) / Math.max(1, this.count)) * 0.012;
       const score = d + agePenalty;
       if (score < bestScore) {
+        found = true;
         bestScore = score;
+        bestDist = d;
         bestOffset = i - (this.count - 1);
         bestPhase = f.phase;
       }
     }
-    return { offset: bestOffset, phase: bestPhase };
+    return found ? { offset: bestOffset, phase: bestPhase, distance: bestDist } : null;
   }
 
   capture(frame: CineFrame): void {

@@ -441,7 +441,7 @@ export function drawOverlay(
           ? ` · ΔPm ${Math.round(ms.derived.meanGradientMmHg)} mmHg`
           : '';
       const decimals =
-        ms.kind === 'time' ? 0 : ms.kind === 'vti' || ms.units === 'cm/s' ? 1 : 2;
+        ms.kind === 'time' || ms.kind === 'volume' ? 0 : ms.kind === 'vti' || ms.units === 'cm/s' ? 1 : 2;
       drawValueChip(
         ctx,
         `${ms.label} ${ms.value.toFixed(decimals)} ${ms.units}${vmaxText}${gradText}`,
@@ -627,6 +627,7 @@ function drawGeometry(
 ): void {
   if (!pts.length) return;
   const denseVti = kind === 'vti' && pts.length > 24;
+  const denseVolume = kind === 'volume' && pts.length > 20;
   let drawPts = pts;
   let caliperPts = pts;
   if (denseVti) {
@@ -646,6 +647,9 @@ function drawGeometry(
       }
     }
     caliperPts = [drawPts[0]!, drawPts[drawPts.length - 1]!];
+  } else if (denseVolume) {
+    // Auto-traced endocardial contours highlight only the 3 anatomical landmarks (2 annular hinges + apex).
+    caliperPts = [pts[0]!, pts[Math.floor(pts.length / 2)]!, pts[pts.length - 1]!];
   }
   // Dense auto-traced spectral envelopes draw a sleek clinical curve + translucent area fill to the
   // zero baseline, placing caliper crosses only at the active flow boundaries instead of every column.
@@ -656,6 +660,13 @@ function drawGeometry(
     ctx.lineTo(drawPts[drawPts.length - 1]!.x, baselineY);
     ctx.closePath();
     ctx.fillStyle = color === '#ffc857' ? 'rgba(255, 200, 87, 0.14)' : 'rgba(92, 200, 255, 0.14)';
+    ctx.fill();
+  } else if (denseVolume && drawPts.length >= 5) {
+    ctx.beginPath();
+    ctx.moveTo(drawPts[0]!.x, drawPts[0]!.y);
+    for (const p of drawPts.slice(1)) ctx.lineTo(p.x, p.y);
+    ctx.closePath();
+    ctx.fillStyle = color === '#ffc857' ? 'rgba(255, 200, 87, 0.11)' : 'rgba(92, 200, 255, 0.12)';
     ctx.fill();
   }
   // calipers as on a scanner (decision 200): a cross at each point and a line between them, both over a dark
@@ -677,7 +688,14 @@ function drawGeometry(
     ctx.beginPath();
     ctx.moveTo(drawPts[0]!.x, drawPts[0]!.y);
     for (const p of drawPts.slice(1)) ctx.lineTo(p.x, p.y);
-    if (kind === 'volume') ctx.closePath();
+    if (kind === 'volume' && !denseVolume) ctx.closePath();
+    ctx.stroke();
+  };
+  const annularBase = () => {
+    if (!denseVolume || drawPts.length < 3) return;
+    ctx.beginPath();
+    ctx.moveTo(drawPts[drawPts.length - 1]!.x, drawPts[drawPts.length - 1]!.y);
+    ctx.lineTo(drawPts[0]!.x, drawPts[0]!.y);
     ctx.stroke();
   };
   const cap = ctx.lineCap;
@@ -685,15 +703,21 @@ function drawGeometry(
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
-  ctx.lineWidth = denseVti ? 3.2 : 3.5;
+  ctx.lineWidth = denseVti || denseVolume ? 3.2 : 3.5;
   crosses();
   if (joined) line();
+  if (denseVolume) annularBase();
   ctx.strokeStyle = color;
-  ctx.lineWidth = denseVti ? 1.8 : 1.5;
+  ctx.lineWidth = denseVti || denseVolume ? 1.8 : 1.5;
   crosses();
   if (joined) {
-    if (!denseVti) ctx.setLineDash([5, 4]);
+    if (!denseVti && !denseVolume) ctx.setLineDash([5, 4]);
     line();
+    ctx.setLineDash([]);
+  }
+  if (denseVolume) {
+    ctx.setLineDash([4, 4]);
+    annularBase();
     ctx.setLineDash([]);
   }
   ctx.lineCap = cap;

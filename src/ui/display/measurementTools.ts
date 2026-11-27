@@ -1,7 +1,16 @@
+import { rvVolumeFromAreaMl } from '@/clinical/formulas';
+import { evaluateTechnique } from '@/education/technique';
 import { frameBus } from '@/app/frameBus';
 import { evaluateCapture, specFor, type CaptureExtras } from '@/app/measurementCapture';
 import { useHudStore, useSimStore } from '@/app/store';
 import type { SimOutput, StripInfo } from '@/simulator/core/protocol';
+import {
+  polygonAreaCm2,
+  type AutoChamberFrameSnapshot,
+  type AutoChamberVolumeResult,
+  type AutoChamberVolumeSuccess,
+  type ChamberId,
+} from '@/simulator/measurements/autoVolume';
 import { reprojectGeometry } from '@/simulator/measurements/geometry';
 import { discProfileFromContour, volumeFromProfileMl } from '@/simulator/measurements/simpson';
 import type { Measurement } from '@/simulator/measurements/types';
@@ -387,10 +396,12 @@ export function handleMeasurementToolClick(
       const pts = [...pend.points];
       const prof = discProfileFromContour(pts, m.pxPerCm);
       if (prof) {
-        const vol = volumeFromProfileMl(prof);
-        // the foreshortening check compares against the LV length: an atrial trace has none (decision 180)
+        const isRv = spec?.id === 'rv-edv' || spec?.id === 'rv-esv';
+        const areaCm2 = polygonAreaCm2(pts, m.pxPerCm);
+        const vol = isRv && areaCm2 > 0 ? rvVolumeFromAreaMl(areaCm2) : volumeFromProfileMl(prof);
+        // the foreshortening check compares against the LV length: atrial and RV traces have none (decision 180)
         const trueL =
-          st.lvLengthCm !== null && spec?.id !== 'la-volume'
+          st.lvLengthCm !== null && spec?.id !== 'la-volume' && !isRv
             ? spec?.phase === 'es'
               ? st.lvLengthCm - 1.2
               : st.lvLengthCm
@@ -398,12 +409,16 @@ export function handleMeasurementToolClick(
         commit(
           {
             kind: 'volume',
-            label: 'Volumen VI (Simpson monoplano)',
+            label: isRv ? 'Volumen VD (2D)' : 'Volumen VI (Simpson monoplano)',
             value: vol,
             units: 'mL',
             modality,
             geometry: pts,
-            derived: { longAxisCm: prof.longAxisCm, discs: prof.diametersCm.length },
+            derived: {
+              longAxisCm: prof.longAxisCm,
+              discs: prof.diametersCm.length,
+              ...(areaCm2 > 0 ? { areaCm2 } : {}),
+            },
           },
           { contour: pts, longAxisCm: prof.longAxisCm, trueLongAxisCm: trueL },
         );
@@ -486,4 +501,99 @@ export function handleMeasurementToolClick(
     pend.points.push(p);
     redraw();
   }
+}
+
+/**
+ * Commit an automatic ED + ES LV or RV volume measurement pair to the store, freezing on the ED
+ * traced frame so the endocardial contour is immediately visible for visual inspection.
+ */
+export function commitAutoChamberVolume(res: AutoChamberVolumeSuccess): void {
+  const st = useSimStore.getState();
+  const isLv = res.chamber === 'lv';
+  const edSpec = specFor(isLv ? 'lv-edv-simpson' : 'rv-edv');
+  const esSpec = specFor(isLv ? 'lv-esv-simpson' : 'rv-esv');
+  const now = new Date().toISOString();
+  const baseId = Date.now().toString(36);
+
+  const buildRecord = (
+    snap: AutoChamberFrameSnapshot,
+    spec: ReturnType<typeof specFor>,
+    phaseTag: 'ed' | 'es',
+  ): Measurement => {
+    const acquiredMode = snap.acquisition.modality;
+    const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+    const trueL =
+      isLv && st.lvLengthCm !== null
+        ? phaseTag === 'es'
+          ? st.lvLengthCm - 1.2
+          : st.lvLengthCm
+        : undefined;
+    const technique = spec
+      ? evaluateTechnique(spec, {
+          modality: acquiredMode,
+          viewId: snap.viewId,
+          viewScore: snap.viewScore,
+          phase: snap.phase,
+          phaseMarks: snap.acquisition.phaseMarks ?? st.phaseMarks,
+          gate: null,
+          segmentStructures: snap.interiorStructures,
+          cutByDepth: snap.cutByDepth,
+          longAxisCm: snap.longAxisCm,
+          trueLongAxisCm: trueL,
+          userAssisted: true,
+        })
+      : null;
+
+    return {
+      id: `m${baseId}${phaseTag}${Math.floor(Math.random() * 1e3)}`,
+      kind: 'volume',
+      measurementId: spec ? spec.id : null,
+      technique,
+      label: spec ? spec.label : isLv ? 'Volumen VI auto' : 'Volumen VD auto',
+      value: snap.volumeMl,
+      units: 'mL',
+      modality,
+      sourceViewId: snap.viewId,
+      viewScore: snap.viewScore,
+      frameId: snap.frameId,
+      phase: snap.phase,
+      timeS: snap.timeS,
+      geometry: snap.contourPx,
+      captureSector: { ...snap.sector },
+      acquisition: snap.acquisition,
+      beatIndex: snap.beatIndex,
+      rrS: res.rrS,
+      derived: {
+        areaCm2: snap.areaCm2,
+        longAxisCm: snap.longAxisCm,
+        efPct: res.efPct,
+        ...(isLv ? {} : { facPct: res.facPct }),
+      },
+      imageQualityScore: snap.gainScore,
+      userAssisted: true,
+      referenceGuidelineIds: spec ? spec.referenceIds : ['ase-eacvi-chamber-2015'],
+      createdAt: now,
+    };
+  };
+
+  if (!st.frozen) st.toggleFreeze();
+  st.addMeasurement(buildRecord(res.ed, edSpec, 'ed'));
+  st.addMeasurement(buildRecord(res.es, esSpec, 'es'));
+  // Jump strictly by ED frameId so the overlaid contour stays aligned even if live frames elapsed during the RPC.
+  useSimStore.getState().jumpCinePhase('ed', res.ed.frameId);
+}
+
+/** Request automatic 2D LV or RV volume & ejection fraction calculation over the current cine loop. */
+export async function runAutoChamberVolume(chamber: ChamberId): Promise<AutoChamberVolumeResult> {
+  const res = await frameBus.request({ kind: 'autoChamberVolume', chamber });
+  if (!res || res.kind !== 'autoChamberVolume') {
+    return {
+      ok: false,
+      chamber,
+      reason: 'no-frame',
+      message: 'El simulador no respondió a la solicitud de volumen automático.',
+    };
+  }
+  if (res.result.ok) commitAutoChamberVolume(res.result);
+  return res.result;
 }

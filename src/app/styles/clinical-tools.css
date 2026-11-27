@@ -1,4 +1,77 @@
 
+/* automatic LV/RV volume & ejection fraction panel */
+.auto-ef {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.auto-ef-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.auto-ef-actions button {
+  font-size: var(--fs-xs);
+  padding: 5px 8px;
+}
+.auto-ef-notice {
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+  padding: 4px 7px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.auto-ef-notice.err {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+}
+.auto-ef-notice.ok {
+  color: var(--muted);
+}
+.auto-ef-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.auto-ef-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+.auto-ef-title {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.auto-ef-primary {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.auto-ef-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.auto-ef-jump {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.auto-ef-jump button {
+  font-size: var(--fs-xs);
+  padding: 2px 7px;
+}
+
 /* measurement protocol panel (spec 16/28) */
 .pill.bad {
   color: var(--bad);

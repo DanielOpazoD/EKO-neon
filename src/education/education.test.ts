@@ -347,6 +347,35 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     const pvSd = derived.find((d) => d.id === 'pv-sd-ratio');
     assert.ok(pvSd && pvSd.value === '1.50', `Expected 1.50 PV S/D ratio, got ${pvSd?.value}`);
 
+    // Derived RV EF, SV, and FAC from rv-edv + rv-esv with areaCm2
+    const rvDerived = deriveCalculations([
+      {
+        ...baseMeas,
+        id: 'm-rvedv',
+        measurementId: 'rv-edv',
+        kind: 'volume',
+        label: 'VTD VD',
+        value: 120,
+        units: 'mL',
+        modality: '2d',
+        derived: { areaCm2: 18.0 },
+      },
+      {
+        ...baseMeas,
+        id: 'm-rvesv',
+        measurementId: 'rv-esv',
+        kind: 'volume',
+        label: 'VTS VD',
+        value: 48,
+        units: 'mL',
+        modality: '2d',
+        derived: { areaCm2: 9.0 },
+      },
+    ]);
+    assert.equal(rvDerived.find((d) => d.id === 'ef-rv')?.value, '60 %');
+    assert.equal(rvDerived.find((d) => d.id === 'sv-rv')?.value, '72 mL');
+    assert.equal(rvDerived.find((d) => d.id === 'rv-fac')?.value, '50 %');
+
     // Truth resolution for new protocol specs
     const mrPisaT = truthFor('mr-pisa-radius', mrTruth);
     assert.ok(mrPisaT && mrPisaT.value > 0.7 && mrPisaT.value < 1.3, `Expected MVP PISA@40 in (0.7, 1.3) cm, got ${mrPisaT?.value}`);
