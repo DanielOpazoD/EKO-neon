@@ -47,3 +47,23 @@ test('computeColorBarGeometry reflects baseline shift, invert, variance width, a
   assert.equal(formatColorBarVelocity(0), '+0.00');
   assert.equal(formatColorBarVelocity(-0.43), '−0.43');
 });
+
+test('computeColorBarGeometry keeps compact CMM color bar clear of top-right HUD and inside sector', () => {
+  const hudBottom = 104;
+  // Compact CMM sector (H=440 -> sectorH=185) with 4-line HUD ending at y=104
+  const compact = computeColorBarGeometry('cmm', DEFAULT_COLOR, SECTOR, 640, 185, 620, false, hudBottom);
+  assert.ok(
+    compact.by - 12 >= hudBottom,
+    `Compact CMM bar top+V label (${compact.by - 12}) overlapped HUD bottom (${hudBottom})`,
+  );
+  assert.ok(
+    compact.by + compact.bh + 14 <= 185,
+    `Compact CMM bar m/s label (${compact.by + compact.bh + 14}) spilled below sectorH (185)`,
+  );
+  assert.ok(compact.bh >= 40, `Expected readable compact CMM bar height >= 40, got ${compact.bh}`);
+
+  // Standard Color 2D with tall HUD notice still stays below HUD and inside sector
+  const tallHud = computeColorBarGeometry('color', DEFAULT_COLOR, SECTOR, 640, 480, 620, false, 136);
+  assert.ok(tallHud.by - 12 >= 136, `Color bar overlapped tall HUD (${tallHud.by - 12} < 136)`);
+  assert.ok(tallHud.by + tallHud.bh + 18 <= 480);
+});
