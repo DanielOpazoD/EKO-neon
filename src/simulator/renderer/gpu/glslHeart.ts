@@ -67,7 +67,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     vec3 nM;
     float t = mitralDistance(p, dM, fr, lf, nM);
     if (dM < t) {
-      setSample(s, T_VALVE, dM - t, nM, p, min(1.0, MV_CALC * (0.55 + 0.65 * fr)), lf == 0 ? S_MV_ANT : S_MV_POST);
+      setSample(s, T_VALVE, dM - t, nM, p, MV_CALC, lf == 0 ? S_MV_ANT : S_MV_POST);
       return true;
     }
   }
@@ -77,7 +77,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     float hA = aorticCuspDistance(rootT, rootRr, rootPhi, dA, frA, nA);
     if (dA < hA) {
       vec3 u = rootQ / max(rootRr, 1e-6);
-      setSample(s, T_VALVE, dA - hA, u * nA.x + ax * nA.y, p, min(1.0, AV_CALC * (0.65 + 0.55 * frA)), S_AV);
+      setSample(s, T_VALVE, dA - hA, u * nA.x + ax * nA.y, p, AV_CALC, S_AV);
       return true;
     }
   }

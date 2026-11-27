@@ -17,8 +17,6 @@ export function classifyValves(c: ClassifyCtx): boolean {
   {
     const t = mitralDistance(x, y, z, V.mitral);
     if (mitralHit.d < t) {
-      // Tip-concentrated calcific reflectivity (mirrored identically in glslHeart.ts)
-      const mvCalc = Math.min(1, m.anatomy.mitral.calcification * (0.55 + 0.65 * mitralHit.frac));
       setSample(
         out,
         Tissue.Valve,
@@ -29,7 +27,7 @@ export function classifyValves(c: ClassifyCtx): boolean {
         x,
         y,
         z,
-        mvCalc,
+        m.anatomy.mitral.calcification,
         mitralHit.leaflet === 0 ? Structure.MitralAnterior : Structure.MitralPosterior,
       );
       return true;
@@ -41,10 +39,6 @@ export function classifyValves(c: ClassifyCtx): boolean {
     if (aorticHit.d < half) {
       const ur = 1 / (rootRr || 1);
       const ax = A.avAxis;
-      const avCalc = Math.min(
-        1,
-        m.anatomy.aorticValve.calcification * (0.65 + 0.55 * aorticHit.frac),
-      );
       setSample(
         out,
         Tissue.Valve,
@@ -55,7 +49,7 @@ export function classifyValves(c: ClassifyCtx): boolean {
         x,
         y,
         z,
-        avCalc,
+        m.anatomy.aorticValve.calcification,
         Structure.AorticValve,
       );
       return true;
