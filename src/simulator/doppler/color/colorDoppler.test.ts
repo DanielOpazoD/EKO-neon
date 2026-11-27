@@ -1640,3 +1640,38 @@ test('eccentric MR steers in 3D (anteromedial prolapse, posterolateral SAM) with
     `Expected symmetric central functional MR jet along -z, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
   );
 });
+
+test('LV diastolic apical vortex redirects E-deceleration flow basally along the anteroseptal LVOT without perturbing mitral tips', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const c = loadCaseById('normal-excellent');
+  const models = buildCaseModels(c, REST_PATIENT);
+  const flow = buildFlowParams(c, models.heart, models.tables, models.thorax);
+  const tm = models.tables.timings;
+  // Mid-to-late E deceleration phase
+  const phDecel = (tm.mitralOpenS + tm.eAccelS + 0.45 * tm.eDecelS) / models.tables.rrS;
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phDecel, flow.flowPeaks));
+
+  // 1. Anteroseptal/LVOT side (toward avCenter): laminar basal return (-z) toward the closed aortic valve
+  const ox = flow.avCenter.x - flow.mvCenter.x;
+  const oy = flow.avCenter.y - flow.mvCenter.y;
+  const oLen = Math.hypot(ox, oy);
+  const retX = flow.mvCenter.x + (ox / oLen) * 1.6;
+  const retY = flow.mvCenter.y + (oy / oLen) * 1.6;
+  const retZ = hp.zAnn + 0.35 * hp.lengthNow;
+  sampleFlow(flow, models.tables, hp, phDecel, retX, retY, retZ, fs, Structure.Lvot);
+  assert.ok(
+    fs.present === 1 && fs.vz < -0.18 && fs.dispersion < 0.12,
+    `Expected laminar basal vortex return in LVOT during E deceleration, got vz=${fs.vz.toFixed(2)} m/s, d=${fs.dispersion.toFixed(2)}`,
+  );
+
+  // 2. Mitral leaflet tips centerline (sOut = 0, zr = 1.2 cm): pure apical inflow (+z), zero lateral vortex leak
+  sampleFlow(flow, models.tables, hp, phDecel, flow.mvCenter.x, flow.mvCenter.y, hp.zAnn + 1.2, fs, Structure.LvCavity);
+  assert.ok(
+    fs.present === 1 && fs.vz > 0.25 && Math.abs(fs.vx) < 1e-4 && Math.abs(fs.vy) < 1e-4,
+    `Mitral leaflet tips must remain pure axial inflow without vortex contamination, got (${fs.vx.toFixed(4)}, ${fs.vy.toFixed(4)}, ${fs.vz.toFixed(2)})`,
+  );
+
+  // 3. Vortex does not leak into LaCavity or AorticRoot
+  sampleFlow(flow, models.tables, hp, phDecel, retX, retY, retZ, fs, Structure.AorticRoot);
+  assert.equal(fs.present, 0, 'LV diastolic vortex must never leak into AorticRoot');
+});
