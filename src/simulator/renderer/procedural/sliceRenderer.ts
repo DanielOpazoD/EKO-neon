@@ -31,8 +31,6 @@ import {
   BLOOD_HARMONIC_SIGMA,
   bloodShiftCells,
   SEC_BASE_FLOOR,
-  SEC_CLOUD_SPAN,
-  SEC_CLOUD_THRESH,
   SEC_DRIFT_X,
   SEC_DRIFT_Y,
   SEC_FREQ,
@@ -490,14 +488,15 @@ export class ProceduralSliceRenderer implements RendererBackend {
           sec = ctx.secLv * lvFrac;
         }
         if (sec > 0) {
-          const cloud = latticeNoise3(
-            q.mx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X,
-            q.my * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y,
-            q.mz * SEC_FREQ,
-            latB,
-          );
-          const w = Math.max(0, Math.min(1, (cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN));
-          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * w * w);
+          const px = q.mx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X;
+          const py = q.my * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y;
+          const pz = q.mz * SEC_FREQ;
+          const swirl =
+            0.5 +
+            0.5 *
+              Math.sin(px + 0.85 * Math.cos(py * 1.15 + pz * 0.75)) *
+              Math.cos(py * 0.9 - 0.75 * Math.sin(pz * 1.1 - px * 0.65));
+          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
         }
       }
       if (q.tissue === Tissue.Myocardium) {

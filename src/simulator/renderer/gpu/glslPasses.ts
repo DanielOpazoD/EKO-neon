@@ -50,9 +50,11 @@ void acoustic(int tissue, int structure, float sdf, float extra, float nd, float
       sec = SEC_LV * lvFrac;
     }
     if (sec > 0.0) {
-      float cloud = lat(vec3(m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X, m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y, m.z * SEC_FREQ), 1);
-      float w = clamp((cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN, 0.0, 1.0);
-      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * w * w);
+      float px = m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
+      float py = m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
+      float pz = m.z * SEC_FREQ;
+      float swirl = 0.5 + 0.5 * sin(px + 0.85 * cos(py * 1.15 + pz * 0.75)) * cos(py * 0.9 - 0.75 * sin(pz * 1.1 - px * 0.65));
+      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
     }
   }
   if (tissue == T_MYO) {
@@ -255,9 +257,11 @@ void acousticSide(int tissue, int structure, float sdf, float extra, float nd, f
       sec = SEC_LV * lvFrac;
     }
     if (sec > 0.0) {
-      float cloud = lat(vec3(m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X, m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y, m.z * SEC_FREQ), 1);
-      float w = clamp((cloud - SEC_CLOUD_THRESH) / SEC_CLOUD_SPAN, 0.0, 1.0);
-      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * w * w);
+      float px = m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
+      float py = m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
+      float pz = m.z * SEC_FREQ;
+      float swirl = 0.5 + 0.5 * sin(px + 0.85 * cos(py * 1.15 + pz * 0.75)) * cos(py * 0.9 - 0.75 * sin(pz * 1.1 - px * 0.65));
+      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
     }
   }
   if (tissue == T_MYO) {
