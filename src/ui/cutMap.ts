@@ -81,6 +81,50 @@ export interface RegionStat {
 }
 
 /**
+ * Counts per-structure pixel footprints and centroids directly on a sector LUT without painting an
+ * intermediate RGBA bitmap (used by on-image 2D anatomical labels).
+ */
+export function computeStructureStats(
+  lut: Int32Array,
+  structure: Uint8Array,
+  width: number,
+): RegionStat[] {
+  const n = lut.length;
+  const count = new Float64Array(256);
+  const sx = new Float64Array(256);
+  const sy = new Float64Array(256);
+  const minY = new Int32Array(256).fill(0x7fffffff);
+  const maxY = new Int32Array(256).fill(-1);
+  for (let i = 0; i < n; i++) {
+    const k = lut[i]!;
+    if (k < 0) continue;
+    const id = structure[k] ?? 0;
+    if (id === 0) continue;
+    const y = (i / width) | 0;
+    count[id]! += 1;
+    sx[id]! += i % width;
+    sy[id]! += y;
+    if (y < minY[id]!) minY[id] = y;
+    if (y > maxY[id]!) maxY[id] = y;
+  }
+  const stats: RegionStat[] = [];
+  for (let id = 1; id < 256; id++) {
+    const c = count[id]!;
+    if (c > 0) {
+      stats.push({
+        id: id as Structure,
+        count: c,
+        cx: sx[id]! / c,
+        cy: sy[id]! / c,
+        minY: minY[id]!,
+        maxY: maxY[id]!,
+      });
+    }
+  }
+  return stats;
+}
+
+/**
  * Paints the structure colours into `rgba` (w×h, premultiplied nothing) and returns the regions found. A thin dark
  * outline separates neighbouring structures, and the structure under the pointer (`hovered`) is lit and outlined in
  * the accent (decision 202).

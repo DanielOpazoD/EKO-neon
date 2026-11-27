@@ -109,6 +109,24 @@ export function imageSegmentsOn(s: Pick<SimStore, 'mode' | 'ui'>): boolean {
   return s.ui.imageSegments && modePolicy(s.mode).hintsEnabled;
 }
 
+/** On-image 2D anatomical structure labels: teaching overlay strictly disabled in exam mode. */
+export function imageAnatomyLabelsOn(s: Pick<SimStore, 'mode' | 'ui'>): boolean {
+  return s.ui.imageAnatomyLabels && modePolicy(s.mode).hintsEnabled;
+}
+
+/** Projector / classroom presentation mode: clean maximized scanner plus dimmed dark-room chrome. */
+export function isClassModeOn(ui: Pick<UiPrefs, 'minimal' | 'roomMode'>): boolean {
+  return ui.minimal && ui.roomMode;
+}
+
+/** Toggle 1-click classroom presentation mode cleanly on or off. */
+export function nextClassModeUi(
+  ui: Pick<UiPrefs, 'minimal' | 'roomMode'>,
+): Pick<UiPrefs, 'minimal' | 'roomMode'> {
+  const next = !isClassModeOn(ui);
+  return { minimal: next, roomMode: next };
+}
+
 export function navigatorLayers(s: Pick<SimStore, 'mode' | 'ui'>): NavigatorLayers {
   if (!modePolicy(s.mode).navigatorAnatomy)
     return {

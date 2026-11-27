@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  cycleRespiration,
+  cycleSweepSpeed,
   quickBarGroupFor,
+  RESPIRATION_SHORT_LABEL,
   stepColorBaseline,
   stepColorScale,
   stepSpectralBaseline,
@@ -51,5 +54,20 @@ describe('contextual ImageQuickBar modality stepping & clamping', () => {
     assert.equal(toggleHdZoom(1.04), 2);
     assert.equal(toggleHdZoom(1.5), 1);
     assert.equal(toggleHdZoom(2), 1);
+  });
+
+  it('cycles strip sweep speed through 25 -> 50 -> 100 -> 25 mm/s', () => {
+    assert.equal(cycleSweepSpeed(25), 50);
+    assert.equal(cycleSweepSpeed(50), 100);
+    assert.equal(cycleSweepSpeed(100), 25);
+  });
+
+  it('cycles patient respiration smoothly across bedside phases with Spanish short labels', () => {
+    assert.equal(cycleRespiration('free-breathing'), 'inspiration');
+    assert.equal(cycleRespiration('inspiration'), 'expiration');
+    assert.equal(cycleRespiration('expiration'), 'breath-hold');
+    assert.equal(cycleRespiration('breath-hold'), 'free-breathing');
+    assert.equal(RESPIRATION_SHORT_LABEL.inspiration, 'Insp');
+    assert.equal(RESPIRATION_SHORT_LABEL['free-breathing'], 'Libre');
   });
 });

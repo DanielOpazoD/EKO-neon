@@ -29,8 +29,11 @@ export type {
 export {
   START_PROBE,
   START_VIEW_ID,
+  imageAnatomyLabelsOn,
   imageSegmentsOn,
+  isClassModeOn,
   navigatorLayers,
+  nextClassModeUi,
   segmentLayerOn,
 } from './store/helpers';
 

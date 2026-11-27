@@ -60,6 +60,8 @@ export interface UiPrefs {
   navSegments: boolean;
   /** The ultrasound image shows the LV segments of the tissue in it, translucent and numbered (decision 153). */
   imageSegments: boolean;
+  /** Live anatomical structure labels overlaid directly on the 2D ultrasound sector (disabled in exam mode). */
+  imageAnatomyLabels: boolean;
   /** The LV segment panel (polar map and inspector) under the navigator. */
   segmentsOpen: boolean;
   /** Segment model shown: the anatomical AHA 17 or the 16-segment wall-motion model. */

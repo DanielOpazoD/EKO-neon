@@ -1,4 +1,5 @@
 import {
+  imageSegmentsOn,
   useSegmentHover,
   useSegmentOrientation,
   useStructureHover,
@@ -6,9 +7,16 @@ import {
 } from '@/app/store';
 import type { ReviewMarker } from '@/app/review';
 import { cellAt, structureComponent } from '@/app/reviewRegion';
+import { Structure } from '@/simulator/anatomy/tissue';
 import type { SimOutput } from '@/simulator/core/protocol';
 import { canvasFont } from '../canvasFonts';
-import { nearestSampleLut, paintStructureOutline, placeLabels } from '../cutMap';
+import {
+  computeStructureStats,
+  nearestSampleLut,
+  paintStructureOutline,
+  placeLabels,
+  withoutOverlaps,
+} from '../cutMap';
 import { imageUpOnPolarMap, rvInsertionPoints, SegmentAnchors, type RvInsertions } from '../segmentAnchors';
 import { paintSegmentOverlay, segmentIds } from '../segmentMap';
 
@@ -270,6 +278,133 @@ export function drawSegmentLayer(ctx: CanvasRenderingContext2D, hud: SimOutput, 
     ctx.strokeText(l.text, x, y);
     ctx.fillStyle = Number(l.text) === hovered ? '#5cc8ff' : '#ffffff';
     ctx.fillText(l.text, x, y);
+  }
+  ctx.restore();
+}
+
+/**
+ * Concise clinical labels for direct 2D sector anatomy overlay (teaching aid; disabled in exam mode).
+ * Focused on cardiac chambers, valves, great vessels, pericardial effusion, and key acoustic landmarks
+ * while omitting noisy exterior background regions (ribs/mediastinal fat) so the 2D image stays readable.
+ */
+export const IMAGE_ANATOMY_LABELS: Partial<Record<Structure, string>> = {
+  [Structure.LvCavity]: 'VI',
+  [Structure.LvWallSeptal]: 'Septo',
+  [Structure.LvWallLateral]: 'P. lat',
+  [Structure.LvWallAnterior]: 'P. ant',
+  [Structure.LvWallInferior]: 'P. inf',
+  [Structure.LvApex]: 'Ápex',
+  [Structure.RvCavity]: 'VD',
+  [Structure.RvWall]: 'Pared VD',
+  [Structure.LaCavity]: 'AI',
+  [Structure.RaCavity]: 'AD',
+  [Structure.MitralAnterior]: 'VM ant',
+  [Structure.MitralPosterior]: 'VM post',
+  [Structure.AorticValve]: 'VAo',
+  [Structure.TricuspidValve]: 'VT',
+  [Structure.PulmonaryValve]: 'VP',
+  [Structure.AorticRoot]: 'Ao',
+  [Structure.Lvot]: 'TSVI',
+  [Structure.Rvot]: 'TSVD',
+  [Structure.PapillaryMuscle]: 'MP',
+  [Structure.InteratrialSeptum]: 'TIA',
+  [Structure.Pericardium]: 'Pericardio',
+  [Structure.PericardialEffusion]: 'Derrame',
+  [Structure.DescendingAorta]: 'Ao desc',
+  [Structure.AscendingAorta]: 'Ao asc',
+  [Structure.AorticArch]: 'Arco Ao',
+  [Structure.Ivc]: 'VCI',
+  [Structure.Svc]: 'VCS',
+  [Structure.PulmonaryArtery]: 'AP',
+  [Structure.PulmonaryVein]: 'V. pulm',
+  [Structure.CoronarySinus]: 'SC',
+  [Structure.HepaticVein]: 'V. hep',
+  [Structure.Liver]: 'Hígado',
+  [Structure.Diaphragm]: 'Diafragma',
+  [Structure.ModeratorBand]: 'Banda mod.',
+  [Structure.LaAppendage]: 'Orejuela',
+};
+
+const LV_WALL_STRUCTURES = new Set<Structure>([
+  Structure.LvWallSeptal,
+  Structure.LvWallLateral,
+  Structure.LvWallAnterior,
+  Structure.LvWallInferior,
+  Structure.LvApex,
+]);
+
+const anatomyAnchors = new SegmentAnchors();
+
+/**
+ * Draws stabilized, collision-free anatomical structure pills directly onto the 2D ultrasound sector.
+ * Averages label anchors over one beat while the probe rests (matching CutMapView / SegmentAnchors)
+ * and suppresses LV wall labels whenever the 17/16-segment overlay is simultaneously active.
+ */
+export function drawAnatomyLabelsLayer(
+  ctx: CanvasRenderingContext2D,
+  hud: SimOutput,
+  st: SimStore,
+): void {
+  const m = hud.sector;
+  const p = hud.polar;
+  if (hud.structure.length !== p.lines * p.samples || m.width < 8 || m.height < 8) return;
+  const w = Math.round(m.width),
+    h = Math.round(m.height);
+  const key = sectorGeometryKey(hud, w, h);
+  const lut = getSharedSectorLut(hud, w, h, key);
+  const segOn = imageSegmentsOn(st);
+  const pr = hud.frozen && hud.acquisition ? hud.acquisition.probe : st.probe;
+  const layoutKey = `${key}|anat|${segOn ? 1 : 0}|${st.caseId}|${[pr.u, pr.v, pr.rotationDeg, pr.tiltDeg, pr.rockDeg, pr.pressure].map((v) => v.toFixed(3)).join(',')}`;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(m.x, m.y, m.width, m.height);
+  ctx.clip();
+  ctx.font = canvasFont(11, 'ui', 650);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const measure = (text: string) => ({ w: ctx.measureText(text).width + 12, h: 18 });
+  const labelOf = (id: Structure): string | undefined => {
+    if (segOn && LV_WALL_STRUCTURES.has(id)) return undefined;
+    return IMAGE_ANATOMY_LABELS[id];
+  };
+
+  if (anatomyAnchors.wants(layoutKey, hud.frameId)) {
+    const stats = computeStructureStats(lut, hud.structure, w);
+    const shown = new Set(anatomyAnchors.view().labels.map((l) => l.id));
+    const labels = placeLabels(
+      stats,
+      lut,
+      hud.structure,
+      w,
+      Math.max(120, 0.0022 * w * h),
+      measure,
+      shown,
+      labelOf,
+    );
+    anatomyAnchors.add(layoutKey, hud, labels, null);
+  }
+
+  const labelsShown = withoutOverlaps(anatomyAnchors.view().labels, measure);
+  const padX = 5;
+  const pillH = 16;
+  const r = 4;
+  for (const l of labelsShown) {
+    const tw = ctx.measureText(l.text).width;
+    const pw = tw + padX * 2;
+    const x = Math.max(m.x + pw / 2 + 4, Math.min(m.x + m.width - pw / 2 - 4, m.x + l.x));
+    const y = Math.max(m.y + pillH / 2 + 4, Math.min(m.y + m.height - pillH / 2 - 4, m.y + l.y));
+    const x0 = x - pw / 2;
+    const y0 = y - pillH / 2;
+    ctx.beginPath();
+    ctx.roundRect(x0, y0, pw, pillH, r);
+    ctx.fillStyle = 'rgba(8, 15, 28, 0.72)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(92, 200, 255, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#e6f4ff';
+    ctx.fillText(l.text, x, y + 0.5);
   }
   ctx.restore();
 }

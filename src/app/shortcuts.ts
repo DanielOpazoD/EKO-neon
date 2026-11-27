@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { minPointsToFinish } from '@/ui/display/measurementPreview';
 import { pendingSession } from '@/ui/display/pendingSession';
 import { captureCurrentStudyStill } from './studyCapture';
-import { useSimStore } from './store';
+import { nextClassModeUi, useSimStore } from './store';
 import { modePolicy } from './modePolicy';
 
 /**
@@ -21,6 +21,8 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: '[ / ]', action: 'Profundidad −/+ 1 cm' },
   { keys: '- / +', action: 'Ganancia −/+ 2 dB' },
   { keys: 'H', action: 'Mostrar/ocultar torso 3D' },
+  { keys: 'F', action: 'Modo clase / proyector (imagen maximizada y sala oscura)' },
+  { keys: 'L', action: 'Mostrar/ocultar etiquetas anatómicas 2D' },
   { keys: 'R', action: 'Modo revisión: marcar la imagen para un informe' },
   {
     keys: 'Supr / Retroceso',
@@ -270,6 +272,16 @@ export function useShortcuts(): void {
         case 'h':
         case 'H':
           if (!s.ui.minimal) s.setUi({ showTorso: !s.ui.showTorso });
+          break;
+        case 'f':
+        case 'F':
+          s.setUi(nextClassModeUi(s.ui));
+          break;
+        case 'l':
+        case 'L':
+          if (modePolicy(s.mode).hintsEnabled) {
+            s.setUi({ imageAnatomyLabels: !s.ui.imageAnatomyLabels });
+          }
           break;
         case 'k':
         case 'K':

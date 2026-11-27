@@ -36,6 +36,7 @@ const PERSISTED = {
   navLabels: isBool,
   navSegments: isBool,
   imageSegments: isBool,
+  imageAnatomyLabels: isBool,
   segmentsOpen: isBool,
   segmentModel: isSegmentModel,
   reviewFreezeOnMark: isBool,

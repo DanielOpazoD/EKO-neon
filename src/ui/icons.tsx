@@ -217,3 +217,45 @@ export function IconPrinter({ size }: { size?: number }) {
     </I>
   );
 }
+
+/** Projector screen: 1-click classroom / presentation mode (clean interface + dark room). */
+export function IconPresentation({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M3 4h18" />
+      <rect x="4.5" y="4" width="15" height="11" rx="1.5" />
+      <path d="M12 15v5M8.5 20h7" />
+    </I>
+  );
+}
+
+/** Speaker on: live Doppler audio enabled. */
+export function IconVolume({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M4.5 9.5h3.5L12.5 6v12L8 14.5H4.5z" />
+      <path d="M16 9a4.5 4.5 0 0 1 0 6" />
+      <path d="M18.6 6.8a7.8 7.8 0 0 1 0 10.4" />
+    </I>
+  );
+}
+
+/** Speaker muted: live Doppler audio off. */
+export function IconVolumeOff({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M4.5 9.5h3.5L12.5 6v12L8 14.5H4.5z" />
+      <path d="m16 9.5 4.5 5M20.5 9.5 16 14.5" />
+    </I>
+  );
+}
+
+/** Tag / anatomical callout icon: on-image 2D anatomy labels toggle. */
+export function IconAnatomyTag({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M4 12.5V5.5A1.5 1.5 0 0 1 5.5 4h7l7.2 7.2a1.6 1.6 0 0 1 0 2.3l-6.2 6.2a1.6 1.6 0 0 1-2.3 0L4 12.5Z" />
+      <circle cx="8.5" cy="8.5" r="1.1" fill="currentColor" stroke="none" />
+    </I>
+  );
+}
