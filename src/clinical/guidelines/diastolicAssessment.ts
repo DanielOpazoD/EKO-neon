@@ -21,6 +21,8 @@ export interface DiastolicInputs {
    * abnormality, LV hypertrophy or HCM. ASE takes such a ventricle straight to the filling-pressure algorithm.
    */
   myocardialDisease?: boolean;
+  /** Significant mitral stenosis excludes standard transmitral E/A, E/e′, and LAVI diastolic algorithms (ASE 2025). */
+  mitralStenosis?: boolean;
 }
 export type FillingPressureAssessment = 'elevated' | 'normal' | 'indeterminate' | 'not-assessed';
 
@@ -48,6 +50,16 @@ export function assessDiastolic(input: DiastolicInputs) {
     input.septalEPrimeCmps < cut.septal ||
     input.lateralEPrimeCmps < cut.lateral ||
     avgPrime < cut.average;
+  if (input.mitralStenosis === true) {
+    return {
+      dysfunctionPresent: false,
+      reducedRelaxation: reduced,
+      dysfunctionMarkers: [],
+      fillingPressure: 'not-assessed' as FillingPressureAssessment,
+      pressureEvidence: [],
+      referenceId: 'ase-diastolic-2025',
+    };
+  }
   const markers: string[] = [];
   if (ee > 14) markers.push('average-e-over-e-prime');
   if (valid(input.eOverA) && (input.eOverA <= 0.8 || input.eOverA >= 2))

@@ -189,7 +189,7 @@ export function inflowJet(
     out.vx += (sx / n) * mag;
     out.vy += (sy / n) * mag;
     out.vz += (sz / n) * mag;
-    out.dispersion = Math.max(out.dispersion, turbulence);
+    out.dispersion = Math.max(out.dispersion, Math.min(turbulence, 0.08));
     out.present = 1;
     return;
   }
@@ -220,7 +220,11 @@ export function inflowJet(
       decelShear = 0.03 * Math.sin(Math.PI * u);
     }
   }
-  out.dispersion = Math.max(out.dispersion, turbulence + decelShear + 0.05 * Math.min(1, rho / r));
+  // Post-stenotic turbulence blooms downstream of the leaflet tips while the proximal LA convergence
+  // and annular acceleration neck remain laminar (unchanged when turbulence <= 0.08).
+  const turbNow =
+    Math.min(turbulence, 0.08) + Math.max(0, turbulence - 0.08) * smoothstep(0.35, 0.95, zr);
+  out.dispersion = Math.max(out.dispersion, turbNow + decelShear + 0.05 * Math.min(1, rho / r));
   out.present = 1;
 }
 

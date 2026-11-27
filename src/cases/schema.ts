@@ -121,7 +121,7 @@ export const PhysiologySchema = z.object({
   tapseCm: z.number().min(0.3).max(3.5),
   ePeakMps: z.number().min(0.2).max(2.5), // mitral E
   aPeakMps: z.number().min(0).max(2), // mitral A (0 in AF)
-  decelerationTimeMs: z.number().min(80).max(450),
+  decelerationTimeMs: z.number().min(80).max(1200),
   ivrtMs: z.number().min(30).max(160),
   ePrimeSeptalCmps: z.number().min(2).max(20),
   ePrimeLateralCmps: z.number().min(2).max(25),
