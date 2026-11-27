@@ -10,7 +10,10 @@ import {
   sampleTissueVelocity,
   type FlowSample,
 } from '@/simulator/doppler/flow-primitives/flowField';
-import { accumulatePulsedSpectrum } from '@/simulator/doppler/spectral/pulsedIq';
+import {
+  accumulateContinuousWaveSpectrum,
+  accumulatePulsedSpectrum,
+} from '@/simulator/doppler/spectral/pulsedIq';
 import {
   depthLimitedPulsedAcquisition,
   rayleighBackscatterGain,
@@ -18,7 +21,6 @@ import {
   sliceHalfWidthCm,
 } from '@/simulator/doppler/spectral/scatteringModel';
 import {
-  accumulateSpectrum,
   presentSpectralColumn,
   SPECTRAL_BINS,
   type VelocitySample,
@@ -370,7 +372,15 @@ export function sampleSpectralColumn(
     if (timing) timing.spectrumPresentMs += performance.now() - tPres;
   } else {
     const tSynth = timing ? performance.now() : 0;
-    accumulateSpectrum(samples, inp.spectral, aliasing, column);
+    accumulateContinuousWaveSpectrum(
+      samples,
+      inp.spectral,
+      f0MHz,
+      ctx.caseDef.seed,
+      timeS,
+      column,
+      focusCm,
+    );
     if (timing) timing.spectrumSynthMs += performance.now() - tSynth;
     if (isCw && options?.onRawCw) {
       options.onRawCw(column, clickPoints, clickPowers, { x: dhx, y: dhy, z: dhz });

@@ -1,8 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SPEED_OF_SOUND_MPS } from '@/core/units';
-import { accumulatePulsedSpectrum, synthesizeIq, type IqTone } from './pulsedIq';
-import { DEFAULT_SPECTRAL, SPECTRAL_BINS, type VelocitySample } from './spectrum';
+import {
+  accumulateContinuousWaveSpectrum,
+  accumulatePulsedSpectrum,
+  continuousWavePacketTiming,
+  synthesizeIq,
+  type IqTone,
+} from './pulsedIq';
+import {
+  DEFAULT_SPECTRAL,
+  SPECTRAL_BINS,
+  spectralDefaultsFor,
+  spectralRange,
+  type VelocitySample,
+} from './spectrum';
 
 /** Direct reference implementation using per-sample Math.exp to verify outward Gaussian recurrence parity. */
 function referenceSynthesizeIq(
@@ -153,4 +165,125 @@ test('accumulatePulsedSpectrum tone pool has zero leakage when sample count shri
   for (let b = 0; b < SPECTRAL_BINS; b++) {
     assert.equal(outAfterMany[b], outClean[b], `Bin ${b} leaked stale pool tone`);
   }
+});
+
+test('accumulateContinuousWaveSpectrum runs unaliased baseband I/Q + FFT with per-bin wall filter and zero opposite-channel wrap', () => {
+  const sCw = spectralDefaultsFor('cw'); // ±6 m/s, WF 0.2 m/s
+  const timing = continuousWavePacketTiming(6.3, 2.5, 256);
+  assert.ok(timing.fsHz > 40_000, `CW baseband fsHz should cover ±6.3 m/s unaliased, got ${timing.fsHz}`);
+
+  // 1. Turbulent high-velocity jet (-4.5 m/s) preserves outer vena contracta rim, fills toward baseline,
+  //    keeps stopband strictly zero, and never bleeds into the positive velocity channel
+  for (const [wf, baselineShiftMps] of [
+    [0.2, 0],
+    [0.5, 0],
+    [0.5, -2.0],
+  ] as const) {
+    const s = { ...sCw, wallFilterMps: wf, baselineShiftMps };
+    const out = new Float32Array(SPECTRAL_BINS);
+    accumulateContinuousWaveSpectrum(
+      [{ v: -4.5, weight: 1, dispersion: 0.5, vPerp: 0.2, depthCm: 8 }],
+      s,
+      2.5,
+      101,
+      0.22,
+      out,
+      9,
+    );
+    const { vMin, vMax } = spectralRange(s);
+    const span = vMax - vMin;
+    let peak = 0;
+    let peakV = 0;
+    let posEnergy = 0;
+    let negEnergy = 0;
+    let stopbandMax = 0;
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      const val = out[b]!;
+      if (val > peak) {
+        peak = val;
+        peakV = vBin;
+      }
+      if (vBin > wf) posEnergy += val;
+      if (vBin < -wf) negEnergy += val;
+      if (Math.abs(vBin) < 0.8 * wf) stopbandMax = Math.max(stopbandMax, val);
+    }
+    assert.equal(stopbandMax, 0, `CW I/Q FFT leaked ${stopbandMax} into |v| < 0.8*WF stopband`);
+    assert.ok(
+      Math.abs(peakV - -4.5) < 0.25 && peak > 0.05,
+      `CW I/Q FFT should preserve vena contracta peak near -4.5 m/s, got ${peakV.toFixed(2)} m/s`,
+    );
+    assert.ok(
+      posEnergy / Math.max(1e-12, negEnergy) < 0.01,
+      `CW I/Q FFT turbulent tail bled across baseline: ratio=${(posEnergy / negEnergy).toFixed(4)}`,
+    );
+  }
+
+  // 2. Zoomed CW scale (±2.0 m/s) with fast +4.5 m/s jet must leave the display unaliased (NOT wrap onto negative side)
+  const sZoom = { ...sCw, scaleMps: 2.0, baselineShiftMps: 0 };
+  const zoomOut = new Float32Array(SPECTRAL_BINS);
+  accumulateContinuousWaveSpectrum(
+    [{ v: 4.5, weight: 1, dispersion: 0.02, vPerp: 0.05, depthCm: 8 }],
+    sZoom,
+    2.5,
+    101,
+    0.22,
+    zoomOut,
+    9,
+  );
+  const zoomTotal = zoomOut.reduce((acc, v) => acc + v, 0);
+  assert.ok(zoomTotal < 1e-4, `Fast +4.5 m/s tone aliased onto zoomed ±2.0 m/s CW scale (sum=${zoomTotal})`);
+
+  // 3. Invert flips displayed velocity polarity cleanly
+  const invOut = new Float32Array(SPECTRAL_BINS);
+  accumulateContinuousWaveSpectrum(
+    [{ v: -3.2, weight: 1, dispersion: 0.03, vPerp: 0, depthCm: 8 }],
+    { ...sCw, invert: true },
+    2.5,
+    101,
+    0.22,
+    invOut,
+    9,
+  );
+  let invPeakBin = 0;
+  for (let b = 1; b < SPECTRAL_BINS; b++) if (invOut[b]! > invOut[invPeakBin]!) invPeakBin = b;
+  assert.ok(invPeakBin < SPECTRAL_BINS / 2, `Inverted -3.2 m/s CW flow should appear in positive upper half, got bin ${invPeakBin}`);
+
+  // 4. Lateral cross-beam velocity widens CW I/Q spectrum via aperture + lateral transit broadening
+  const axialOut = new Float32Array(SPECTRAL_BINS);
+  const obliqueOut = new Float32Array(SPECTRAL_BINS);
+  accumulateContinuousWaveSpectrum(
+    [{ v: 2.5, weight: 1, dispersion: 0.01, vPerp: 0, depthCm: 6 }],
+    sCw,
+    2.5,
+    101,
+    0.22,
+    axialOut,
+    9,
+  );
+  accumulateContinuousWaveSpectrum(
+    [{ v: 2.5, weight: 1, dispersion: 0.01, vPerp: 3.5, depthCm: 6 }],
+    sCw,
+    2.5,
+    101,
+    0.22,
+    obliqueOut,
+    9,
+  );
+  const widthBins = (arr: Float32Array) => {
+    let sum = 0;
+    let mean = 0;
+    for (let b = 0; b < arr.length; b++) {
+      sum += arr[b]!;
+      mean += b * arr[b]!;
+    }
+    mean /= Math.max(1e-12, sum);
+    let v = 0;
+    for (let b = 0; b < arr.length; b++) v += arr[b]! * (b - mean) ** 2;
+    return Math.sqrt(v / Math.max(1e-12, sum));
+  };
+  assert.ok(
+    widthBins(obliqueOut) > widthBins(axialOut) * 1.4,
+    `Oblique CW scatterer (${widthBins(obliqueOut).toFixed(2)} bins) should broaden over axial (${widthBins(axialOut).toFixed(2)} bins)`,
+  );
 });
