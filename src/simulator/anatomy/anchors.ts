@@ -305,7 +305,7 @@ export function anchors(m: HeartModel): Anchors {
     laReservoir: LA_RESERVOIR_MIN + 0.1 * Math.min(1, Math.max(0, (a.la.volumeMl - 60) / 60)),
     // the right atrium keeps the radial fraction of decision 149: the left one's changed with its fixed posterior wall
     // (decision 330), and shared, it shrank the right atrium and opened a seam between it and its appendage
-    raReservoir: 0.84 + 0.1 * Math.min(1, Math.max(0, (a.la.volumeMl - 60) / 60)),
+    raReservoir: 0.84 + 0.1 * Math.min(1, Math.max(0, (a.ra.volumeMl - 60) / 60)),
     laPostN,
     laPostD,
     iasX,

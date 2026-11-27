@@ -139,7 +139,7 @@ export function buildFlowParams(
     avR: A.avR,
     avAreaCm2: c.hemodynamics.avEffectiveAreaCm2,
     mvAreaCm2: tables.mvEffectiveAreaCm2,
-    tvAreaCm2: tables.mvEffectiveAreaCm2 * 1.35,
+    tvAreaCm2: tables.tvEffectiveAreaCm2,
     rvotAreaCm2: Math.PI * 1.1 * 1.1,
     trVmaxMps: tr,
     turbulence,
