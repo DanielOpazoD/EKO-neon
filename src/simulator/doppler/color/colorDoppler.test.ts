@@ -1323,3 +1323,68 @@ test('pulmonary trunk, RPA, and LPA carry continuous mass-conserving systolic fl
     `Expected RPA+LPA flux (${qBranches.toFixed(1)} mL/s) to conserve Q_pv (${qpv.toFixed(1)} mL/s)`,
   );
 });
+
+test('diastolic pulmonary regurgitation reflects PA pressure gradient and stays contained to RVOT/PA', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const normCase = loadCaseById('normal-excellent');
+  const normModels = buildCaseModels(normCase, REST_PATIENT);
+  const normFlow = buildFlowParams(normCase, normModels.heart, normModels.tables, normModels.thorax);
+
+  const phCase = loadCaseById('pulmonary-hypertension-rv');
+  const phModels = buildCaseModels(phCase, REST_PATIENT);
+  const phFlow = buildFlowParams(phCase, phModels.heart, phModels.tables, phModels.thorax);
+  const phA = heartAnchors(phModels.heart);
+
+  // Early diastole (right after PV closure): PH should show brisk high-velocity PR in RVOT
+  const phDia = (phModels.tables.timings.pulmonaryCloseS + 0.06) / phModels.tables.rrS;
+  const phHp = computeHeartPose(phModels.heart, cycleStateAt(phModels.tables, phDia, phFlow.flowPeaks));
+  const rx = phA.rvotM.x - phA.rvotB.x;
+  const ry = phA.rvotM.y - phA.rvotB.y;
+  const rz = phA.rvotM.z - phA.rvotB.z;
+  const rLen = Math.hypot(rx, ry, rz);
+  // 0.8 cm retrograde into distal RVOT beneath the pulmonary valve
+  const prX = phA.rvotB.x + (rx / rLen) * 0.8;
+  const prY = phA.rvotB.y + (ry / rLen) * 0.8;
+  const prZ = phA.rvotB.z + phHp.pvZ + (rz / rLen) * 0.8;
+
+  sampleFlow(phFlow, phModels.tables, phHp, phDia, prX, prY, prZ, fs, Structure.Rvot);
+  const vPh = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(
+    fs.present === 1 && vPh > 2.2 && vPh < 3.2,
+    `Expected brisk PH early-diastolic PR velocity (2.2–3.2 m/s), got ${vPh.toFixed(2)} m/s`,
+  );
+  assert.ok(fs.dispersion > 0.3, `Expected turbulent mosaic in PH PR jet, got disp=${fs.dispersion.toFixed(2)}`);
+
+  // Retrograde PR jet must not bleed into AorticRoot or LaCavity
+  sampleFlow(phFlow, phModels.tables, phHp, phDia, prX, prY, prZ, fs, Structure.AorticRoot);
+  assert.equal(fs.present, 0, 'PR jet must never bleed into AorticRoot');
+
+  // PA-side proximal convergence (0.45 cm into pulmonary root) in PH
+  const pisaX = phA.rvotB.x - (rx / rLen) * 0.45;
+  const pisaY = phA.rvotB.y - (ry / rLen) * 0.45;
+  const pisaZ = phA.rvotB.z + phHp.pvZ - (rz / rLen) * 0.45;
+  sampleFlow(phFlow, phModels.tables, phHp, phDia, pisaX, pisaY, pisaZ, fs, Structure.PulmonaryArtery);
+  assert.ok(
+    fs.present === 1 && Math.hypot(fs.vx, fs.vy, fs.vz) > 0.2,
+    `Expected PA-side PR proximal convergence in PH, got ${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)} m/s`,
+  );
+
+  // Normal heart: trace PR is much shorter & lower velocity than PH (and absent 2.0 cm deep in RVOT)
+  const normA = heartAnchors(normModels.heart);
+  const normDia = (normModels.tables.timings.pulmonaryCloseS + 0.06) / normModels.tables.rrS;
+  const normHp = computeHeartPose(normModels.heart, cycleStateAt(normModels.tables, normDia, normFlow.flowPeaks));
+  const nrx = normA.rvotM.x - normA.rvotB.x, nry = normA.rvotM.y - normA.rvotB.y, nrz = normA.rvotM.z - normA.rvotB.z;
+  const nrL = Math.hypot(nrx, nry, nrz);
+  sampleFlow(
+    normFlow,
+    normModels.tables,
+    normHp,
+    normDia,
+    normA.rvotB.x + (nrx / nrL) * 2.0,
+    normA.rvotB.y + (nry / nrL) * 2.0,
+    normA.rvotB.z + normHp.pvZ + (nrz / nrL) * 2.0,
+    fs,
+    Structure.Rvot,
+  );
+  assert.equal(fs.present, 0, 'Normal physiological trace PR must not reach 2.0 cm into RVOT');
+});

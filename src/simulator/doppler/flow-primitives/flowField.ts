@@ -1,5 +1,9 @@
 import { sampleAorticNetwork } from './aorticNetwork';
-import { samplePulmonarySystolicFlow } from './pulmonaryFlow';
+import {
+  pulmonaryRegurgitationVelocityMps,
+  samplePulmonaryRegurgitation,
+  samplePulmonarySystolicFlow,
+} from './pulmonaryFlow';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import {
   caseLvotObstruction,
@@ -57,6 +61,7 @@ export {
   flowPropagationCmps,
   lvotNarrowing,
   prepareClutterContext,
+  pulmonaryRegurgitationVelocityMps,
   pulmonaryVeinPeaks,
   RA_VESTIBULE_CM,
   sampleClutterAxialVelocity,
@@ -87,6 +92,8 @@ export interface FlowFieldParams {
   tvAreaCm2: number;
   rvotAreaCm2: number;
   trVmaxMps: number | null;
+  paspMmHg: number;
+  rapMmHg: number;
   turbulence: Record<string, number>;
   enabled: Record<string, boolean>;
   avAxis: { x: number; y: number; z: number };
@@ -144,6 +151,8 @@ export function buildFlowParams(
     tvAreaCm2: tables.tvEffectiveAreaCm2,
     rvotAreaCm2: Math.PI * 1.1 * 1.1,
     trVmaxMps: tr,
+    paspMmHg: c.hemodynamics.paspMmHg,
+    rapMmHg: c.hemodynamics.rapMmHg,
     turbulence,
     enabled,
     avAxis: A.avAxis,
@@ -520,9 +529,10 @@ export function sampleFlow(
       out,
     );
 
-  // ---- RVOT / pulmonary trunk & branches (mass-conserving 6-segment tree) ----
+  // ---- RVOT / pulmonary trunk & branches (systolic ejection + diastolic PR) ----
   if ((mask & FLOW_MASK_RVOT_PA) !== 0 && p.enabled['rvot'] !== false) {
     samplePulmonarySystolicFlow(p, tables, hp, phase, x, y, z, out);
+    samplePulmonaryRegurgitation(p, tables, hp, phase, x, y, z, out, structure);
   }
 
   // ---- TR jet (systole) ----
