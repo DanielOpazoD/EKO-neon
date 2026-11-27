@@ -1529,3 +1529,45 @@ test('SVC and coronary sinus carry physiological antegrade venous return into th
   const phSvcDot = fs.vx * (phA.svcA.x - phA.svcM.x) + fs.vy * (phA.svcA.y - phA.svcM.y) + fs.vz * (phA.svcA.z - phA.svcM.z);
   assert.ok(fs.present === 1 && phSvcDot < 0, 'Expected systolic SVC flow reversal in severe TR');
 });
+
+test('TR PISA obeys 3D radial hemispheric continuity Q = 2·π·r²·v and jet curves gently toward IAS', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const phCase = loadCaseById('pulmonary-hypertension-rv');
+  const models = buildCaseModels(phCase, REST_PATIENT);
+  const flow = buildFlowParams(phCase, models.heart, models.tables, models.thorax);
+  const phase = 0.22;
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phase, flow.flowPeaks));
+  const ox = flow.tvCenter.x;
+  const oy = flow.tvCenter.y;
+  const oz = flow.tvCenter.z + hp.tvZ + 0.3;
+  const vmax = sampleTable(models.tables.trVelocityMps, phase);
+  const qTr = vmax * 100 * flow.trEroCm2!;
+
+  // 1. Off-axis RV-side PISA point (d = 0.70 cm, 45 deg off-axis in x-z): must carry radial vx toward orifice!
+  const d = 0.7;
+  const off = d / Math.SQRT2;
+  sampleFlow(flow, models.tables, hp, phase, ox + off, oy, oz + off, fs, Structure.RvCavity);
+  const vMag = Math.hypot(fs.vx, fs.vy, fs.vz);
+  const expectedV = qTr / (2 * Math.PI * d * d * 100);
+  assert.ok(
+    fs.present === 1 && fs.vx < -0.15 && fs.vz < -0.15,
+    `Expected 3D radial TR PISA pointing toward orifice (vx<0, vz<0), got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
+  );
+  assert.ok(
+    Math.abs(vMag - expectedV) / expectedV < 0.12,
+    `Expected TR PISA speed (${vMag.toFixed(2)} m/s) to conserve Q/(2πd²) (${expectedV.toFixed(2)} m/s) within 12%`,
+  );
+  assert.ok(fs.dispersion <= 0.1, `TR PISA convergence must stay laminar, got disp=${fs.dispersion.toFixed(2)}`);
+
+  // 2. Orifice vena contracta keeps exact full vmax along -z; distal RA jet curves gently medially (+x toward IAS)
+  sampleFlow(flow, models.tables, hp, phase, ox, oy, oz - 0.2, fs, Structure.RaCavity);
+  assert.ok(
+    Math.abs(-fs.vz - vmax) / vmax < 0.04,
+    `Expected exact TR vena contracta velocity (${(-fs.vz).toFixed(2)} vs ${vmax.toFixed(2)} m/s)`,
+  );
+  sampleFlow(flow, models.tables, hp, phase, ox + 0.25, oy, oz - 2.2, fs, Structure.RaCavity);
+  assert.ok(
+    fs.present === 1 && fs.vx > 0.15 && fs.vz < -1.0 && fs.dispersion > 0.35,
+    `Expected distal TR jet curving gently toward IAS (+x, -z) with turbulence, got (${fs.vx.toFixed(2)}, ${fs.vz.toFixed(2)}, d=${fs.dispersion.toFixed(2)})`,
+  );
+});
