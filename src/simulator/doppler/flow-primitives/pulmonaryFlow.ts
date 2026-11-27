@@ -1,10 +1,20 @@
 import { heartAnchors, type HeartPose } from '@/simulator/anatomy/heartModel';
 import { rvOutflowScale } from '@/simulator/anatomy/classify/rightVentricle';
+import { Structure } from '@/simulator/anatomy/tissue';
+import { meanPulmonaryPressureMmHg } from '@/simulator/cardiac-cycle/cycleState';
 import { sampleTable, type BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { smoothstep } from '@/core/vec3';
 import { aorticVelocityProfile } from './aorticNetwork';
 import type { FlowFieldParams } from './flowField';
-import type { FlowSample } from './jetProfiles';
+import {
+  convergenceWeight,
+  fadeOut,
+  FAST_JET_SHEAR,
+  freeJetCentreline,
+  jetProfile,
+  jetReach,
+  type FlowSample,
+} from './jetProfiles';
 
 /** Upstream convergence distance (cm) before the RVOT infundibular inlet (`rvotA`). */
 const RVOT_INLET_FADE_CM = 1.2;
@@ -278,5 +288,131 @@ export function samplePulmonarySystolicFlow(
     out.vz += ACC.vzSum * invW;
     out.dispersion = Math.max(out.dispersion, ACC.dispMax);
     out.present = 1;
+  }
+}
+
+/**
+ * Instantaneous diastolic pulmonary regurgitation (PR) jet velocity (m/s) derived from pulmonary
+ * arterial mean/diastolic pressure (`mPAP = 0.61·PASP + 2`, `PADP = RAP + 0.4·(PASP − RAP)`) minus
+ * right atrial / RV diastolic pressure via the Bernoulli / Masuyama relation.
+ * Strictly zero during RV systolic ejection (`pulmonaryOpenS .. pulmonaryCloseS`).
+ */
+export function pulmonaryRegurgitationVelocityMps(
+  paspMmHg: number,
+  rapMmHg: number,
+  tables: BeatTables,
+  phase: number,
+): number {
+  const tm = tables.timings;
+  const rr = tables.rrS;
+  const t = (((phase % 1) + 1) % 1) * rr;
+  const dtSinceClose = (((t - tm.pulmonaryCloseS) % rr) + rr) % rr;
+  const diaDur = (((tm.pulmonaryOpenS - tm.pulmonaryCloseS) % rr) + rr) % rr;
+  if (diaDur <= 0.04 || dtSinceClose >= diaDur) return 0;
+
+  const mPap = meanPulmonaryPressureMmHg(paspMmHg);
+  const padp = rapMmHg + Math.max(0, paspMmHg - rapMmHg) * 0.4;
+  const vEarly = Math.sqrt(Math.max(0, (mPap - rapMmHg) / 4));
+  const vEnd = Math.sqrt(Math.max(0, (padp - rapMmHg) / 4));
+  if (vEarly <= 0.05) return 0;
+
+  const u = dtSinceClose / diaDur;
+  const phSev = smoothstep(32, 65, paspMmHg);
+  // Early-to-end diastolic pressure decay; normal physiologic trace PR tapers faster in late diastole
+  const decay = Math.exp(-u / (0.28 + 0.22 * phSev));
+  const vRaw = vEnd + (vEarly - vEnd) * decay;
+  const traceTaper = phSev >= 0.5 ? 1 : (0.55 + 0.45 * Math.exp(-u / 0.35)) * (0.72 + 0.28 * phSev);
+  const envelope =
+    smoothstep(0, 0.024, dtSinceClose) * fadeOut(dtSinceClose, diaDur - 0.022, diaDur);
+  return vRaw * traceTaper * envelope;
+}
+
+/**
+ * Diastolic pulmonary regurgitation (PR) jet into the subpulmonary RVOT (`rvotB → rvotM`) with
+ * PA-side hemispheric proximal convergence when pulmonary hypertension is present.
+ */
+export function samplePulmonaryRegurgitation(
+  p: FlowFieldParams,
+  tables: BeatTables,
+  hp: HeartPose,
+  phase: number,
+  x: number,
+  y: number,
+  z: number,
+  out: FlowSample,
+  structure?: number,
+): void {
+  if (p.enabled['rvot'] === false) return;
+  const allowJet =
+    structure === undefined || structure === Structure.Rvot || structure === Structure.RvCavity;
+  const allowPisa = structure === undefined || structure === Structure.PulmonaryArtery;
+  if (!allowJet && !allowPisa) return;
+
+  const vPr = pulmonaryRegurgitationVelocityMps(p.paspMmHg, p.rapMmHg, tables, phase);
+  if (vPr < 0.08) return;
+
+  const A = heartAnchors(p.heart);
+  const ox = A.rvotB.x;
+  const oy = A.rvotB.y;
+  const oz = A.rvotB.z + hp.pvZ;
+
+  // Retrograde axis pointing back from the pulmonary valve down the distal RVOT infundibulum
+  const rx = A.rvotM.x - A.rvotB.x;
+  const ry = A.rvotM.y - A.rvotB.y;
+  const rz = A.rvotM.z - A.rvotB.z;
+  const rLen = Math.hypot(rx, ry, rz) || 1;
+  const ux = rx / rLen;
+  const uy = ry / rLen;
+  const uz = rz / rLen;
+
+  const dx = x - ox;
+  const dy = y - oy;
+  const dz = z - oz;
+  const along = dx * ux + dy * uy + dz * uz;
+  const phSev = smoothstep(32, 65, p.paspMmHg);
+  const maxReach = 1.4 + 2.0 * phSev;
+  if (along < -1.5 || along > maxReach) return;
+
+  const qx = dx - ux * along;
+  const qy = dy - uy * along;
+  const qz = dz - uz * along;
+  const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
+  const r0 = 0.11 + 0.16 * phSev;
+
+  if (along >= 0 && allowJet) {
+    const spreadSlope = 0.17 + 0.1 * phSev;
+    const Rj = r0 + along * spreadSlope;
+    const rHalf = 0.84 * Rj;
+    if (rho < jetReach(rHalf, along, FAST_JET_SHEAR)) {
+      const prof = jetProfile(rho, rHalf, along, FAST_JET_SHEAR);
+      const fadeStart = 0.7 + 1.7 * phSev;
+      const decay = freeJetCentreline(along, 2 * r0) * fadeOut(along, fadeStart, maxReach);
+      const v = vPr * prof * decay;
+      if (v > 0.02) {
+        out.vx += ux * v;
+        out.vy += uy * v;
+        out.vz += uz * v;
+        out.dispersion = Math.max(
+          out.dispersion,
+          0.16 + 0.22 * phSev + (0.08 + 0.12 * phSev) * Math.min(1, rho / Math.max(0.08, Rj)),
+        );
+        out.present = 1;
+      }
+    }
+  } else if (along < 0 && allowPisa && phSev > 0.15) {
+    const d = Math.hypot(dx, dy, dz);
+    if (d > 0.08 && d < 1.45) {
+      const conv =
+        Math.min(vPr * 0.55, (vPr * r0 * r0) / (2 * d * d)) *
+        fadeOut(d, 0.8, 1.45) *
+        convergenceWeight(rho, -along, r0, 0.15, 0.42);
+      if (conv > 0.03) {
+        out.vx += (-dx / d) * conv;
+        out.vy += (-dy / d) * conv;
+        out.vz += (-dz / d) * conv;
+        out.dispersion = Math.max(out.dispersion, 0.08);
+        out.present = 1;
+      }
+    }
   }
 }
