@@ -230,12 +230,32 @@ export function CutMapView() {
     const unsubHover = useSegmentHover.subscribe(schedule);
     const unsubStructHover = useStructureHover.subscribe(schedule);
     const resize = () => {
-      cssW = el.clientWidth || 0;
-      cssH = el.clientHeight || 0;
+      const nextCssW = el.clientWidth || 0;
+      const nextCssH = el.clientHeight || 0;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
-      canvas.width = Math.max(1, Math.round(cssW * dpr));
-      canvas.height = Math.max(1, Math.round(cssH * dpr));
-      schedule();
+      const nextW = Math.max(1, Math.round(nextCssW * dpr));
+      const nextH = Math.max(1, Math.round(nextCssH * dpr));
+      if (
+        nextCssW === cssW &&
+        nextCssH === cssH &&
+        canvas.width === nextW &&
+        canvas.height === nextH
+      ) {
+        return;
+      }
+      cssW = nextCssW;
+      cssH = nextCssH;
+      // Only mutate canvas backing-store dimensions when they actually changed, and repaint immediately
+      // so ResizeObserver callbacks never flash Corte ecográfico black between animation frames.
+      if (canvas.width !== nextW || canvas.height !== nextH) {
+        canvas.width = nextW;
+        canvas.height = nextH;
+      }
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      draw();
     };
     const ro = new ResizeObserver(resize);
     ro.observe(el);

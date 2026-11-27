@@ -186,9 +186,15 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
     if (get().mode === 'exam') return;
     // from now on this view's score is the preset's, not the learner's (decision 174). The opening jump is not a preset
     // the learner used: it holds its view back only until the learner loses it (`openingView`), or free practice, which
-    // makes the jump on every case it opens, left the first view of the curriculum out of reach for good
-    if (!opts?.instant && !get().presetViews.includes(viewId))
-      set((s) => ({ presetViews: [...s.presetViews, viewId] }));
+    // makes the jump on every case it opens, left the first view of the curriculum out of reach for good.
+    // Recording targetViewId synchronously also prevents an in-flight caseReady -> openOnStartView() from overriding
+    // a preset view the learner just clicked immediately after switching cases.
+    if (!opts?.instant) {
+      set((s) => ({
+        targetViewId: viewId,
+        ...(!s.presetViews.includes(viewId) ? { presetViews: [...s.presetViews, viewId] } : {}),
+      }));
+    }
     const token = nextPresetToken();
     const begin = (to: ProbeControl) =>
       set((s) => {

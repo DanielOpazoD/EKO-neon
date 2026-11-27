@@ -279,9 +279,11 @@
     margin: 0;
   }
   .topbar select {
-    flex: 1 1 80px;
+    flex: 1 1 110px;
     min-width: 0;
-    max-width: 175px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .modebar {
     order: 1;
