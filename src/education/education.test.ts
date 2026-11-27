@@ -257,9 +257,22 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     assert.equal(truthFor('mr-vena-contracta', normTruth), null);
     assert.equal(truthFor('ar-vmax', normTruth), null);
 
-    // 5. Derived MR peak gradient (4 * Vmax^2)
+    // 5. Derived MR peak gradient, PISA EROA/RVol, MVA by PHT, and PV S/D ratio
+    const baseMeas = {
+      createdAt: '2026-01-01T00:00:00Z',
+      frameId: 1,
+      phase: 0.2,
+      timeS: 0.2,
+      sourceViewId: 'a4c',
+      viewScore: 92,
+      imageQualityScore: 90,
+      userAssisted: false,
+      referenceGuidelineIds: ['ase-scmr-regurgitation-2017'],
+      geometry: [],
+    };
     const derived = deriveCalculations([
       {
+        ...baseMeas,
         id: 'm-mr',
         measurementId: 'mr-vmax',
         kind: 'velocity',
@@ -267,20 +280,80 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
         value: 5.0,
         units: 'm/s',
         modality: 'cw',
-        createdAt: '2026-01-01T00:00:00Z',
-        frameId: 1,
-        phase: 0.2,
-        timeS: 0.2,
-        sourceViewId: 'a4c',
-        viewScore: 92,
-        imageQualityScore: 90,
-        userAssisted: false,
-        referenceGuidelineIds: ['ase-scmr-regurgitation-2017'],
-        geometry: [],
+      },
+      {
+        ...baseMeas,
+        id: 'm-mr-vti',
+        measurementId: 'mr-vti',
+        kind: 'vti',
+        label: 'VTI IM',
+        value: 140,
+        units: 'cm',
+        modality: 'cw',
+      },
+      {
+        ...baseMeas,
+        id: 'm-pisa',
+        measurementId: 'mr-pisa-radius',
+        kind: 'linear',
+        label: 'PISA IM',
+        value: 0.9,
+        units: 'cm',
+        modality: 'color',
+        derived: { aliasingVelocityMps: 0.4 },
+      },
+      {
+        ...baseMeas,
+        id: 'm-pht',
+        measurementId: 'mitral-pht',
+        kind: 'time',
+        label: 'PHT mitral',
+        value: 200,
+        units: 'ms',
+        modality: 'cw',
+      },
+      {
+        ...baseMeas,
+        id: 'm-pvs',
+        measurementId: 'pv-s',
+        kind: 'velocity',
+        label: 'VP S',
+        value: 0.6,
+        units: 'm/s',
+        modality: 'pw',
+      },
+      {
+        ...baseMeas,
+        id: 'm-pvd',
+        measurementId: 'pv-d',
+        kind: 'velocity',
+        label: 'VP D',
+        value: 0.4,
+        units: 'm/s',
+        modality: 'pw',
       },
     ]);
     const mrGrad = derived.find((d) => d.id === 'mr-peak-gradient');
     assert.ok(mrGrad && mrGrad.value === '100 mmHg', `Expected 100 mmHg MR gradient, got ${mrGrad?.value}`);
+    const mrEroa = derived.find((d) => d.id === 'mr-eroa-pisa');
+    // 2 * pi * 0.9^2 * 40 / 500 = 0.407 cm² -> 0.41 cm²
+    assert.ok(mrEroa && mrEroa.value === '0.41 cm²', `Expected 0.41 cm² PISA EROA, got ${mrEroa?.value}`);
+    const mrRvol = derived.find((d) => d.id === 'mr-rvol-pisa');
+    // 0.40715 * 140 = 57.0 mL
+    assert.ok(mrRvol && mrRvol.value === '57 mL', `Expected 57 mL PISA RVol, got ${mrRvol?.value}`);
+    const mva = derived.find((d) => d.id === 'mva-pht');
+    assert.ok(mva && mva.value === '1.10 cm²', `Expected 1.10 cm² MVA, got ${mva?.value}`);
+    const pvSd = derived.find((d) => d.id === 'pv-sd-ratio');
+    assert.ok(pvSd && pvSd.value === '1.50', `Expected 1.50 PV S/D ratio, got ${pvSd?.value}`);
+
+    // Truth resolution for new protocol specs
+    const mrPisaT = truthFor('mr-pisa-radius', mrTruth);
+    assert.ok(mrPisaT && mrPisaT.value > 0.7 && mrPisaT.value < 1.3, `Expected MVP PISA@40 in (0.7, 1.3) cm, got ${mrPisaT?.value}`);
+    const pvST = truthFor('pv-s', normTruth);
+    const pvDT = truthFor('pv-d', normTruth);
+    assert.ok(pvST && pvST.value > 0.3 && pvDT && pvDT.value > 0.25);
+    const mitralPhtT = truthFor('mitral-pht', normTruth);
+    assert.ok(mitralPhtT && mitralPhtT.value > 40 && mitralPhtT.value < 90);
 
     // 6. Non-intrusive subcostal posture hint appears only for subcostal views outside supine-subcostal
     assert.ok(subcostalPostureHint('subcostal-ivc', 'plax', 'left-lateral')?.includes('Supino (subcostal)'));

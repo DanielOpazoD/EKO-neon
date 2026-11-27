@@ -41,6 +41,26 @@ export function stripVelocityAtY(
   return strip.topValue + ((y - strip.y) / strip.height) * (strip.bottomValue - strip.topValue);
 }
 
+/** Hatle linear-slope conversion factor from deceleration time to pressure half-time (1 − 1/√2 ≈ 0.29). */
+export const PHT_FROM_DT_FACTOR = 0.29;
+
+/** Pressure half-time (ms) derived from linear Doppler deceleration time (ms): PHT = 0.29 × DT. */
+export function pressureHalfTimeFromDtMs(dtMs: number): number {
+  return dtMs * PHT_FROM_DT_FACTOR;
+}
+
+/** Whether a protocol measurement id represents a pressure half-time (PHT) rather than a full deceleration time. */
+export function isPhtMeasurementId(id: string | null | undefined): boolean {
+  return id === 'ar-pht' || id === 'mitral-pht';
+}
+
+/** Effective Color PISA aliasing velocity (m/s) toward the shifted baseline edge: |v_N| − |baselineShift|. */
+export function colorPisaAliasingVelocityMps(
+  color: { scaleMps: number; baselineShiftMps: number },
+): number {
+  return Math.max(0.05, color.scaleMps - Math.abs(color.baselineShiftMps));
+}
+
 /**
  * Deceleration time from peak click `a` to slope click `b`, extrapolated linearly to the zero baseline.
  * Returns null if `b` is not strictly later and lower in speed than `a`.
@@ -196,7 +216,13 @@ export function handleMeasurementToolClick(
   } else pend.captureSector = undefined;
   const spec = specFor(st.activeMeasurementId);
   const acquiredMode = hud.acquisition?.modality ?? st.modality;
-  const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+  // Preserve 'color' for Color-specific protocol specs (vena contracta, PISA); collapse to '2d' for 2D/free measurements.
+  const modality =
+    acquiredMode === 'color' && spec?.modalities.includes('color')
+      ? 'color'
+      : acquiredMode === 'color'
+        ? '2d'
+        : acquiredMode;
   const redraw = () => {
     redrawOverlay();
     useHudStore.getState().setHud({ ...hud });
@@ -235,7 +261,7 @@ export function handleMeasurementToolClick(
       technique: evaluateCapture(
         spec,
         hud,
-        modality,
+        acquiredMode,
         hud.acquisition?.phaseMarks ?? st.phaseMarks,
         extras,
       ),
@@ -261,6 +287,11 @@ export function handleMeasurementToolClick(
     if (pend.points.length === 2) {
       const [a, b] = pend.points as [{ x: number; y: number }, { x: number; y: number }];
       const cm = computeLinearCm(a, b, m.pxPerCm);
+      const colorAcq = hud.acquisition?.color ?? st.color;
+      const derived =
+        spec?.id === 'mr-pisa-radius'
+          ? { aliasingVelocityMps: colorPisaAliasingVelocityMps(colorAcq) }
+          : undefined;
       commit(
         {
           kind: 'linear',
@@ -269,6 +300,7 @@ export function handleMeasurementToolClick(
           units: 'cm',
           modality,
           geometry: [a, b],
+          ...(derived ? { derived } : {}),
         },
         { segment: [a, b] },
       );
@@ -316,14 +348,15 @@ export function handleMeasurementToolClick(
       const [a, b] = pend.points as [{ x: number; y: number }, { x: number; y: number }];
       const dt = computeDecelerationTime(a, b, strip);
       if (dt) {
+        const isPht = isPhtMeasurementId(spec?.id);
         commit({
           kind: 'time',
-          label: 'Tiempo de desaceleración',
-          value: dt.dtMs,
+          label: isPht ? 'Tiempo de hemipresión (PHT)' : 'Tiempo de desaceleración',
+          value: isPht ? pressureHalfTimeFromDtMs(dt.dtMs) : dt.dtMs,
           units: 'ms',
           modality,
           geometry: [a, b, dt.intercept],
-          derived: { peakMps: dt.peakMps },
+          derived: isPht ? { peakMps: dt.peakMps, dtMs: dt.dtMs } : { peakMps: dt.peakMps },
         });
       } else pend.points = [];
     }
