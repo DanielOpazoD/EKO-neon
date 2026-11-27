@@ -35,8 +35,8 @@ function truthFor(id: string): StructuredEchoTruth {
   return computeGroundTruth(c, tables);
 }
 
-test('all 12 clinical cases produce finite, physiologically consistent hemodynamic ground truth', () => {
-  assert.equal(CASE_INPUTS.length, 12, 'expected 12 mandatory clinical cases');
+test('all clinical cases produce finite, physiologically consistent hemodynamic ground truth', () => {
+  assert.equal(CASE_INPUTS.length, 13, 'expected 13 clinical cases');
   for (const input of CASE_INPUTS) {
     const t = truthFor(input.id);
     assert.ok(Number.isFinite(t.bsaM2) && t.bsaM2 > 1.0 && t.bsaM2 < 3.0, `${input.id}: BSA`);
@@ -111,6 +111,23 @@ test('clinical pathology invariants hold across severity tiers and hemodynamic p
   // Inferior RWMA has regional abnormal segments & WMSI > 1
   assert.ok(rwma.wallMotion.abnormalSegments.length >= 2);
   assert.ok(rwma.wallMotion.wmsi > 1.05);
+
+  // Severe chronic AR: wide pulse pressure, severe EROA/RVol/RF/PHT, eccentric compensated LV, no AS
+  const sevAr = truthFor('aortic-regurgitation-severe');
+  assert.ok(sevAr.regurgitation.ar !== null, 'severe AR must populate regurgitation.ar');
+  assert.ok(sevAr.regurgitation.ar!.eroaCm2 >= 0.3, `severe AR EROA=${sevAr.regurgitation.ar!.eroaCm2}`);
+  assert.ok(sevAr.regurgitation.ar!.phtMs < 200, `severe AR PHT=${sevAr.regurgitation.ar!.phtMs}`);
+  assert.ok(
+    sevAr.regurgitation.ar!.regurgitantVolumeMl >= 60,
+    `severe AR RVol=${sevAr.regurgitation.ar!.regurgitantVolumeMl}`,
+  );
+  assert.ok(
+    sevAr.regurgitation.ar!.regurgitantFractionPct >= 50,
+    `severe AR RF=${sevAr.regurgitation.ar!.regurgitantFractionPct}`,
+  );
+  assert.ok(sevAr.regurgitation.ar!.vmaxMps >= 3.8, `severe AR Vmax=${sevAr.regurgitation.ar!.vmaxMps}`);
+  assert.ok(sevAr.lv.eddCm > 5.8 && sevAr.lv.efPct >= 52, `severe AR compensated dilated LV: EDD=${sevAr.lv.eddCm}, EF=${sevAr.lv.efPct}`);
+  assert.ok(sevAr.aorticValve.vmaxMps < 2.0, `pure severe AR must not mimic AS: AV Vmax=${sevAr.aorticValve.vmaxMps}`);
 });
 
 test('anatomical measureModel matches pathological chamber & wall remodeling', () => {

@@ -75,7 +75,11 @@ export function buildBeatTables(
   const arFlow = new Float32Array(n);
   const mr = hemo.regurgitation.mr;
   const ar = hemo.regurgitation.ar;
-  const arVmax = ar && ar.eroaCm2 > 0 ? Math.sqrt(Math.max(1, hemo.diastolicBpMmHg - 12) / 4) : 0;
+  // Peak AR velocity occurs immediately after aortic valve closure (dicrotic-notch aortic pressure
+  // minus early-diastolic LV pressure), then decays exponentially at the case's pressure half-time.
+  const arDrivingMmHg =
+    hemo.diastolicBpMmHg + 0.35 * (hemo.systolicBpMmHg - hemo.diastolicBpMmHg) - 12;
+  const arVmax = ar && ar.eroaCm2 > 0 ? Math.sqrt(Math.max(1, arDrivingMmHg) / 4) : 0;
   const arPht = ar?.phtMs ?? 450;
   const et = timings.ejectionEndS - timings.ejectionStartS;
   // left ventricular pressure (mmHg) at time t of the beat, with an outflow gradient during ejection
