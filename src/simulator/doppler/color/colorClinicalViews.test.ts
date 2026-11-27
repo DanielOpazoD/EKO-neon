@@ -427,8 +427,8 @@ test('view-level Color fidelity: rheumatic severe MS turbulent diastolic candle-
     `Expected turbulent high-velocity diastolic candle-flame MS jet in PLAX LV, got ${JSON.stringify(plaxLv)}`,
   );
   assert.ok(
-    plaxLa.fillPct >= 15 && plaxLa.maxDisp <= 0.14,
-    `Expected laminar LA-side proximal convergence in PLAX, got ${JSON.stringify(plaxLa)}`,
+    plaxLa.fillPct >= 15 && plaxLa.maxSpeed >= 0.45 && plaxLa.maxDisp <= 0.14,
+    `Expected laminar LA-side proximal PISA convergence (>= 0.45 m/s) in PLAX, got ${JSON.stringify(plaxLa)}`,
   );
   assert.equal(plaxAo.flowSamples, 0, 'Diastolic MS jet must not bleed into AorticRoot');
   // Secondary post-capillary PH (PASP 52 mmHg) drives emergent diastolic pulmonary regurgitation in RVOT
@@ -446,8 +446,8 @@ test('view-level Color fidelity: rheumatic severe MS turbulent diastolic candle-
     `Expected turbulent diastolic MS jet in A4C LV, got ${JSON.stringify(a4cLv)}`,
   );
   assert.ok(
-    a4cLa.fillPct >= 15 && a4cLa.maxDisp <= 0.14,
-    `Expected laminar LA-side proximal convergence in A4C, got ${JSON.stringify(a4cLa)}`,
+    a4cLa.fillPct >= 15 && a4cLa.maxSpeed >= 0.45 && a4cLa.maxDisp <= 0.14,
+    `Expected laminar LA-side proximal PISA convergence (>= 0.45 m/s) in A4C, got ${JSON.stringify(a4cLa)}`,
   );
   // Tricuspid inflow stays physiological & laminar (must not inherit stenotic mitral velocity or turbulence)
   assert.ok(

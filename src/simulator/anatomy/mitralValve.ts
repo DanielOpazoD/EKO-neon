@@ -281,6 +281,16 @@ function buildLeaflet(
  * @param tetherAL,tetherPM apical pull (cm) of each papillary muscle on the closed coaptation (papillaryTether).
  * @param ejectionProgress ejection times since the aortic valve opened (CycleState.ejectionProgress), for the SAM drag.
  */
+/**
+ * Rheumatic mitral leaflet restriction factor (0 for normal valves >= 52°, rising toward 1 for
+ * severe rheumatic stenosis). Drives anterior-leaflet diastolic "hockey-stick" doming (pliable
+ * proximal belly bowing anteriorly while commissurally fused tips remain tethered inward) and
+ * posterior-leaflet immobility. Automatically mirrored to GPU via `MVL_A_PROF_BASE`/`MVL_P_PROF_BASE`.
+ */
+export function rheumaticDomingFactor(maxOpeningDeg: number): number {
+  return Math.min(1, Math.max(0, (52 - maxOpeningDeg) / 22));
+}
+
 export function buildMitralValve(
   cx0: number,
   cy0: number,
@@ -309,6 +319,23 @@ export function buildMitralValve(
   // 3D values 10.6 ± 3.7 % and 13.5 ± 4.0 %)
   const saddle = 0.3;
   const openScale = (p.maxOpeningDeg * Math.PI) / 180 / 1.22;
+  const dome = rheumaticDomingFactor(p.maxOpeningDeg);
+  const antAngles =
+    dome > 0
+      ? [
+          -0.61 * openScale - 0.34 * dome,
+          -0.7 * openScale + 0.14 * dome,
+          -0.79 * openScale + 0.88 * dome,
+        ]
+      : [-0.61 * openScale, -0.7 * openScale, -0.79 * openScale];
+  const postAngles =
+    dome > 0
+      ? [
+          -0.61 * openScale * (1 - 0.55 * dome),
+          -0.79 * openScale * (1 - 0.65 * dome),
+          -0.96 * openScale * (1 - 0.75 * dome),
+        ]
+      : [-0.61 * openScale, -0.79 * openScale, -0.96 * openScale];
   return {
     cx,
     cy,
@@ -338,10 +365,7 @@ export function buildMitralValve(
       0.35 - 0.5 * p.prolapse,
       tetherAL,
       tetherPM,
-      openProfile(
-        [-0.61 * openScale, -0.7 * openScale, -0.79 * openScale],
-        p.anteriorLeafletLengthCm / 3,
-      ),
+      openProfile(antAngles, p.anteriorLeafletLengthCm / 3),
     ),
     posterior: buildLeaflet(
       false,
@@ -352,10 +376,7 @@ export function buildMitralValve(
       0.35 - 1.4 * p.prolapse,
       tetherAL,
       tetherPM,
-      openProfile(
-        [-0.61 * openScale, -0.79 * openScale, -0.96 * openScale],
-        p.posteriorLeafletLengthCm / 3,
-      ),
+      openProfile(postAngles, p.posteriorLeafletLengthCm / 3),
     ),
   };
 }

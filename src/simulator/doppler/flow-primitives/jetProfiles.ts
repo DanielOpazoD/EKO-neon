@@ -175,16 +175,32 @@ export function inflowJet(
     const rNorm = Math.min(1.5, rho / Math.max(0.25, rFunnel));
     const radialCore = 1 / (1 + 0.48 * rNorm * rNorm);
     const dEff = Math.hypot(rho * 0.72, up + 0.79 * re);
-    const mag =
-      (q / areaCm2 / 100) *
+    const vOrifice = q / areaCm2 / 100;
+    const baseMag =
+      vOrifice *
       Math.min(0.76, (0.48 * re * re) / (dEff * dEff)) *
       radialCore *
       fadeOut(d, FUNNEL_FADE_FROM_CM, FUNNEL_FADE_TO_CM) *
       convergenceWeight(rho, up + 0.24, r * 0.98, 0.18, 0.52);
+    // Stenotic AV inflow (e.g. rheumatic mitral stenosis, MVA < 2.2 cm²): laminar 3D hemispheric
+    // proximal flow convergence (LA-side PISA aliasing dome) accelerating into the restricted tips.
+    let mag = baseMag;
+    const msWeight = areaCm2 < 2.2 ? smoothstep(2.2, 1.3, areaCm2) : 0;
+    if (msWeight > 0) {
+      const dPisa = Math.hypot(rho, up + 0.14);
+      const vHemi = Math.min(vOrifice * 0.84, q / (2 * Math.PI * dPisa * dPisa * 100));
+      const pisaMag =
+        msWeight *
+        vHemi *
+        fadeOut(d, 1.45, FUNNEL_FADE_TO_CM) *
+        convergenceWeight(rho, up + 0.18, r * 0.98, 0.15, 0.45);
+      if (pisaMag > mag) mag = pisaMag;
+    }
     if (mag <= 0.01) return;
-    const sx = -dx * 0.65,
-      sy = -dy * 0.65,
-      sz = r + up;
+    const radialGain = msWeight > 0 ? 0.65 + 0.25 * msWeight : 0.65;
+    const sx = -dx * radialGain,
+      sy = -dy * radialGain,
+      sz = r * (1 - 0.45 * msWeight) + up;
     const n = Math.hypot(sx, sy, sz);
     out.vx += (sx / n) * mag;
     out.vy += (sy / n) * mag;

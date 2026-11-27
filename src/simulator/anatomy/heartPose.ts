@@ -250,6 +250,16 @@ export function lvCompensationGain(m: HeartModel, volumeMl: number, lengthNow: n
   return (compensatedLvRadius(m, r0 + h) - compensatedLvRadius(m, r0 - h)) / (2 * h);
 }
 
+/**
+ * Dynamic RV pressure-overload septal flattening (D-sign): residual diastolic flattening
+ * intensifies during systole as RV pressure peaks (`contraction` 0 -> 1), while LV cavity volume
+ * stays conserved via `radiusPreservingSeptalVolume`. Automatically synced to GPU via `SEPTAL_SHIFT`.
+ */
+export function dynamicSeptalShiftCm(septalFlattening: number, contraction: number): number {
+  if (!(septalFlattening > 0)) return 0;
+  return septalFlattening * 0.9 * (0.72 + 0.42 * Math.max(0, Math.min(1, contraction)));
+}
+
 export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPose {
   const { lv } = m;
   const sh = lv.shape;
@@ -259,7 +269,7 @@ export function computeChamberPose(m: HeartModel, state: CycleState): ChamberPos
   const lengthNow = lv.lengthCm - zAnn; // apex fixed at z = L
   // the normal walls' radius from the volume tables, compensating for the excursion regional abnormalities withhold
   const unflattenedRadius = compensatedLvRadius(m, lvVolumeRadius(m, state.lvVolumeMl, lengthNow));
-  const septalShiftCm = m.anatomy.rv.septalFlattening * 0.9;
+  const septalShiftCm = dynamicSeptalShiftCm(m.anatomy.rv.septalFlattening, state.contraction);
   const annulusRadius =
     (m.anatomy.mitral.annulusDiameterCm / 2) * (1 - MV_SYSTOLIC_SHORTENING * state.contraction);
   const rMax = radiusPreservingSeptalVolume(
