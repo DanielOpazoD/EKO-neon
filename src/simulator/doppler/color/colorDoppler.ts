@@ -67,6 +67,13 @@ export interface ColorSettings {
   palette?: ColorPaletteId;
 }
 
+export interface ColorBoxBounds {
+  boxThetaMinRad: number;
+  boxThetaMaxRad: number;
+  boxRMinCm: number;
+  boxRMaxCm: number;
+}
+
 export const DEFAULT_COLOR: ColorSettings = {
   boxThetaMinRad: -0.32,
   boxThetaMaxRad: 0.32,
@@ -84,6 +91,56 @@ export const DEFAULT_COLOR: ColorSettings = {
   invert: false,
   palette: COLOR_PALETTE_DEFAULT,
 };
+
+/**
+ * Anatomically fitted default Color Doppler ROI bounds per canonical TTE view.
+ * Derived from the polar footprint of each view's target chambers/valves/great vessels,
+ * capped at 15.2 cm depth so 2.5 MHz Color PRF sustains the default 0.68 m/s Nyquist limit.
+ */
+export const VIEW_COLOR_BOX_PRESETS: Readonly<Record<string, ColorBoxBounds>> = {
+  plax: { boxRMinCm: 4.2, boxRMaxCm: 13.0, boxThetaMinRad: -0.42, boxThetaMaxRad: 0.42 },
+  'psax-av': { boxRMinCm: 4.0, boxRMaxCm: 12.2, boxThetaMinRad: -0.54, boxThetaMaxRad: 0.5 },
+  'psax-mv': { boxRMinCm: 3.2, boxRMaxCm: 11.4, boxThetaMinRad: -0.52, boxThetaMaxRad: 0.28 },
+  'psax-pm': { boxRMinCm: 2.2, boxRMaxCm: 9.6, boxThetaMinRad: -0.5, boxThetaMaxRad: 0.34 },
+  'psax-apex': { boxRMinCm: 3.2, boxRMaxCm: 8.4, boxThetaMinRad: -0.36, boxThetaMaxRad: 0.34 },
+  a4c: { boxRMinCm: 3.5, boxRMaxCm: 14.8, boxThetaMinRad: -0.46, boxThetaMaxRad: 0.38 },
+  a5c: { boxRMinCm: 3.5, boxRMaxCm: 14.4, boxThetaMinRad: -0.3, boxThetaMaxRad: 0.46 },
+  a2c: { boxRMinCm: 3.5, boxRMaxCm: 14.6, boxThetaMinRad: -0.36, boxThetaMaxRad: 0.38 },
+  a3c: { boxRMinCm: 3.5, boxRMaxCm: 14.4, boxThetaMinRad: -0.36, boxThetaMaxRad: 0.4 },
+  'rv-focused': { boxRMinCm: 4.2, boxRMaxCm: 14.8, boxThetaMinRad: -0.45, boxThetaMaxRad: 0.18 },
+  'subcostal-4c': { boxRMinCm: 5.0, boxRMaxCm: 14.4, boxThetaMinRad: -0.46, boxThetaMaxRad: 0.52 },
+  'subcostal-ivc': { boxRMinCm: 5.6, boxRMaxCm: 13.0, boxThetaMinRad: -0.62, boxThetaMaxRad: 0.4 },
+  'suprasternal-arch': {
+    boxRMinCm: 4.8,
+    boxRMaxCm: 15.2,
+    boxThetaMinRad: -0.46,
+    boxThetaMaxRad: 0.4,
+  },
+};
+
+/**
+ * Resolve anatomically framed Color ROI bounds for a canonical view, safely clamped to the
+ * active sector width and imaging depth so the box always stays inside the display sector.
+ */
+export function colorBoxForView(
+  viewId: string | null | undefined,
+  depthCm = 16,
+  sectorRad = (80 * Math.PI) / 180,
+): ColorBoxBounds {
+  const base = (viewId ? VIEW_COLOR_BOX_PRESETS[viewId] : undefined) ?? DEFAULT_COLOR;
+  const maxR = Math.max(3.2, depthCm - 0.5);
+  const boxRMaxCm = Math.max(3.2, Math.min(maxR, base.boxRMaxCm));
+  const boxRMinCm = Math.max(1.2, Math.min(boxRMaxCm - 2.0, base.boxRMinCm));
+  const half = Math.max(0.18, sectorRad / 2 - 0.04);
+  let boxThetaMinRad = Math.max(-half, Math.min(half - 0.12, base.boxThetaMinRad));
+  let boxThetaMaxRad = Math.min(half, Math.max(-half + 0.12, base.boxThetaMaxRad));
+  if (boxThetaMaxRad - boxThetaMinRad < 0.24) {
+    const mid = 0.5 * (boxThetaMinRad + boxThetaMaxRad);
+    boxThetaMinRad = Math.max(-half, mid - 0.12);
+    boxThetaMaxRad = Math.min(half, mid + 0.12);
+  }
+  return { boxRMinCm, boxRMaxCm, boxThetaMinRad, boxThetaMaxRad };
+}
 
 /** Acquisition the colour field was formed with: the expected tissue attenuation depends on it. */
 export interface ColorAcquisition {

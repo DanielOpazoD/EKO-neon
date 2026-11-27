@@ -79,6 +79,7 @@ export const createReviewSlice: SimSliceCreator<ReviewSlice> = (set, get) => ({
       settings: { ...i.settings, tgcDb: [...i.settings.tgcDb] },
       modality: i.modality,
       color: { ...i.color },
+      colorBoxCustom: true,
       spectral: { ...i.spectral },
       cursorThetaRad: i.cursorThetaRad,
       gateDepthCm: i.gateDepthCm,

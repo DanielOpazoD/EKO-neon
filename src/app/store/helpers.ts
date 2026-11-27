@@ -169,6 +169,7 @@ export function freshSession() {
     impressionSelection: [],
     impressionChecked: false,
     artifactLab: null,
+    colorBoxCustom: false,
   };
 }
 

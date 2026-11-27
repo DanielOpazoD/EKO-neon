@@ -1,7 +1,7 @@
 import { constrainAcquisition } from '@/simulator/core/acquisitionInput';
 import type { ProbeControl } from '@/simulator/probe/pose';
 import { DEFAULT_ACQUISITION } from '@/simulator/renderer/types';
-import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
+import { colorBoxForView, DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
 import {
   DEFAULT_SPECTRAL,
   SPECTRAL_MODE_DEFAULTS,
@@ -36,6 +36,7 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
   cinePlaying: false,
   cineSpeed: 1,
   color: { ...DEFAULT_COLOR },
+  colorBoxCustom: false,
   spectral: { ...DEFAULT_SPECTRAL },
   spectralByMode: {},
   cursorThetaRad: 0.05,
@@ -98,6 +99,19 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
         const memory = (out.spectralByMode ?? s.spectralByMode)[to];
         out.spectral = { ...s.spectral, ...(memory ?? SPECTRAL_MODE_DEFAULTS[to]) };
       }
+      // Frame the Color ROI over the active view's anatomical structures unless the learner positioned it manually
+      // (skipped in exam mode so auto-framing never hints the recognised view).
+      if (m === 'color' && s.modality !== 'color' && !s.colorBoxCustom && s.mode !== 'exam') {
+        const viewId = s.targetViewId ?? useHudStore.getState().hud?.view?.bestViewId ?? null;
+        if (viewId) {
+          const box = colorBoxForView(
+            viewId,
+            s.settings.depthCm,
+            (s.settings.sectorDeg * Math.PI) / 180,
+          );
+          out.color = { ...s.color, ...box };
+        }
+      }
       return constrainAcquisition({ ...s, ...out });
     }),
   toggleFreeze: () =>
@@ -126,7 +140,36 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
         console.warn('cinePhaseJump request failed', e instanceof Error ? e.message : e);
       });
   },
-  setColor: (c) => set((s) => constrainAcquisition({ ...s, color: { ...s.color, ...c } })),
+  setColor: (c) =>
+    set((s) => {
+      const touchesBox =
+        c.boxThetaMinRad !== undefined ||
+        c.boxThetaMaxRad !== undefined ||
+        c.boxRMinCm !== undefined ||
+        c.boxRMaxCm !== undefined;
+      return constrainAcquisition({
+        ...s,
+        color: { ...s.color, ...c },
+        ...(touchesBox ? { colorBoxCustom: true } : {}),
+      });
+    }),
+  resetColorBox: () =>
+    set((s) => {
+      const viewId =
+        s.mode === 'exam'
+          ? null
+          : (s.targetViewId ?? useHudStore.getState().hud?.view?.bestViewId ?? null);
+      const box = colorBoxForView(
+        viewId,
+        s.settings.depthCm,
+        (s.settings.sectorDeg * Math.PI) / 180,
+      );
+      return constrainAcquisition({
+        ...s,
+        color: { ...s.color, ...box },
+        colorBoxCustom: false,
+      });
+    }),
   setSpectral: (sp) =>
     set((s) => constrainAcquisition({ ...s, spectral: { ...s.spectral, ...sp } })),
   setCursor: (theta, depth) =>
@@ -152,19 +195,27 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
         // the pose arrives asynchronously: a session started or a preset cancelled meanwhile does not get it, even if it
         // went back to practice by then
         if (token !== currentPresetToken() || s.mode === 'exam') return s;
+        const box = colorBoxForView(
+          viewId,
+          s.settings.depthCm,
+          (s.settings.sectorDeg * Math.PI) / 180,
+        );
         // the opening jump (decision 343) yields to a probe moved while its pose was on the way
         if (opts?.instant)
           return atStartProbe(s.probe)
-            ? {
+            ? constrainAcquisition({
+                ...s,
                 probe: to,
                 presetAnim: null,
                 targetViewId: viewId,
                 frozen: false,
                 openingView: { viewId, pose: to, released: false },
-              }
+                ...(!s.colorBoxCustom ? { color: { ...s.color, ...box } } : {}),
+              })
             : s;
         const from = { ...s.probe };
-        return {
+        return constrainAcquisition({
+          ...s,
           presetAnim: {
             from,
             to,
@@ -174,7 +225,9 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
           },
           targetViewId: viewId,
           frozen: false,
-        };
+          color: { ...s.color, ...box },
+          colorBoxCustom: false,
+        });
       });
     // the pose comes from the worker's own models — the ones the image is traced from (audit B7); without a
     // worker (tests, inline mode) the main-thread copies answer, as they did before
