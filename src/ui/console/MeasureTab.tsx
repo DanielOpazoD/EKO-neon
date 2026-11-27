@@ -17,9 +17,11 @@ import { Section } from '../controls';
 import { captureStepPrompt, minPointsToFinish } from '../display/measurementPreview';
 import {
   runAutoChamberVolume,
+  runAutoDopplerTarget,
   runAutoLvotGate,
   runAutoSpectralVti,
 } from '../display/measurementTools';
+import type { DopplerTargetId } from '@/simulator/measurements/autoDopplerTarget';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
 import { ViewQuickMenu } from '../ViewQuickMenu';
@@ -399,9 +401,9 @@ export function MeasureTab() {
           </Section>
 
           <Section
-            title="Auto-VTI del TSVI (A5C)"
+            title="Asistente Doppler y Modo M"
             tip={tip(
-              'Coloca el volumen de muestra PW a 0,5 cm proximal a la válvula aórtica en A5C/A3C y traza automáticamente el latido sistólico más reciente.',
+              'Coloca el gate o cursor a partir de la anatomía 2D visible (Mitral E/A, TDI e′ septal/lateral, TAPSE, IT CW y TSVI con Auto-VTI).',
             )}
           >
             <AutoLvotVtiPanel
@@ -1168,7 +1170,83 @@ function AutoEfPanel({
   );
 }
 
-/** Guided LVOT PW gate placement in A5C/A3C + one-click automatic systolic VTI tracing. */
+interface ViewDopplerPreset {
+  id: Exclude<DopplerTargetId, 'lvot'>;
+  label: string;
+  tip: string;
+}
+
+const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
+  a4c: [
+    {
+      id: 'mitral-inflow',
+      label: 'Mitral PW',
+      tip: 'Coloca el gate PW en las puntas mitrales para E/A y TD',
+    },
+    {
+      id: 'tdi-septal',
+      label: 'e′ sept TDI',
+      tip: 'Coloca el gate TDI en el anillo mitral septal',
+    },
+    {
+      id: 'tdi-lateral',
+      label: 'e′ lat TDI',
+      tip: 'Coloca el gate TDI en el anillo mitral lateral',
+    },
+    {
+      id: 'tapse',
+      label: 'TAPSE M',
+      tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
+    },
+    {
+      id: 'tr-cw',
+      label: 'IT CW',
+      tip: 'Alinea el cursor CW a través de la válvula tricúspide para Vmax IT',
+    },
+  ],
+  'rv-focused': [
+    {
+      id: 'tapse',
+      label: 'TAPSE M',
+      tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
+    },
+    {
+      id: 'tr-cw',
+      label: 'IT CW',
+      tip: 'Alinea el cursor CW a través de la válvula tricúspide para Vmax IT',
+    },
+  ],
+  a2c: [
+    {
+      id: 'mitral-inflow',
+      label: 'Mitral PW',
+      tip: 'Coloca el gate PW en las puntas mitrales',
+    },
+  ],
+  a3c: [
+    {
+      id: 'mitral-inflow',
+      label: 'Mitral PW',
+      tip: 'Coloca el gate PW en las puntas mitrales',
+    },
+  ],
+  'psax-av': [
+    {
+      id: 'tr-cw',
+      label: 'IT CW',
+      tip: 'Alinea el cursor CW a través de la válvula tricúspide',
+    },
+  ],
+  'subcostal-4c': [
+    {
+      id: 'tr-cw',
+      label: 'IT CW',
+      tip: 'Alinea el cursor CW a través de la válvula tricúspide',
+    },
+  ],
+};
+
+/** Guided pure-2D Doppler/M-mode cursor placement + LVOT PW gate and 1-click Auto-VTI tracing. */
 function AutoLvotVtiPanel({
   currentViewId,
   showViewFeedback,
@@ -1198,11 +1276,15 @@ function AutoLvotVtiPanel({
       };
     }),
   );
-  const [busy, setBusy] = useState<'gate' | 'vti' | null>(null);
+  const [busy, setBusy] = useState<'gate' | 'vti' | DopplerTargetId | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const isPw = s.modality === 'pw';
   const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
+  const viewTargets =
+    presetsEnabled && showViewFeedback && currentViewId
+      ? (VIEW_DOPPLER_TARGETS[currentViewId] ?? [])
+      : [];
   const latestVti = useMemo(() => {
     for (let i = s.measurements.length - 1; i >= 0; i--) {
       if (s.measurements[i]!.measurementId === 'lvot-vti') return s.measurements[i]!;
@@ -1219,6 +1301,27 @@ function AutoLvotVtiPanel({
     latestVti && latestLvotDiam && latestLvotDiam.value > 0
       ? strokeVolume(latestLvotDiam.value, latestVti.value)
       : null;
+
+  const placeTarget = async (target: Exclude<DopplerTargetId, 'lvot'>) => {
+    if (busy || s.closed || !presetsEnabled) return;
+    setBusy(target);
+    setNotice(null);
+    try {
+      const res = await runAutoDopplerTarget(target);
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        setNotice({ kind: 'ok', text: res.summary });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al posicionar el cursor.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const placeGate = async () => {
     if (busy || s.closed || !presetsEnabled) return;
@@ -1275,76 +1378,115 @@ function AutoLvotVtiPanel({
     s.startPresetView('a5c');
   };
 
-  return (
-    <div className="auto-ef" data-auto-lvot="panel">
-      <div className="auto-ef-card">
+  const viewTargetsCard =
+    viewTargets.length > 0 ? (
+      <div className="auto-ef-card" data-auto-doppler="view-targets">
         <div className="auto-ef-row-head">
-          <span className="auto-ef-title">TSVI · PW</span>
-          {showViewFeedback && isPw && (
-            <span
-              className={`plane-pill${
-                gateState.inLvot && (gateState.angleDeg ?? 0) <= 20
-                  ? ' done'
-                  : gateState.inLvot
-                    ? ' here'
-                    : ''
-              }`}
-            >
-              {gateState.inLvot
-                ? `✓ Gate TSVI${gateState.angleDeg !== null ? ` · θ ${gateState.angleDeg}°` : ''}`
-                : 'Gate fuera TSVI'}
-            </span>
-          )}
+          <span className="auto-ef-title">
+            Alineación rápida · {currentViewId ? viewLabel(currentViewId) : ''}
+          </span>
         </div>
-        <div className="auto-lvot-actions">
-          {presetsEnabled && showViewFeedback && !onOutflowView && (
+        <div className="doppler-assist-grid">
+          {viewTargets.map((t) => (
             <button
+              key={t.id}
               type="button"
               className="ghost"
               disabled={s.closed || busy !== null}
-              onClick={goA5c}
-              data-tip="Mueve la sonda a A5C para alinear el TSVI"
+              onClick={() => void placeTarget(t.id)}
+              data-tip={t.tip}
             >
-              Ir a A5C
+              {busy === t.id ? 'Buscando…' : t.label}
             </button>
-          )}
-          {presetsEnabled && (
-            <button
-              type="button"
-              className={onOutflowView && !isPw ? 'btn-primary-soft' : ''}
-              disabled={s.closed || busy !== null}
-              onClick={() => void placeGate()}
-              data-tip="Detecta el TSVI en el corte 2D actual, coloca el gate PW a ~0,5 cm de la válvula aórtica y activa PW"
-            >
-              {busy === 'gate' ? 'Buscando…' : 'Gate TSVI'}
-            </button>
-          )}
-          <button
-            type="button"
-            className={isPw ? 'btn-primary-soft' : ''}
-            disabled={s.closed || busy !== null}
-            onClick={() => void traceVti()}
-            data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI, Vmáx y gradientes)"
-          >
-            {busy === 'vti' ? 'Trazando…' : 'Auto-VTI'}
-          </button>
+          ))}
         </div>
+      </div>
+    ) : null;
 
-        {latestVti && (
-          <div className="auto-ef-result-line">
-            <span className="auto-ef-primary">VTI {latestVti.value.toFixed(1)} cm</span>
-            <span className="auto-ef-metrics">
-              {latestVti.derived?.vmaxMps !== undefined && (
-                <span>Vmáx {Math.round(latestVti.derived.vmaxMps * 100)} cm/s</span>
-              )}
-              {latestVti.derived?.meanGradientMmHg !== undefined && (
-                <span>ΔPm {latestVti.derived.meanGradientMmHg.toFixed(1)} mmHg</span>
-              )}
-              {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
-            </span>
-          </div>
+  const lvotCard = (
+    <div className="auto-ef-card">
+      <div className="auto-ef-row-head">
+        <span className="auto-ef-title">TSVI · PW</span>
+        {showViewFeedback && isPw && (
+          <span
+            className={`plane-pill${
+              gateState.inLvot && (gateState.angleDeg ?? 0) <= 20
+                ? ' done'
+                : gateState.inLvot
+                  ? ' here'
+                  : ''
+            }`}
+          >
+            {gateState.inLvot
+              ? `✓ Gate TSVI${gateState.angleDeg !== null ? ` · θ ${gateState.angleDeg}°` : ''}`
+              : 'Gate fuera TSVI'}
+          </span>
         )}
       </div>
+      <div className="auto-lvot-actions">
+        {presetsEnabled && showViewFeedback && !onOutflowView && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={s.closed || busy !== null}
+            onClick={goA5c}
+            data-tip="Mueve la sonda a A5C para alinear el TSVI"
+          >
+            Ir a A5C
+          </button>
+        )}
+        {presetsEnabled && (
+          <button
+            type="button"
+            className={onOutflowView && !isPw ? 'btn-primary-soft' : ''}
+            disabled={s.closed || busy !== null}
+            onClick={() => void placeGate()}
+            data-tip="Detecta el TSVI en el corte 2D actual, coloca el gate PW a ~0,5 cm de la válvula aórtica y activa PW"
+          >
+            {busy === 'gate' ? 'Buscando…' : 'Gate TSVI'}
+          </button>
+        )}
+        <button
+          type="button"
+          className={isPw ? 'btn-primary-soft' : ''}
+          disabled={s.closed || busy !== null}
+          onClick={() => void traceVti()}
+          data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI, Vmáx y gradientes)"
+        >
+          {busy === 'vti' ? 'Trazando…' : 'Auto-VTI'}
+        </button>
+      </div>
+
+      {latestVti && (
+        <div className="auto-ef-result-line">
+          <span className="auto-ef-primary">VTI {latestVti.value.toFixed(1)} cm</span>
+          <span className="auto-ef-metrics">
+            {latestVti.derived?.vmaxMps !== undefined && (
+              <span>Vmáx {Math.round(latestVti.derived.vmaxMps * 100)} cm/s</span>
+            )}
+            {latestVti.derived?.meanGradientMmHg !== undefined && (
+              <span>ΔPm {latestVti.derived.meanGradientMmHg.toFixed(1)} mmHg</span>
+            )}
+            {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="auto-ef" data-auto-lvot="panel">
+      {onOutflowView ? (
+        <>
+          {lvotCard}
+          {viewTargetsCard}
+        </>
+      ) : (
+        <>
+          {viewTargetsCard}
+          {lvotCard}
+        </>
+      )}
 
       {notice && (
         <div

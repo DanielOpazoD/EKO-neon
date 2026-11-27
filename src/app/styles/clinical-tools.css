@@ -439,6 +439,30 @@
   padding: 4px 7px;
   white-space: nowrap;
 }
+.doppler-assist-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.doppler-assist-grid button {
+  flex: 1 1 calc(33.33% - 4px);
+  min-width: 78px;
+  font-size: 11px;
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+.doppler-quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 2px;
+}
+.doppler-quick-row button {
+  flex: 1 1 0;
+  font-size: var(--fs-xs);
+  padding: 4px 7px;
+  white-space: nowrap;
+}
 
 /* free tools grouped by modality */
 .free-tool-group {

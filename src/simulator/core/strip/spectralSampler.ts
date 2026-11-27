@@ -519,6 +519,40 @@ export function computeGateInfo(
       );
       flowAngleDeg = (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
     }
+  } else if (inp.modality === 'tdi') {
+    // TDI sample volume tracks longitudinal myocardial motion across the cardiac cycle so brief
+    // systolic annular bobbing never falsely marks a properly placed TDI gate as blood cavity.
+    const tdiKey = `tdi|${hx.toFixed(5)},${hy.toFixed(5)},${hz.toFixed(5)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
+    if (gateFlow.key !== tdiKey) {
+      const counts = new Map<number, number>();
+      let hits = 0;
+      for (let k = 0; k < 16; k++) {
+        const sc = ctx.scene(k / 16);
+        const inPh = sceneClassifier(sc)(px, py, pz, tissueSample) !== 0;
+        if (inPh && tissueSample.tissue === Tissue.Myocardium) {
+          hits++;
+          counts.set(tissueSample.structure, (counts.get(tissueSample.structure) ?? 0) + 1);
+        }
+      }
+      let dominant = 0;
+      let maxCount = 0;
+      for (const [stId, cnt] of counts) {
+        if (cnt > maxCount) {
+          maxCount = cnt;
+          dominant = stId;
+        }
+      }
+      gateFlow.key = tdiKey;
+      gateFlow.best = hits;
+      gateFlow.peakStructure = hits >= 4 ? dominant : undefined;
+      sceneClassifier(ctx.scene(phase))(px, py, pz, tissueSample);
+    }
+    const onMyoNow = inScene && tissueSample.tissue === Tissue.Myocardium;
+    if (onMyoNow || (gateFlow.best >= 4 && gateFlow.peakStructure !== undefined)) {
+      flowPresent = true;
+      const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+      flowAngleDeg = (Math.acos(Math.min(1, Math.abs(dhz))) * 180) / Math.PI;
+    }
   } else if (inScene && tissueSample.tissue === Tissue.Blood) {
     // Cache peak flow vector & structure over the cycle for this heart-frame gate position.
     const gateKey = `${hx.toFixed(5)},${hy.toFixed(5)},${hz.toFixed(5)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
@@ -572,10 +606,6 @@ export function computeGateInfo(
       const cos = Math.abs((gateFlow.bx * dhx + gateFlow.by * dhy + gateFlow.bz * dhz) / gateFlow.best);
       flowAngleDeg = (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
     }
-  } else if (inScene && tissueSample.tissue === Tissue.Myocardium && inp.modality === 'tdi') {
-    flowPresent = true;
-    const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
-    flowAngleDeg = (Math.acos(Math.min(1, Math.abs(dhz))) * 180) / Math.PI;
   }
   return {
     thetaRad: theta,
@@ -583,7 +613,9 @@ export function computeGateInfo(
     structure: inScene ? tissueSample.structure : 0,
     tissue: inScene ? tissueSample.tissue : 0,
     peakFlowStructure:
-      inp.modality === 'pw' && flowPresent ? gateFlow.peakStructure : undefined,
+      (inp.modality === 'pw' || inp.modality === 'tdi') && flowPresent
+        ? (gateFlow.peakStructure ?? (inScene && tissueSample.tissue === Tissue.Myocardium ? tissueSample.structure : undefined))
+        : undefined,
     flowPresent,
     flowAngleDeg,
     lineStructures,

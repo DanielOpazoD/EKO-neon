@@ -1,8 +1,9 @@
 import { examClosed, modePolicy } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
 import { SPECTRAL_SCALE_RANGE, type SpectralModality } from '@/simulator/doppler/spectral/spectrum';
+import type { DopplerTargetId } from '@/simulator/measurements/autoDopplerTarget';
 import {
   COLOR_PALETTE_DEFAULT,
   COLOR_PALETTE_OPTIONS,
@@ -22,7 +23,7 @@ import {
 import { useShallow } from 'zustand/shallow';
 import { Section, Segmented, Slider, Toggle } from '../controls';
 import { IconDoppler } from '../icons';
-import { runAutoLvotGate } from '../display/measurementTools';
+import { runAutoDopplerTarget } from '../display/measurementTools';
 import { useTip } from './useTip';
 import { wallFilterControl, wallFilterRequestFor, wallFilterText } from './wallFilterControl';
 
@@ -85,14 +86,14 @@ export function DopplerTab() {
   const limits = acquisitionLimits(s);
   const presetsEnabled = modePolicy(s.mode).presetsEnabled;
 
-  const snapLvotGate = async () => {
+  useEffect(() => {
     setGateHint(null);
-    const res = await runAutoLvotGate();
-    setGateHint(
-      res.ok
-        ? `Gate PW colocado en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm de VAo).`
-        : res.message,
-    );
+  }, [mod]);
+
+  const snapTarget = async (target: DopplerTargetId) => {
+    setGateHint(null);
+    const res = await runAutoDopplerTarget(target);
+    setGateHint(res.ok ? res.summary : res.message);
   };
 
   if (mod === '2d') {
@@ -329,23 +330,63 @@ export function DopplerTab() {
                 onChange={(v) => s.setCursor(s.cursorThetaRad, v)}
               />
               {mod === 'pw' && presetsEnabled && !s.closed && (
-                <div className="row end">
+                <div className="doppler-quick-row">
                   <button
                     type="button"
                     className="btn-primary-soft"
-                    onClick={() => void snapLvotGate()}
-                    data-tip={tip('Detecta el TSVI en el plano A5C/A3C y sitúa el gate PW ~0,5 cm proximal a la válvula aórtica.')}
+                    onClick={() => void snapTarget('lvot')}
+                    data-tip={tip('Detecta el TSVI en A5C/A3C y sitúa el gate PW ~0,5 cm proximal a la válvula aórtica.')}
                   >
-                    Colocar gate en TSVI
+                    Gate TSVI
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void snapTarget('mitral-inflow')}
+                    data-tip={tip('Detecta las puntas mitrales en A4C y sitúa el gate PW para flujo E/A.')}
+                  >
+                    Gate Mitral
                   </button>
                 </div>
               )}
-              {mod === 'pw' && gateHint && (
-                <p className="small" role="status">
-                  {gateHint}
-                </p>
+              {mod === 'tdi' && presetsEnabled && !s.closed && (
+                <div className="doppler-quick-row">
+                  <button
+                    type="button"
+                    className="btn-primary-soft"
+                    onClick={() => void snapTarget('tdi-septal')}
+                    data-tip={tip('Sitúa el gate TDI en el anillo mitral septal en A4C para medir e′ septal.')}
+                  >
+                    Anillo septal
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void snapTarget('tdi-lateral')}
+                    data-tip={tip('Sitúa el gate TDI en el anillo mitral lateral en A4C para medir e′ lateral.')}
+                  >
+                    Anillo lateral
+                  </button>
+                </div>
               )}
             </>
+          )}
+          {mod === 'cw' && presetsEnabled && !s.closed && (
+            <div className="doppler-quick-row">
+              <button
+                type="button"
+                className="btn-primary-soft"
+                onClick={() => void snapTarget('tr-cw')}
+                data-tip={tip('Alinea el cursor CW a través de la válvula tricúspide para Vmax IT.')}
+              >
+                Cursor IT
+              </button>
+            </div>
+          )}
+          {gateHint && (
+            <p className="small" role="status">
+              {gateHint}
+            </p>
           )}
           <Slider
             label="Ángulo del cursor"
@@ -442,6 +483,23 @@ export function DopplerTab() {
             unit="°"
             onChange={(v) => s.setCursor((v * Math.PI) / 180)}
           />
+          {presetsEnabled && !s.closed && (
+            <div className="doppler-quick-row">
+              <button
+                type="button"
+                className="btn-primary-soft"
+                onClick={() => void snapTarget('tapse')}
+                data-tip={tip('Alinea el cursor de Modo M sobre el anillo tricuspídeo lateral en A4C o vista enfocada en VD.')}
+              >
+                Cursor TAPSE
+              </button>
+            </div>
+          )}
+          {gateHint && (
+            <p className="small" role="status">
+              {gateHint}
+            </p>
+          )}
         </Section>
       )}
       {mod === 'cmm' && (
