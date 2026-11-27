@@ -2,7 +2,7 @@ import { examClosed, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
 import { useHudStore, useSimStore, type SimStore } from '@/app/store';
 import { loadCaseById } from '@/cases';
 import { strokeVolume } from '@/clinical/formulas';
-import { deriveCalculations } from '@/education/report';
+import { aggregateProtocolMeasurement, deriveCalculations } from '@/education/report';
 import { Structure } from '@/simulator/anatomy/tissue';
 import {
   MEASUREMENT_SPECS,
@@ -462,6 +462,7 @@ export function MeasureTab() {
             <AutoLvotVtiPanel
               currentViewId={currentViewId}
               showViewFeedback={showView}
+              showIdentity={showIdentity}
               presetsEnabled={policy.presetsEnabled}
             />
           </Section>
@@ -524,6 +525,7 @@ export function MeasureTab() {
         <CapturasWorksheet
           s={s}
           showView={showView}
+          showIdentity={showIdentity}
           displayedFrameId={displayedFrameId}
           cineWindow={cineWindow}
           onInspect={inspectFrame}
@@ -644,6 +646,7 @@ function ViewQuickSection({
 function CapturasWorksheet({
   s,
   showView,
+  showIdentity,
   displayedFrameId,
   cineWindow,
   onInspect,
@@ -652,6 +655,7 @@ function CapturasWorksheet({
 }: {
   s: Pick<SimStore, 'measurements' | 'removeMeasurement' | 'truth'> & { closed: boolean };
   showView: boolean;
+  showIdentity: boolean;
   displayedFrameId: number | null;
   cineWindow: { startS: number; endS: number } | null;
   onInspect: (frameId: number, target?: 'ed' | 'es') => void;
@@ -662,11 +666,18 @@ function CapturasWorksheet({
     () => deriveCalculations(s.measurements, s.truth?.bsaM2 ?? null),
     [s.measurements, s.truth?.bsaM2],
   );
+  const showAfTip = showIdentity && s.truth?.rhythm === 'atrial-fibrillation';
 
   if (!s.measurements.length) {
     return (
       <div className="empty measure-empty">
         <p>Todavía no has tomado mediciones en este estudio.</p>
+        {showAfTip && (
+          <p className="small">
+            Fibrilación auricular: mide 3–5 latidos distintos; EKO-neon promedia automáticamente por
+            latido (ASE).
+          </p>
+        )}
         <div className="quick">
           <button type="button" className="btn-primary-soft" onClick={onBackToMeasure}>
             Ir a medir
@@ -678,6 +689,12 @@ function CapturasWorksheet({
 
   return (
     <>
+      {showAfTip && (
+        <p className="small" role="note">
+          FA activa: al medir 2–5 latidos distintos del mismo parámetro, el sistema calcula
+          automáticamente el promedio ASE.
+        </p>
+      )}
       {derived.length > 0 && (
         <Section title="Cálculos derivados">
           <div className="derived-kpi-grid">
@@ -1303,16 +1320,19 @@ const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
 function AutoLvotVtiPanel({
   currentViewId,
   showViewFeedback,
+  showIdentity,
   presetsEnabled,
 }: {
   currentViewId: string | null;
   showViewFeedback: boolean;
+  showIdentity: boolean;
   presetsEnabled: boolean;
 }) {
   const s = useSimStore(
     useShallow((st) => ({
       measurements: st.measurements,
       modality: st.modality,
+      truth: st.truth,
       closed: examClosed(st),
       startPresetView: st.startPresetView,
       setModality: st.setModality,
@@ -1346,21 +1366,17 @@ function AutoLvotVtiPanel({
     presetsEnabled && showViewFeedback && currentViewId
       ? (VIEW_DOPPLER_TARGETS[currentViewId] ?? [])
       : [];
-  const latestOfId = (id: string) => {
-    for (let i = s.measurements.length - 1; i >= 0; i--) {
-      if (s.measurements[i]!.measurementId === id) return s.measurements[i]!;
-    }
-    return null;
-  };
-  const latestVti = useMemo(() => latestOfId('lvot-vti'), [s.measurements]);
-  const latestAvVti = useMemo(() => latestOfId('av-vti'), [s.measurements]);
-  const latestLvotDiam = useMemo(() => latestOfId('lvot-diameter'), [s.measurements]);
-  const latestE = useMemo(() => latestOfId('mitral-e'), [s.measurements]);
-  const latestA = useMemo(() => latestOfId('mitral-a'), [s.measurements]);
-  const latestEpSept = useMemo(() => latestOfId('e-prime-septal'), [s.measurements]);
-  const latestEpLat = useMemo(() => latestOfId('e-prime-lateral'), [s.measurements]);
-  const latestTr = useMemo(() => latestOfId('tr-vmax'), [s.measurements]);
-  const latestTapse = useMemo(() => latestOfId('tapse'), [s.measurements]);
+  const aggOfId = (id: string) => aggregateProtocolMeasurement(s.measurements, id);
+  const latestVti = useMemo(() => aggOfId('lvot-vti'), [s.measurements]);
+  const latestAvVti = useMemo(() => aggOfId('av-vti'), [s.measurements]);
+  const latestLvotDiam = useMemo(() => aggOfId('lvot-diameter'), [s.measurements]);
+  const latestE = useMemo(() => aggOfId('mitral-e'), [s.measurements]);
+  const latestA = useMemo(() => aggOfId('mitral-a'), [s.measurements]);
+  const latestEpSept = useMemo(() => aggOfId('e-prime-septal'), [s.measurements]);
+  const latestEpLat = useMemo(() => aggOfId('e-prime-lateral'), [s.measurements]);
+  const latestTr = useMemo(() => aggOfId('tr-vmax'), [s.measurements]);
+  const latestTapse = useMemo(() => aggOfId('tapse'), [s.measurements]);
+  const showAfHint = showIdentity && s.truth?.rhythm === 'atrial-fibrillation';
   const dopplerSvMl =
     latestVti && latestLvotDiam && latestLvotDiam.value > 0
       ? strokeVolume(latestLvotDiam.value, latestVti.value)
@@ -1590,13 +1606,34 @@ function AutoLvotVtiPanel({
             {latestE && (
               <span>
                 E {latestE.value.toFixed(2)}
+                {latestE.isAveraged ? ` (${latestE.beatCount}l)` : ''}
                 {latestA ? ` / A ${latestA.value.toFixed(2)}` : ''} m/s
               </span>
             )}
-            {latestEpSept && <span>e′s {latestEpSept.value.toFixed(1)}</span>}
-            {latestEpLat && <span>e′l {latestEpLat.value.toFixed(1)}</span>}
-            {latestTr && <span>IT {latestTr.value.toFixed(2)} m/s</span>}
-            {latestTapse && <span>TAPSE {latestTapse.value.toFixed(2)} cm</span>}
+            {latestEpSept && (
+              <span>
+                e′s {latestEpSept.value.toFixed(1)}
+                {latestEpSept.isAveraged ? ` (${latestEpSept.beatCount}l)` : ''}
+              </span>
+            )}
+            {latestEpLat && (
+              <span>
+                e′l {latestEpLat.value.toFixed(1)}
+                {latestEpLat.isAveraged ? ` (${latestEpLat.beatCount}l)` : ''}
+              </span>
+            )}
+            {latestTr && (
+              <span>
+                IT {latestTr.value.toFixed(2)} m/s
+                {latestTr.isAveraged ? ` (${latestTr.beatCount}l)` : ''}
+              </span>
+            )}
+            {latestTapse && (
+              <span>
+                TAPSE {latestTapse.value.toFixed(2)} cm
+                {latestTapse.isAveraged ? ` (${latestTapse.beatCount}l)` : ''}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -1688,16 +1725,22 @@ function AutoLvotVtiPanel({
             <span className="auto-ef-primary">VTI TSVI {latestVti!.value.toFixed(1)} cm</span>
           )}
           <span className="auto-ef-metrics">
-            {latestVti && <span>TSVI {latestVti.value.toFixed(1)} cm</span>}
+            {latestVti && (
+              <span>
+                TSVI {latestVti.value.toFixed(1)} cm
+                {latestVti.isAveraged ? ` (${latestVti.beatCount}l)` : ''}
+              </span>
+            )}
             {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
             {latestAvVti && (
               <span>
                 VAo {latestAvVti.value.toFixed(1)} cm
-                {latestAvVti.derived?.vmaxMps !== undefined
-                  ? ` · ${latestAvVti.derived.vmaxMps.toFixed(2)} m/s`
+                {latestAvVti.isAveraged ? ` (${latestAvVti.beatCount}l)` : ''}
+                {latestAvVti.latest.derived?.vmaxMps !== undefined
+                  ? ` · ${latestAvVti.latest.derived.vmaxMps.toFixed(2)} m/s`
                   : ''}
-                {latestAvVti.derived?.meanGradientMmHg !== undefined
-                  ? ` · ΔPm ${latestAvVti.derived.meanGradientMmHg.toFixed(0)}`
+                {latestAvVti.latest.derived?.meanGradientMmHg !== undefined
+                  ? ` · ΔPm ${latestAvVti.latest.derived.meanGradientMmHg.toFixed(0)}`
                   : ''}
               </span>
             )}
@@ -1710,6 +1753,11 @@ function AutoLvotVtiPanel({
 
   return (
     <div className="auto-ef" data-auto-lvot="panel">
+      {showAfHint && (
+        <p className="small" role="note">
+          FA activa: mide 3–5 latidos distintos; se promedian automáticamente (ASE).
+        </p>
+      )}
       {onOutflowView ? (
         <>
           {lvotCard}

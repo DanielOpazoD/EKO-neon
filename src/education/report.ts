@@ -14,7 +14,14 @@ import {
   RIGHT_HEART_RULES,
 } from '@/clinical/reference-values';
 import { discProfileFromContour } from '@/simulator/measurements/simpson';
+import {
+  aggregateProtocolMeasurement,
+  formatAggregateValue,
+  multiBeatAverages,
+  type MeasurementAggregate,
+} from './multiBeat';
 import { truthFor } from './scoring/scoring';
+export { aggregateProtocolMeasurement, multiBeatAverages, type MeasurementAggregate };
 import {
   fractionalAreaChange,
   mvaFromPht,
@@ -192,7 +199,10 @@ const LA_VOLUME_INDEX_MAX = 34;
  */
 export function deriveCalculations(ms: Measurement[], bsaM2: number | null = null): DerivedRow[] {
   const rows: DerivedRow[] = [];
-  const v = (id: string) => latest(ms, id)?.value ?? null;
+  const agg = (id: string) => aggregateProtocolMeasurement(ms, id);
+  const v = (id: string) => agg(id)?.value ?? null;
+  const beatNote = (a: MeasurementAggregate | null) =>
+    a && a.isAveraged ? ` (prom. ${a.beatCount} lat.)` : '';
   const edv = v('lv-edv-simpson'),
     esv = v('lv-esv-simpson');
   if (edv !== null && esv !== null && edv > 0) {
@@ -262,8 +272,10 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       inputs: `${laBi ? 'biplano' : 'monoplano'} ${laVolume.toFixed(0)} mL / ${bsaM2.toFixed(2)} m²`,
     });
   }
-  const lvotD = v('lvot-diameter'),
-    lvotVti = v('lvot-vti');
+  const lvotDAgg = agg('lvot-diameter'),
+    lvotVtiAgg = agg('lvot-vti');
+  const lvotD = lvotDAgg?.value ?? null,
+    lvotVti = lvotVtiAgg?.value ?? null;
   let lvotArea: number | null = null;
   if (lvotD !== null) {
     lvotArea = Math.PI * (lvotD / 2) * (lvotD / 2);
@@ -272,7 +284,7 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       label: 'Área del TSVI',
       value: `${lvotArea.toFixed(2)} cm²`,
       formula: 'π·(D/2)²',
-      inputs: `D ${lvotD.toFixed(2)} cm`,
+      inputs: `D ${lvotD.toFixed(2)} cm${beatNote(lvotDAgg)}`,
     });
   }
   if (lvotArea !== null && lvotVti !== null) {
@@ -281,108 +293,124 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       label: 'Volumen sistólico (Doppler)',
       value: `${(lvotArea * lvotVti).toFixed(0)} mL`,
       formula: 'Área TSVI × VTI TSVI',
-      inputs: `${lvotArea.toFixed(2)} cm² × ${lvotVti.toFixed(1)} cm`,
+      inputs: `${lvotArea.toFixed(2)} cm² × ${lvotVti.toFixed(1)} cm${beatNote(lvotVtiAgg)}`,
     });
-    const avVti = v('av-vti');
+    const avVtiAgg = agg('av-vti');
+    const avVti = avVtiAgg?.value ?? null;
     if (avVti !== null && avVti > 0) {
       rows.push({
         id: 'ava-continuity',
         label: 'AVA por continuidad',
         value: `${((lvotArea * lvotVti) / avVti).toFixed(2)} cm²`,
         formula: 'Área TSVI × VTI TSVI / VTI VAo',
-        inputs: `${lvotArea.toFixed(2)} cm² × ${lvotVti.toFixed(1)} cm / ${avVti.toFixed(1)} cm`,
+        inputs: `${lvotArea.toFixed(2)} cm² × ${lvotVti.toFixed(1)} cm${beatNote(lvotVtiAgg)} / ${avVti.toFixed(1)} cm${beatNote(avVtiAgg)}`,
       });
       rows.push({
         id: 'velocity-ratio',
         label: 'Índice de velocidades (VTI)',
         value: (lvotVti / avVti).toFixed(2),
         formula: 'VTI TSVI / VTI VAo',
-        inputs: `${lvotVti.toFixed(1)} / ${avVti.toFixed(1)}`,
+        inputs: `${lvotVti.toFixed(1)}${beatNote(lvotVtiAgg)} / ${avVti.toFixed(1)}${beatNote(avVtiAgg)}`,
       });
     }
   }
-  const avVmax = v('av-vmax');
+  const avVmaxAgg = agg('av-vmax');
+  const avVmax = avVmaxAgg?.value ?? null;
   if (avVmax !== null)
     rows.push({
       id: 'av-peak-gradient',
       label: 'Gradiente pico aórtico',
       value: `${(4 * avVmax * avVmax).toFixed(0)} mmHg`,
       formula: '4·Vmax²',
-      inputs: `Vmax ${avVmax.toFixed(2)} m/s`,
+      inputs: `Vmax ${avVmax.toFixed(2)} m/s${beatNote(avVmaxAgg)}`,
     });
-  const mrVmax = v('mr-vmax');
+  const mrVmaxAgg = agg('mr-vmax');
+  const mrVmax = mrVmaxAgg?.value ?? null;
   if (mrVmax !== null)
     rows.push({
       id: 'mr-peak-gradient',
       label: 'Gradiente pico IM (VI–AI)',
       value: `${(4 * mrVmax * mrVmax).toFixed(0)} mmHg`,
       formula: '4·Vmax²',
-      inputs: `Vmax IM ${mrVmax.toFixed(2)} m/s`,
+      inputs: `Vmax IM ${mrVmax.toFixed(2)} m/s${beatNote(mrVmaxAgg)}`,
     });
-  const mrPisa = latest(ms, 'mr-pisa-radius');
-  if (mrPisa && mrPisa.value > 0 && mrVmax !== null && mrVmax > 0) {
-    const va = mrPisa.derived?.aliasingVelocityMps ?? 0.4;
-    const eroa = pisaEroaCm2(mrPisa.value, va, mrVmax);
+  const mrPisaAgg = agg('mr-pisa-radius');
+  if (mrPisaAgg && mrPisaAgg.value > 0 && mrVmax !== null && mrVmax > 0) {
+    const va = mrPisaAgg.latest.derived?.aliasingVelocityMps ?? 0.4;
+    const eroa = pisaEroaCm2(mrPisaAgg.value, va, mrVmax);
     rows.push({
       id: 'mr-eroa-pisa',
       label: 'ORE de la IM (PISA)',
       value: `${eroa.toFixed(2)} cm²`,
       formula: '2π·r²·v_a / Vmax IM',
-      inputs: `r ${mrPisa.value.toFixed(2)} cm, v_a ${va.toFixed(2)} m/s, Vmax ${mrVmax.toFixed(2)} m/s`,
+      inputs: `r ${mrPisaAgg.value.toFixed(2)} cm${beatNote(mrPisaAgg)}, v_a ${va.toFixed(2)} m/s, Vmax ${mrVmax.toFixed(2)} m/s${beatNote(mrVmaxAgg)}`,
     });
-    const mrVti = v('mr-vti');
+    const mrVtiAgg = agg('mr-vti');
+    const mrVti = mrVtiAgg?.value ?? null;
     if (mrVti !== null && mrVti > 0) {
       rows.push({
         id: 'mr-rvol-pisa',
         label: 'Volumen regurgitante IM (PISA)',
         value: `${(eroa * mrVti).toFixed(0)} mL`,
         formula: 'ORE × VTI IM',
-        inputs: `ORE ${eroa.toFixed(2)} cm² × VTI ${mrVti.toFixed(0)} cm`,
+        inputs: `ORE ${eroa.toFixed(2)} cm² × VTI ${mrVti.toFixed(0)} cm${beatNote(mrVtiAgg)}`,
       });
     }
   }
-  const mitralPht = v('mitral-pht');
+  const mitralPhtAgg = agg('mitral-pht');
+  const mitralPht = mitralPhtAgg?.value ?? null;
   if (mitralPht !== null && mitralPht > 0)
     rows.push({
       id: 'mva-pht',
       label: 'Área valvular mitral (PHT)',
       value: `${mvaFromPht(mitralPht).toFixed(2)} cm²`,
       formula: '220 / PHT',
-      inputs: `PHT ${mitralPht.toFixed(0)} ms`,
+      inputs: `PHT ${mitralPht.toFixed(0)} ms${beatNote(mitralPhtAgg)}`,
     });
-  const pvS = v('pv-s'),
-    pvD = v('pv-d');
+  const pvSAgg = agg('pv-s'),
+    pvDAgg = agg('pv-d');
+  const pvS = pvSAgg?.value ?? null,
+    pvD = pvDAgg?.value ?? null;
   if (pvS !== null && pvD !== null && pvD > 0)
     rows.push({
       id: 'pv-sd-ratio',
       label: 'Relación S/D venosa pulmonar',
       value: (pvS / pvD).toFixed(2),
       formula: 'S / D',
-      inputs: `S ${pvS.toFixed(2)} m/s, D ${pvD.toFixed(2)} m/s`,
+      inputs: `S ${pvS.toFixed(2)} m/s${beatNote(pvSAgg)}, D ${pvD.toFixed(2)} m/s${beatNote(pvDAgg)}`,
     });
-  const e = v('mitral-e'),
-    a = v('mitral-a');
+  const eAgg = agg('mitral-e'),
+    aAgg = agg('mitral-a');
+  const e = eAgg?.value ?? null,
+    a = aAgg?.value ?? null;
   if (e !== null && a !== null && a > 0)
     rows.push({
       id: 'e-a',
       label: 'Relación E/A',
       value: (e / a).toFixed(2),
       formula: 'E / A',
-      inputs: `E ${e.toFixed(2)} m/s, A ${a.toFixed(2)} m/s`,
+      inputs: `E ${e.toFixed(2)} m/s${beatNote(eAgg)}, A ${a.toFixed(2)} m/s${beatNote(aAgg)}`,
     });
-  const es = v('e-prime-septal'),
-    el = v('e-prime-lateral');
+  const esAgg = agg('e-prime-septal'),
+    elAgg = agg('e-prime-lateral');
+  const es = esAgg?.value ?? null,
+    el = elAgg?.value ?? null;
   if (e !== null && (es !== null || el !== null)) {
     const ep = es !== null && el !== null ? (es + el) / 2 : (es ?? el)!;
+    const epNote =
+      esAgg?.isAveraged || elAgg?.isAveraged
+        ? ` (prom. ${Math.max(esAgg?.beatCount ?? 0, elAgg?.beatCount ?? 0)} lat.)`
+        : '';
     rows.push({
       id: 'e-eprime',
       label: `E/e′ ${es !== null && el !== null ? 'promedio' : es !== null ? 'septal' : 'lateral'}`,
       value: ((e * 100) / ep).toFixed(1),
       formula: 'E / e′',
-      inputs: `E ${(e * 100).toFixed(0)} cm/s, e′ ${ep.toFixed(1)} cm/s`,
+      inputs: `E ${(e * 100).toFixed(0)} cm/s${beatNote(eAgg)}, e′ ${ep.toFixed(1)} cm/s${epNote}`,
     });
   }
-  const tr = v('tr-vmax');
+  const trAgg = agg('tr-vmax');
+  const tr = trAgg?.value ?? null;
   if (tr !== null) {
     const rap = rightAtrialPressure(v('ivc-diameter'), v('ivc-diameter-inspiration'));
     rows.push({
@@ -390,7 +418,7 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       label: `PSVD estimada (PAD ${rap.rapMmHg} mmHg)`,
       value: `${rvspFromTr(tr, rap.rapMmHg).toFixed(0)} mmHg`,
       formula: '4·Vmax IT² + PAD',
-      inputs: `Vmax IT ${tr.toFixed(2)} m/s, PAD ${rap.rapMmHg} mmHg (${rap.basis})`,
+      inputs: `Vmax IT ${tr.toFixed(2)} m/s${beatNote(trAgg)}, PAD ${rap.rapMmHg} mmHg (${rap.basis})`,
     });
   }
   const rvEdvM = latest(ms, 'rv-edv'),
@@ -424,6 +452,16 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
         inputs: `ATD ${edA.toFixed(1)} cm², ATS ${esA.toFixed(1)} cm²`,
       });
     }
+  }
+  // Surface explicit multi-beat ASE average rows whenever >= 2 distinct beats were measured for any protocol ID
+  for (const mb of multiBeatAverages(ms)) {
+    rows.push({
+      id: `avg-${mb.measurementId}`,
+      label: `${mb.label} (prom. ${mb.beatCount} lat.)`,
+      value: `${formatAggregateValue(mb.kind, mb.units, mb.value)} ${mb.units}`,
+      formula: `Promedio ASE (${mb.beatCount} latidos)`,
+      inputs: `rango ${formatAggregateValue(mb.kind, mb.units, mb.min)}–${formatAggregateValue(mb.kind, mb.units, mb.max)} ${mb.units}`,
+    });
   }
   return rows;
 }

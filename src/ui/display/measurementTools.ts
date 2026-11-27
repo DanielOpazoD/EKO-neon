@@ -208,6 +208,37 @@ export function toolActsAt(
   }
 }
 
+/**
+ * Estimate which cardiac beat on a frozen Doppler/M-mode strip was clicked so measuring
+ * 3–5 consecutive beats in atrial fibrillation assigns distinct beatIndex values for ASE averaging.
+ */
+function estimateStripBeatIndex(
+  hud: SimOutput,
+  geometry: { x: number; y: number }[],
+): number {
+  const { strip } = hud;
+  if (
+    !geometry.length ||
+    !(strip.width > 0) ||
+    !(strip.columns > 0) ||
+    !(strip.secondsPerColumn > 0)
+  ) {
+    return hud.beatIndex;
+  }
+  const cx = geometry.reduce((acc, p) => acc + p.x, 0) / geometry.length;
+  const col = Math.max(
+    0,
+    Math.min(strip.columns - 1, Math.round(((cx - strip.x) / strip.width) * strip.columns)),
+  );
+  const ageCols = (((strip.headColumn - col) % strip.columns) + strip.columns) % strip.columns;
+  const ageS = ageCols * strip.secondsPerColumn;
+  const rr = Math.max(0.35, hud.rrS);
+  const elapsedInBeatS = Math.max(0, Math.min(1, hud.phase)) * rr;
+  if (ageS <= elapsedInBeatS + 0.08) return hud.beatIndex;
+  const beatsAgo = 1 + Math.floor((ageS - elapsedInBeatS) / rr);
+  return Math.max(0, hud.beatIndex - beatsAgo);
+}
+
 /** Handles clicks on the ultrasound canvas when any measurement tool is armed. */
 export function handleMeasurementToolClick(
   p: { x: number; y: number },
@@ -273,7 +304,8 @@ export function handleMeasurementToolClick(
       captureSector: sectorTool ? { ...m } : undefined,
       captureStrip: sectorTool ? undefined : { ...strip },
       acquisition: hud.acquisition,
-      beatIndex: hud.beatIndex,
+      beatIndex:
+        ms.beatIndex ?? (sectorTool ? hud.beatIndex : estimateStripBeatIndex(hud, ms.geometry)),
       rrS: hud.rrS,
       label: spec ? spec.label : ms.label,
       measurementId: spec ? spec.id : null,
@@ -517,7 +549,8 @@ export function finalizePendingMeasurement(
       captureSector: sectorTool ? { ...m } : undefined,
       captureStrip: sectorTool ? undefined : { ...strip },
       acquisition: hud.acquisition,
-      beatIndex: hud.beatIndex,
+      beatIndex:
+        ms.beatIndex ?? (sectorTool ? hud.beatIndex : estimateStripBeatIndex(hud, ms.geometry)),
       rrS: hud.rrS,
       label: spec ? spec.label : ms.label,
       measurementId: spec ? spec.id : null,

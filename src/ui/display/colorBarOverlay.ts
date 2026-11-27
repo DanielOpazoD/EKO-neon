@@ -47,20 +47,21 @@ export function computeColorBarGeometry(
   const topPad = color.showVariance ? 16 : 8;
   const bottomPad = 18;
   const minClearTop = hudTopClearY > 0 ? hudTopClearY + topPad : 0;
+  const visibleApexY = Math.max(14, sector.apexY);
   let bh: number;
   let by: number;
   if (modality === 'cmm') {
-    const clearTop = Math.max(sector.apexY + 26, minClearTop);
+    const clearTop = Math.max(visibleApexY + 26, minClearTop);
     const maxFitH = Math.max(40, sectorH - clearTop - bottomPad);
     const preferredH = Math.min(92, Math.max(58, sectorH - 180));
     bh = Math.min(preferredH, maxFitH);
-    const maxBy = Math.max(sector.apexY + 20, sectorH - bh - bottomPad);
+    const maxBy = Math.max(visibleApexY + 20, sectorH - bh - bottomPad);
     by = Math.max(clearTop, Math.min(maxBy, Math.max(154, sectorH - bh - 26)));
     if (by > maxBy) by = maxBy;
   } else {
     bh = 104;
-    const clearTop = Math.max(sector.apexY + 42, 128, minClearTop);
-    const maxBy = Math.max(sector.apexY + 26, sectorH - bh - bottomPad);
+    const clearTop = Math.max(visibleApexY + 42, 128, minClearTop);
+    const maxBy = Math.max(visibleApexY + 26, sectorH - bh - bottomPad);
     by = Math.min(clearTop, maxBy);
   }
   const zeroFrac = Math.max(0, Math.min(1, vTop / (2 * scale)));

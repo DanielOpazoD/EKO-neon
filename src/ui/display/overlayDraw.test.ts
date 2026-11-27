@@ -28,4 +28,11 @@ describe('orientation marker on the sector', () => {
     assert.equal(mirrored.labelX, 2 * m.apexX - plain.labelX);
     assert.equal(mirrored.y, plain.y);
   });
+
+  it('keeps the orientation marker inside the visible top border under 2× focalized zoom', () => {
+    const mZoom = computeSectorMapping(spec, 791, 600, false, 2);
+    assert.ok(mZoom.apexY < 0, '2× focalized zoom lifts apex above the top border');
+    const mark = orientationMarker(mZoom);
+    assert.ok(mark.y >= 14, `orientation marker must remain visible, got y=${mark.y}`);
+  });
 });

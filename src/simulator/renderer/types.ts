@@ -274,14 +274,19 @@ export function polarSpecFor(
   const baseLines =
     settings.lineDensity === 'low' ? 64 : settings.lineDensity === 'high' ? 160 : 112;
   const tierMul = tier === 'low' ? 0.75 : tier === 'high' ? 1.35 : 1;
-  const lines = Math.round((baseLines * tierMul * settings.sectorDeg) / 75);
+  // Write-Zoom (HD Zoom): boost acoustic line and axial sampling density when zoomed in so
+  // valve cusps and LVOT borders are genuinely crisper while staying comfortably within frame budget.
+  const zoomBoost = settings.zoom > 1.05 ? Math.min(1.4, Math.sqrt(settings.zoom)) : 1;
+  const lines = Math.round(((baseLines * tierMul * settings.sectorDeg) / 75) * zoomBoost);
   const samples = Math.round(
-    (tier === 'low' ? 160 : tier === 'high' ? 320 : 224) * Math.sqrt(settings.depthCm / 16),
+    (tier === 'low' ? 160 : tier === 'high' ? 320 : 224) *
+      Math.sqrt(settings.depthCm / 16) *
+      zoomBoost,
   );
   // slice-thickness averaging triples the classification work, so it is reserved for the high tier (GPU / offline)
   return {
-    lines: Math.max(32, lines),
-    samples: Math.max(96, samples),
+    lines: Math.max(32, Math.min(320, lines)),
+    samples: Math.max(96, Math.min(512, samples)),
     sectorRad: (settings.sectorDeg * Math.PI) / 180,
     depthCm: settings.depthCm,
     elevationSamples: tier === 'high' ? 3 : 1,
