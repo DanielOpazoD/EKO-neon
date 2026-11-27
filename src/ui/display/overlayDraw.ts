@@ -104,6 +104,12 @@ export function computeSpectralTicks(
   return ticks;
 }
 
+export interface ActiveMeasurementHandle {
+  measurementId: string;
+  vertexIndex: number;
+  dragging: boolean;
+}
+
 export function drawOverlay(
   canvas: HTMLCanvasElement,
   hud: SimOutput,
@@ -111,6 +117,7 @@ export function drawOverlay(
   pending: { x: number; y: number }[],
   lassoDraft: { x: number; y: number }[] = [],
   livePreview: LivePreview | null = null,
+  activeHandle: ActiveMeasurementHandle | null = null,
 ): void {
   const { ui, activeTool, measurements, reviewMarkers } = st;
   const {
@@ -415,6 +422,22 @@ export function drawOverlay(
   }
   for (const { ms, geometry } of shown) {
     drawGeometry(ctx, geometry, ms.kind, '#ffc857', ms.kind === 'vti' ? stripBaselineY : undefined);
+    if (activeHandle && activeHandle.measurementId === ms.id) {
+      const pt = geometry[activeHandle.vertexIndex];
+      if (pt) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, activeHandle.dragging ? 8.5 : 7, 0, Math.PI * 2);
+        ctx.fillStyle = activeHandle.dragging
+          ? 'rgba(92, 200, 255, 0.28)'
+          : 'rgba(92, 200, 255, 0.16)';
+        ctx.fill();
+        ctx.strokeStyle = '#5cc8ff';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
   }
   for (const { ms, geometry } of shown) {
     let anchor = geometry[geometry.length - 1];

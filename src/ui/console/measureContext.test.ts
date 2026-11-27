@@ -4,6 +4,7 @@ import { MEASUREMENT_SPECS } from '@/simulator/measurements/protocol';
 import type { Measurement } from '@/simulator/measurements/types';
 import {
   captureModalityCheck,
+  computeQuickStudySteps,
   isFreeToolCompatible,
   isTimeInCineWindow,
   phaseTag,
@@ -180,5 +181,38 @@ describe('measurement context & compatibility helpers', () => {
     assert.equal(isTimeInCineWindow(10.5, { startS: 9.0, endS: 12.0 }), true);
     assert.equal(isTimeInCineWindow(7.2, { startS: 9.0, endS: 12.0 }), false);
     assert.equal(isTimeInCineWindow(null, { startS: 9.0, endS: 12.0 }), false);
+  });
+
+  it('derives the 4-step Quick Study clinical checklist purely from measurements', () => {
+    const empty = computeQuickStudySteps([], 'plax');
+    assert.equal(empty.completedCount, 0);
+    assert.equal(empty.steps[0]!.active, true);
+    assert.equal(empty.steps[1]!.targetViewId, 'a4c');
+
+    // Add PLAX + A4C only -> PLAX done, VI FE partial (1/2) targeting A2C next
+    const mid: Measurement[] = [
+      { ...makeSimp('lv-edv-simpson', 'plax', 4.8, 1), kind: 'linear', measurementId: 'lv-edd', units: 'cm' },
+      makeSimp('lv-edv-simpson', 'a4c', 120, 10),
+      makeSimp('lv-esv-simpson', 'a4c', 45, 20),
+    ];
+    const sMid = computeQuickStudySteps(mid, 'a4c');
+    assert.equal(sMid.completedCount, 1);
+    assert.equal(sMid.steps[0]!.status, 'done');
+    assert.equal(sMid.steps[1]!.status, 'partial');
+    assert.equal(sMid.steps[1]!.detail, '1/2');
+    assert.equal(sMid.steps[1]!.targetViewId, 'a2c');
+
+    // Complete A2C + LVOT VTI + RV TAPSE -> 4/4 done
+    const full: Measurement[] = [
+      ...mid,
+      makeSimp('lv-edv-simpson', 'a2c', 118, 30),
+      makeSimp('lv-esv-simpson', 'a2c', 44, 40),
+      { ...makeSimp('lv-edv-simpson', 'a5c', 19.2, 50), kind: 'vti', measurementId: 'lvot-vti', modality: 'pw', units: 'cm' },
+      { ...makeSimp('rv-edv', 'a4c', 2.2, 60), kind: 'linear', measurementId: 'tapse', modality: 'm-mode', units: 'cm' },
+    ];
+    const sFull = computeQuickStudySteps(full, 'rv-focused');
+    assert.equal(sFull.completedCount, 4);
+    assert.ok(sFull.steps.every((st) => st.status === 'done'));
+    assert.equal(sFull.steps[3]!.active, true);
   });
 });

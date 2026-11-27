@@ -257,6 +257,7 @@ export interface EducationSlice {
     workerMode: 'worker' | 'inline';
   }) => void;
   addMeasurement: (m: Measurement) => void;
+  updateMeasurement: (id: string, patch: Partial<Measurement>) => void;
   removeMeasurement: (id: string) => void;
   clearMeasurements: () => void;
   setActiveTool: (t: EducationSlice['activeTool']) => void;
