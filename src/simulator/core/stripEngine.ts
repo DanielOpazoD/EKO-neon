@@ -39,7 +39,14 @@ import {
   NO_ARTIFACTS,
 } from '@/simulator/renderer/postprocess/consolePipeline';
 import type { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
-import type { PolarFrame, PolarFrameSpec, Scene, ScenePhysics, TintMapId } from '@/simulator/renderer/types';
+import type {
+  ImagingModality,
+  PolarFrame,
+  PolarFrameSpec,
+  Scene,
+  ScenePhysics,
+  TintMapId,
+} from '@/simulator/renderer/types';
 import {
   binsToTrace,
   buildRowMap,
@@ -58,6 +65,12 @@ import {
   autoTraceSpectralEnvelope,
   STRIP_MM_WIDTH,
 } from './strip/autoTrace';
+import {
+  autoMeasureMitralInflow,
+  autoMeasureTapse,
+  autoMeasureTdiEPrime,
+  autoMeasureTrVmax,
+} from './strip/autoMeasureStrip';
 import { writeCmmColumn } from './strip/cmmColumn';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
 import { PATH_STEP_CM, relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
@@ -134,6 +147,7 @@ export class StripEngine {
   private acquisitionKey = '';
   /** Calibration belongs to the stored signal, never to pending console input. */
   private acquired: {
+    modality: ImagingModality;
     spectral: SpectralSettings;
     color: ColorSettings;
     depthCm: number;
@@ -326,6 +340,7 @@ export class StripEngine {
       this.reset();
       this.acquisitionKey = key;
       this.acquired = {
+        modality: inp.modality,
         spectral: { ...inp.spectral },
         color: { ...inp.color },
         depthCm: spec.depthCm,
@@ -617,8 +632,11 @@ export class StripEngine {
       const src =
         columnSource(this.mmode, phases[i]!, bins >> 2) ??
         columnSource(this.mmode, phases[i]!, bins >> 1);
-      if (src)
-        this.writeMmodeColumn(this.stripHead % this.stripCols, src, phases[i]!, pulses, spec, ctx);
+      if (src) {
+        const col = this.stripHead % this.stripCols;
+        this.writeMmodeColumn(col, src, phases[i]!, pulses, spec, ctx);
+        this.stripSampleTime[col] = times[i]!;
+      }
       this.headTimeS = times[i]!;
       this.stripHead++;
     }
@@ -923,6 +941,101 @@ export class StripEngine {
         this.acquired.aliasing,
       );
       return { kind: 'autoTraceBeat', result };
+    }
+    if (req.kind === 'autoMeasureStrip') {
+      if (!this.acquired || !phaseMarks) {
+        return {
+          kind: 'autoMeasureStrip',
+          result: {
+            ok: false,
+            target: req.target,
+            reason: 'wrong-modality',
+            message: 'Activa la modalidad Doppler o Modo M correspondiente para medir automáticamente.',
+          },
+        };
+      }
+      if (req.target === 'tapse') {
+        if (this.stripKind !== 'm-mode' || !this.stripMmode) {
+          return {
+            kind: 'autoMeasureStrip',
+            result: {
+              ok: false,
+              target: 'tapse',
+              reason: 'wrong-modality',
+              message: 'Activa Modo M sobre el anillo tricuspídeo lateral para medir TAPSE automáticamente.',
+            },
+          };
+        }
+        return {
+          kind: 'autoMeasureStrip',
+          result: autoMeasureTapse(
+            this.stripMmode,
+            this.mmodeSamples,
+            this.stripCols,
+            this.displayCols,
+            this.stripHead,
+            this.acquired.depthCm,
+            this.acquired.gateDepthCm,
+            this.stripPhase,
+            this.stripSampleTime,
+            phaseMarks,
+            this.acquired.modality,
+          ),
+        };
+      }
+      const strip = this.stripSpectral;
+      if (!strip || this.stripKind !== 'spectral') {
+        return {
+          kind: 'autoMeasureStrip',
+          result: {
+            ok: false,
+            target: req.target,
+            reason: 'wrong-modality',
+            message: 'Activa Doppler espectral (PW, CW o TDI) para esta medición automática.',
+          },
+        };
+      }
+      const eff = this.effectiveSpectral(this.acquired);
+      const result =
+        req.target === 'mitral-inflow'
+          ? autoMeasureMitralInflow(
+              strip,
+              this.stripCols,
+              this.displayCols,
+              this.stripHead,
+              this.stripPhase,
+              this.stripBeatIndex,
+              this.stripSampleTime,
+              eff,
+              phaseMarks,
+              this.acquired.modality,
+            )
+          : req.target === 'tdi-e-prime'
+            ? autoMeasureTdiEPrime(
+                strip,
+                this.stripCols,
+                this.displayCols,
+                this.stripHead,
+                this.stripPhase,
+                this.stripBeatIndex,
+                this.stripSampleTime,
+                eff,
+                phaseMarks,
+                this.acquired.modality,
+              )
+            : autoMeasureTrVmax(
+                strip,
+                this.stripCols,
+                this.displayCols,
+                this.stripHead,
+                this.stripPhase,
+                this.stripBeatIndex,
+                this.stripSampleTime,
+                eff,
+                phaseMarks,
+                this.acquired.modality,
+              );
+      return { kind: 'autoMeasureStrip', result };
     }
     return null;
   }
