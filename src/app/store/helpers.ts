@@ -155,6 +155,7 @@ export function freshSession() {
   return {
     sessionEpoch: ++sessionCounter,
     measurements: [],
+    captures: [],
     frozen: false,
     cineOffset: 0,
     probe: { ...START_PROBE },

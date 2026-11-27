@@ -473,3 +473,202 @@
 .overlay.review.lasso {
   cursor: crosshair;
 }
+
+/* Capture Store button (ModeBar) & still galleries (Capturas + Clinical Report) */
+.store-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.store-btn.saved {
+  border-color: var(--ok, #57d38c);
+  color: var(--ok, #57d38c);
+  background: rgba(87, 211, 140, 0.12);
+}
+.store-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: rgba(92, 200, 255, 0.18);
+  color: var(--accent, #5cc8ff);
+}
+.capture-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.capture-thumb,
+.cr-capture-fig {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  overflow: hidden;
+  background: #06080c;
+  display: flex;
+  flex-direction: column;
+}
+.capture-thumb img,
+.cr-capture-fig img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: #000;
+}
+.capture-thumb figcaption,
+.cr-capture-fig figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 7px;
+  font-size: var(--fs-xs, 11px);
+  color: var(--muted);
+  background: var(--panel);
+  border-top: 1px solid var(--border-soft);
+}
+.capture-thumb figcaption span,
+.cr-capture-fig figcaption span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.capture-del {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.capture-del:hover {
+  color: var(--bad, #f87171);
+}
+.cr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 4px;
+}
+.cr-print-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cr-print-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+.cr-capture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+@media print {
+  @page {
+    margin: 14mm;
+  }
+  html,
+  body,
+  #root,
+  .app {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    display: block !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  .topbar,
+  .modebar,
+  .mobile-panels,
+  .finish-exam-confirm,
+  .no-print,
+  .cr-eval.hide-in-print {
+    display: none !important;
+  }
+  .screen {
+    padding: 0 !important;
+    max-width: none !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  .clinical-report {
+    margin: 0 0 16px !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 6px !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+  }
+  .clinical-report .cr-head,
+  .clinical-report .cr-section {
+    border-color: #cbd5e1 !important;
+  }
+  .clinical-report .cr-meta dt,
+  .clinical-report .cr-section h3,
+  .small {
+    color: #475569 !important;
+  }
+  .clinical-report .cr-meta dd,
+  .clinical-report td,
+  .clinical-report th,
+  .clinical-report li,
+  .clinical-report h2 {
+    color: #0f172a !important;
+  }
+  .clinical-report table,
+  .cr-eval table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+  .clinical-report th,
+  .clinical-report td,
+  .cr-eval th,
+  .cr-eval td {
+    border-bottom: 1px solid #e2e8f0 !important;
+  }
+  .clinical-report tr,
+  .cr-capture-fig {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+  .cr-capture-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .cr-capture-fig {
+    border-color: #cbd5e1 !important;
+    background: #000000 !important;
+  }
+  .cr-capture-fig figcaption {
+    background: #f8fafc !important;
+    color: #1e293b !important;
+    border-top-color: #cbd5e1 !important;
+  }
+  .pill {
+    border: 1px solid #94a3b8 !important;
+    background: #f8fafc !important;
+    color: #0f172a !important;
+  }
+}

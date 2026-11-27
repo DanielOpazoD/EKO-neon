@@ -24,6 +24,20 @@ import type { ProductMode } from '../modePolicy';
 
 export type { ProductMode };
 
+/** Composited ultrasound still saved to the current study via «Guardar» (Store / K). */
+export interface StudyCapture {
+  id: string;
+  dataUrl: string;
+  modality: ImagingModality;
+  /** View recognized at capture time; never rendered in UI during an active exam. */
+  viewId: string | null;
+  viewScore: number | null;
+  phase: number;
+  frameId: number;
+  frozen: boolean;
+  createdAt: string;
+}
+
 /** Right-console tabs (PR: tabbed console). Persisted so a reload restores the working context. */
 export type ConsoleTab = 'adquirir' | 'imagen' | 'doppler' | 'medir' | 'lab' | 'revisar';
 
@@ -184,6 +198,8 @@ export interface EducationSlice {
   targetViewId: string | null;
   truth: StructuredEchoTruth | null;
   measurements: Measurement[];
+  /** Ultrasound stills stored into this study via «Guardar» (Store). Cleared on freshSession. */
+  captures: StudyCapture[];
   activeTool:
     | 'none'
     | 'caliper'
@@ -260,6 +276,9 @@ export interface EducationSlice {
   updateMeasurement: (id: string, patch: Partial<Measurement>) => void;
   removeMeasurement: (id: string) => void;
   clearMeasurements: () => void;
+  addCapture: (c: StudyCapture) => void;
+  removeCapture: (id: string) => void;
+  clearCaptures: () => void;
   setActiveTool: (t: EducationSlice['activeTool']) => void;
   /** Start capturing a protocol measurement: selects its tool and remembers the semantic id. */
   setActiveMeasurement: (id: string | null) => void;

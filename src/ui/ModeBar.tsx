@@ -4,7 +4,8 @@ import { useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
 import { examClosed, exportCaseTag, modePolicy } from '@/app/modePolicy';
 import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
-import { IconPause, IconPlay, IconSliders, IconTorso } from './icons';
+import { captureCurrentStudyStill } from '@/app/studyCapture';
+import { IconCamera, IconPause, IconPlay, IconSliders, IconTorso } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
 import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
 
@@ -19,6 +20,7 @@ export function ModeBar() {
     useShallow((st) => ({
       // a finished exam keeps its frozen image: the store refuses a modality or a resume (`examClosed`)
       closed: examClosed(st),
+      captureCount: st.captures.length,
       frozen: st.frozen,
       modality: st.modality,
       setModality: st.setModality,
@@ -29,6 +31,17 @@ export function ModeBar() {
       workerMode: st.workerMode,
     })),
   );
+  const [savedFlash, setSavedFlash] = useState(false);
+  const flashTimer = useRef<number | null>(null);
+  useEffect(() => () => window.clearTimeout(flashTimer.current ?? undefined), []);
+  const onStore = () => {
+    if (s.closed) return;
+    if (captureCurrentStudyStill()) {
+      setSavedFlash(true);
+      window.clearTimeout(flashTimer.current ?? undefined);
+      flashTimer.current = window.setTimeout(() => setSavedFlash(false), 1200);
+    }
+  };
   const segRef = useRef<HTMLDivElement>(null);
   const pill = useSlidingPill(segRef, s.modality);
   return (
@@ -70,6 +83,23 @@ export function ModeBar() {
       >
         <i className="run-dot" aria-hidden="true" />
         {s.frozen ? 'Reanudar' : 'Congelar'}
+      </button>
+      <button
+        type="button"
+        className={`store-btn${savedFlash ? ' saved' : ''}`}
+        onClick={onStore}
+        disabled={s.closed}
+        data-tip={
+          s.closed
+            ? 'Examen finalizado: no se pueden guardar más capturas'
+            : 'Guardar imagen actual en la galería del estudio e informe (Store)'
+        }
+        data-tip-key={s.closed ? undefined : 'K'}
+        aria-label="Guardar captura en el estudio"
+      >
+        <IconCamera size={14} />
+        <span>{savedFlash ? 'Guardada' : 'Guardar'}</span>
+        {s.captureCount > 0 && <span className="store-badge">{s.captureCount}</span>}
       </button>
       {s.frozen && <CineControls />}
       <span className="spacer" style={{ flex: 1 }} />

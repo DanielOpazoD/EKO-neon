@@ -38,6 +38,28 @@ export function displayPngBlob(): Promise<Blob | null> {
 }
 
 /**
+ * Capture a downscaled JPEG data URL (max 640 px wide) of the composed display (ultrasound +
+ * overlays + mandatory synthetic-training watermark) for the study's in-memory capture gallery and
+ * printable clinical report.
+ */
+export function captureStudyStillDataUrl(maxWidth = 640): string | null {
+  const src = composeDisplay();
+  if (!src || !src.width || !src.height) return null;
+  const scale = src.width > maxWidth ? maxWidth / src.width : 1;
+  const w = Math.max(1, Math.round(src.width * scale));
+  const h = Math.max(1, Math.round(src.height * scale));
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(src, 0, 0, w, h);
+  return out.toDataURL('image/jpeg', 0.86);
+}
+
+/**
  * Record a short composed WebM clip (image + overlays + ECG + synthetic training watermark)
  * directly from the display canvases and trigger download. Returns true on success.
  */

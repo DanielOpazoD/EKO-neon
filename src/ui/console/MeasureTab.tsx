@@ -1,4 +1,5 @@
 import { examClosed, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
+import { formatCaptureCaption } from '@/app/studyCapture';
 import { useHudStore, useSimStore, type SimStore } from '@/app/store';
 import { loadCaseById } from '@/cases';
 import { strokeVolume } from '@/clinical/formulas';
@@ -130,6 +131,7 @@ export function MeasureTab() {
     useShallow((st) => ({
       activeMeasurementId: st.activeMeasurementId,
       activeTool: st.activeTool,
+      captures: st.captures,
       caseId: st.caseId,
       examFinished: st.examFinished,
       frozen: st.frozen,
@@ -138,6 +140,7 @@ export function MeasureTab() {
       mode: st.mode,
       truth: st.truth,
       jumpCinePhase: st.jumpCinePhase,
+      removeCapture: st.removeCapture,
       removeMeasurement: st.removeMeasurement,
       setActiveMeasurement: st.setActiveMeasurement,
       setActiveTool: st.setActiveTool,
@@ -352,8 +355,10 @@ export function MeasureTab() {
           onClick={() => setSubTab('capturas')}
         >
           Capturas
-          {s.measurements.length > 0 && (
-            <span className="measure-subtab-count">{s.measurements.length}</span>
+          {s.measurements.length + s.captures.length > 0 && (
+            <span className="measure-subtab-count">
+              {s.measurements.length + s.captures.length}
+            </span>
           )}
         </button>
       </div>
@@ -653,7 +658,9 @@ function CapturasWorksheet({
   onBackToMeasure,
   onOpenReport,
 }: {
-  s: Pick<SimStore, 'measurements' | 'removeMeasurement' | 'truth'> & { closed: boolean };
+  s: Pick<SimStore, 'captures' | 'measurements' | 'removeCapture' | 'removeMeasurement' | 'truth'> & {
+    closed: boolean;
+  };
   showView: boolean;
   showIdentity: boolean;
   displayedFrameId: number | null;
@@ -668,10 +675,10 @@ function CapturasWorksheet({
   );
   const showAfTip = showIdentity && s.truth?.rhythm === 'atrial-fibrillation';
 
-  if (!s.measurements.length) {
+  if (!s.measurements.length && !s.captures.length) {
     return (
       <div className="empty measure-empty">
-        <p>Todavía no has tomado mediciones en este estudio.</p>
+        <p>Todavía no has tomado mediciones ni capturas en este estudio.</p>
         {showAfTip && (
           <p className="small">
             Fibrilación auricular: mide 3–5 latidos distintos; EKO-neon promedia automáticamente por
@@ -695,6 +702,37 @@ function CapturasWorksheet({
           automáticamente el promedio ASE.
         </p>
       )}
+      {s.captures.length > 0 && (
+        <Section title={`Imágenes guardadas (${s.captures.length})`}>
+          <div className="capture-gallery" data-capture-gallery="worksheet">
+            {s.captures.map((cap, idx) => (
+              <figure key={cap.id} className="capture-thumb">
+                <img src={cap.dataUrl} alt={`Captura ${idx + 1}: ${formatCaptureCaption(cap, showIdentity)}`} />
+                <figcaption>
+                  <span>{formatCaptureCaption(cap, showIdentity)}</span>
+                  {!s.closed && (
+                    <button
+                      type="button"
+                      className="capture-del"
+                      aria-label={`Eliminar captura ${idx + 1}`}
+                      onClick={() => s.removeCapture(cap.id)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+          {!s.measurements.length && (
+            <div className="measure-head" style={{ marginTop: 8 }}>
+              <button type="button" className="btn-primary-soft" onClick={onOpenReport}>
+                Ver en Informe →
+              </button>
+            </div>
+          )}
+        </Section>
+      )}
       {derived.length > 0 && (
         <Section title="Cálculos derivados">
           <div className="derived-kpi-grid">
@@ -707,17 +745,19 @@ function CapturasWorksheet({
           </div>
         </Section>
       )}
-      <Section title={`Mediciones tomadas (${s.measurements.length})`}>
-        <MeasureList
-          s={s}
-          showView={showView}
-          displayedFrameId={displayedFrameId}
-          cineWindow={cineWindow}
-          onInspect={onInspect}
-          derivedText={derived.map((d) => `${d.label}: ${d.value}`).join('\n')}
-          onOpenReport={onOpenReport}
-        />
-      </Section>
+      {s.measurements.length > 0 && (
+        <Section title={`Mediciones tomadas (${s.measurements.length})`}>
+          <MeasureList
+            s={s}
+            showView={showView}
+            displayedFrameId={displayedFrameId}
+            cineWindow={cineWindow}
+            onInspect={onInspect}
+            derivedText={derived.map((d) => `${d.label}: ${d.value}`).join('\n')}
+            onOpenReport={onOpenReport}
+          />
+        </Section>
+      )}
     </>
   );
 }
