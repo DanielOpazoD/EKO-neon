@@ -51,6 +51,7 @@ import {
   type FlowSample,
 } from './jetProfiles';
 import {
+  mrJetInitialDirection,
   prepareClutterContext,
   RA_VESTIBULE_CM,
   sampleClutterAxialVelocity,
@@ -68,6 +69,7 @@ export {
   coronarySinusVelocityMps,
   flowPropagationCmps,
   lvotNarrowing,
+  mrJetInitialDirection,
   prepareClutterContext,
   pulmonaryRegurgitationVelocityMps,
   pulmonaryVeinPeaks,
