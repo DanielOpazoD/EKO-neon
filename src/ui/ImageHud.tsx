@@ -8,6 +8,7 @@ import { isStripModality } from '@/simulator/renderer/modality';
 import type { ProductMode } from '@/app/modePolicy';
 import { formatMHz } from './format';
 import { gpuNotice } from './gpuNotice';
+import { ViewQuickMenu } from './ViewQuickMenu';
 
 const RHYTHM_LABEL: Record<string, string> = {
   sinus: 'Sinusal',
@@ -77,7 +78,9 @@ export function ImageHud() {
   const rhythm = truth && identity ? ` · ${RHYTHM_LABEL[truth.rhythm] ?? truth.rhythm}` : '';
   // the view line sits bottom-right on the 2D image; with a strip below the sector it joins the top-right group, off
   // the strip's velocity scale
-  const viewLine = modePolicy(mode).showViewFeedback ? <ViewLine mode={mode} /> : null;
+  const viewLine = modePolicy(mode).showViewFeedback ? (
+    <ViewLine mode={mode} placement={strip ? 'down-left' : 'up-right'} />
+  ) : null;
   return (
     <div className="img-hud">
       <div className="hud-box hud-tl" ref={titleBoxRef}>
@@ -110,8 +113,14 @@ export function ImageHud() {
   );
 }
 
-/** The recognised view and its score, with a ring in the colour of the guide; null in exam mode. */
-function ViewLine({ mode }: { mode: ProductMode }) {
+/** The recognised view and its score, with a ring in the colour of the guide and 1-click switcher outside exam. */
+function ViewLine({
+  mode,
+  placement,
+}: {
+  mode: ProductMode;
+  placement: 'up-right' | 'down-left';
+}) {
   const { hasView, bestViewId, score } = useHudStore(
     useShallow((h) => ({
       hasView: h.hud?.view != null,
@@ -121,18 +130,20 @@ function ViewLine({ mode }: { mode: ProductMode }) {
   );
   if (!modePolicy(mode).showViewFeedback) return null;
   return (
-    <span className="hud-view">
-      {hasView ? (
-        <i
-          className="mini-ring"
-          aria-hidden="true"
-          style={{
-            ['--p' as string]: `${Math.max(0, Math.min(100, score))}%`,
-            color: score >= 75 ? 'var(--ok)' : score >= 50 ? 'var(--warn)' : 'var(--bad)',
-          }}
-        />
-      ) : null}
-      Vista {bestViewId ? `${viewLabel(bestViewId)} ${score}` : '—'}
-    </span>
+    <ViewQuickMenu placement={placement} dark currentViewId={bestViewId}>
+      <span className="hud-view">
+        {hasView ? (
+          <i
+            className="mini-ring"
+            aria-hidden="true"
+            style={{
+              ['--p' as string]: `${Math.max(0, Math.min(100, score))}%`,
+              color: score >= 75 ? 'var(--ok)' : score >= 50 ? 'var(--warn)' : 'var(--bad)',
+            }}
+          />
+        ) : null}
+        Vista {bestViewId ? `${viewLabel(bestViewId)} ${score}` : '—'}
+      </span>
+    </ViewQuickMenu>
   );
 }

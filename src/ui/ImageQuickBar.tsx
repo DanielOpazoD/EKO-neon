@@ -1,41 +1,181 @@
 import { useSimStore } from '@/app/store';
+import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
+import type { SpectralModality } from '@/simulator/doppler/spectral/spectrum';
 import { useShallow } from 'zustand/shallow';
 import { IconMinus, IconPlus } from './icons';
+import {
+  quickBarGroupFor,
+  stepColorBaseline,
+  stepColorScale,
+  stepSpectralBaseline,
+  stepSpectralScale,
+} from './imageQuickBarModel';
 
 /**
- * Depth and gain on the image itself (decision 187): the two knobs a sonographer turns most, as steppers that show
- * while the pointer is over the image or a stepper has focus, with the same steps as their keys ([ ] and − +). The
- * store clamps each value to its range.
+ * Contextual on-image quick controls (decision 187): surfaces the exact 2–3 knobs a sonographer
+ * turns most for the active modality right over the image so they never have to leave Medir:
+ * - 2D / M-mode: Depth, Gain, Auto-Opt
+ * - Color / CMM: Nyquist Scale, Baseline, Color Gain, Depth
+ * - PW / CW / TDI: Scale, Baseline, Spectral Gain, Invert
  */
 export function ImageQuickBar() {
   const s = useSimStore(
     useShallow((st) => ({
       autoOptimize: st.autoOptimize,
-      depthCm: st.settings.depthCm,
+      color: st.color,
+      cursorThetaRad: st.cursorThetaRad,
       frozen: st.frozen,
-      gainDb: st.settings.gainDb,
+      gateDepthCm: st.gateDepthCm,
+      modality: st.modality,
+      setColor: st.setColor,
       setSettings: st.setSettings,
+      setSpectral: st.setSpectral,
+      settings: st.settings,
+      spectral: st.spectral,
     })),
   );
   if (s.frozen) return null;
+
+  const group = quickBarGroupFor(s.modality);
+  const limits = acquisitionLimits(s);
+
+  if (group === 'color') {
+    const base = s.color.baselineShiftMps;
+    return (
+      <div className="quick-bar" role="group" aria-label="Ajustes rápidos de Doppler color">
+        <Stepper
+          label="Escala"
+          value={`±${s.color.scaleMps.toFixed(2)}`}
+          less="Bajar escala color (Nyquist)"
+          more="Subir escala color (Nyquist)"
+          onLess={() =>
+            s.setColor(stepColorScale(s.color.scaleMps, base, limits.color.maxScaleMps, -1))
+          }
+          onMore={() =>
+            s.setColor(stepColorScale(s.color.scaleMps, base, limits.color.maxScaleMps, 1))
+          }
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <Stepper
+          label="Base"
+          value={`${base >= 0 ? '+' : '−'}${Math.abs(base).toFixed(2)}`}
+          less="Bajar línea base color"
+          more="Subir línea base color"
+          onLess={() =>
+            s.setColor({ baselineShiftMps: stepColorBaseline(s.color.scaleMps, base, -1) })
+          }
+          onMore={() =>
+            s.setColor({ baselineShiftMps: stepColorBaseline(s.color.scaleMps, base, 1) })
+          }
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <Stepper
+          label="Gan."
+          value={`${s.color.gainDb > 0 ? '+' : ''}${s.color.gainDb} dB`}
+          less="Menos ganancia color"
+          more="Más ganancia color"
+          onLess={() => s.setColor({ gainDb: Math.max(-20, s.color.gainDb - 2) })}
+          onMore={() => s.setColor({ gainDb: Math.min(20, s.color.gainDb + 2) })}
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <Stepper
+          label="Prof."
+          value={`${s.settings.depthCm} cm`}
+          less="Menos profundidad"
+          more="Más profundidad"
+          onLess={() => s.setSettings({ depthCm: s.settings.depthCm - 1 })}
+          onMore={() => s.setSettings({ depthCm: s.settings.depthCm + 1 })}
+        />
+      </div>
+    );
+  }
+
+  if (group === 'spectral') {
+    const mod = s.modality as SpectralModality;
+    const isCw = mod === 'cw';
+    const base = s.spectral.baselineShiftMps;
+    const scaleText = isCw
+      ? `±${s.spectral.scaleMps.toFixed(1)} m/s`
+      : `±${Math.round(s.spectral.scaleMps * 100)}`;
+    const baseText = isCw
+      ? `${base >= 0 ? '+' : '−'}${Math.abs(base).toFixed(1)}`
+      : `${base >= 0 ? '+' : '−'}${Math.round(Math.abs(base) * 100)}`;
+    return (
+      <div className="quick-bar" role="group" aria-label="Ajustes rápidos de Doppler espectral">
+        <Stepper
+          label="Escala"
+          value={scaleText}
+          less="Bajar escala espectral"
+          more="Subir escala espectral"
+          onLess={() =>
+            s.setSpectral(
+              stepSpectralScale(mod, s.spectral.scaleMps, base, limits.spectral.maxScaleMps, -1),
+            )
+          }
+          onMore={() =>
+            s.setSpectral(
+              stepSpectralScale(mod, s.spectral.scaleMps, base, limits.spectral.maxScaleMps, 1),
+            )
+          }
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <Stepper
+          label="Base"
+          value={baseText}
+          less="Desplazar ventana hacia negativo (más margen abajo)"
+          more="Desplazar ventana hacia positivo (más margen arriba)"
+          onLess={() =>
+            s.setSpectral({
+              baselineShiftMps: stepSpectralBaseline(mod, s.spectral.scaleMps, base, -1),
+            })
+          }
+          onMore={() =>
+            s.setSpectral({
+              baselineShiftMps: stepSpectralBaseline(mod, s.spectral.scaleMps, base, 1),
+            })
+          }
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <Stepper
+          label="Gan."
+          value={`${s.spectral.gainDb > 0 ? '+' : ''}${s.spectral.gainDb} dB`}
+          less="Menos ganancia espectral"
+          more="Más ganancia espectral"
+          onLess={() => s.setSpectral({ gainDb: Math.max(-20, s.spectral.gainDb - 2) })}
+          onMore={() => s.setSpectral({ gainDb: Math.min(20, s.spectral.gainDb + 2) })}
+        />
+        <i className="quick-sep" aria-hidden="true" />
+        <button
+          type="button"
+          className={`quick-auto${s.spectral.invert ? ' on' : ''}`}
+          aria-pressed={s.spectral.invert}
+          data-tip="Invertir polaridad del espectro"
+          onClick={() => s.setSpectral({ invert: !s.spectral.invert })}
+        >
+          Inv
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="quick-bar" role="group" aria-label="Profundidad y ganancia">
       <Stepper
         label="Profundidad"
-        value={`${s.depthCm} cm`}
+        value={`${s.settings.depthCm} cm`}
         less="Menos profundidad"
         more="Más profundidad"
-        onLess={() => s.setSettings({ depthCm: s.depthCm - 1 })}
-        onMore={() => s.setSettings({ depthCm: s.depthCm + 1 })}
+        onLess={() => s.setSettings({ depthCm: s.settings.depthCm - 1 })}
+        onMore={() => s.setSettings({ depthCm: s.settings.depthCm + 1 })}
       />
       <i className="quick-sep" aria-hidden="true" />
       <Stepper
         label="Ganancia"
-        value={`${s.gainDb > 0 ? '+' : ''}${s.gainDb} dB`}
+        value={`${s.settings.gainDb > 0 ? '+' : ''}${s.settings.gainDb} dB`}
         less="Menos ganancia"
         more="Más ganancia"
-        onLess={() => s.setSettings({ gainDb: s.gainDb - 2 })}
-        onMore={() => s.setSettings({ gainDb: s.gainDb + 2 })}
+        onLess={() => s.setSettings({ gainDb: s.settings.gainDb - 2 })}
+        onMore={() => s.setSettings({ gainDb: s.settings.gainDb + 2 })}
       />
       <i className="quick-sep" aria-hidden="true" />
       <button
@@ -63,6 +203,7 @@ function Stepper(props: {
     <span className="quick-stepper">
       <span className="quick-label">{props.label}</span>
       <button
+        type="button"
         className="icon-btn"
         aria-label={props.less}
         data-tip={props.less}
@@ -74,6 +215,7 @@ function Stepper(props: {
         {props.value}
       </span>
       <button
+        type="button"
         className="icon-btn"
         aria-label={props.more}
         data-tip={props.more}
