@@ -13,7 +13,7 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: 'Alt + ↑ ↓', action: 'Tilt (abanico) +/− 3°' },
   { keys: 'W / S', action: 'Presión +/−' },
   { keys: 'Espacio', action: 'Congelar / reanudar' },
-  { keys: '2 · C · M · P · X · T', action: '2D · Color · modo M · PW · CW · TDI' },
+  { keys: '2 · C · M · ⇧M · P · X · T', action: '2D · Color · modo M · CMM · PW · CW · TDI' },
   { keys: '[ / ]', action: 'Profundidad −/+ 1 cm' },
   { keys: '- / +', action: 'Ganancia −/+ 2 dB' },
   { keys: 'H', action: 'Mostrar/ocultar torso 3D' },

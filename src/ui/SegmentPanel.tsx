@@ -86,11 +86,12 @@ const textOn = (id: number): string => {
 };
 
 export function SegmentPanel() {
-  const { view, timeS, rrS } = useHudStore(
+  const { view, timeS, rrS, frozenAcq } = useHudStore(
     useShallow((h) => ({
       view: h.hud?.view ?? null,
       timeS: h.hud?.timeS ?? 0,
       rrS: h.hud?.rrS ?? 1,
+      frozenAcq: h.hud?.frozen ? (h.hud.acquisition ?? null) : null,
     })),
   );
   // the window's segments, steady over its beat (decision 342): a holder per mounted panel
@@ -105,9 +106,14 @@ export function SegmentPanel() {
       modality: s.modality,
     })),
   );
+  const acqCaseId = frozenAcq?.caseId ?? caseId;
+  const acqProbe = frozenAcq?.probe ?? probe;
+  const acqPatient = frozenAcq?.patient ?? patient;
+  const acqSettings = frozenAcq?.settings ?? settings;
+  const acqModality = frozenAcq?.modality ?? modality;
   const windowKey = useMemo(
-    () => JSON.stringify([caseId, probe, patient, settings, modality]),
-    [caseId, probe, patient, settings, modality],
+    () => JSON.stringify([acqCaseId, acqProbe, acqPatient, acqSettings, acqModality]),
+    [acqCaseId, acqProbe, acqPatient, acqSettings, acqModality],
   );
   const mode = useSimStore((s) => s.mode);
   const model = useSimStore((s) => s.ui.segmentModel);

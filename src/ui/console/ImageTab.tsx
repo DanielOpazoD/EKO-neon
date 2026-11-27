@@ -10,6 +10,7 @@ export function ImageTab() {
   const s = useSimStore(
     useShallow((st) => ({
       autoOptimize: st.autoOptimize,
+      frozen: st.frozen,
       resetTgc: st.resetTgc,
       setSettings: st.setSettings,
       setTgc: st.setTgc,
@@ -18,7 +19,14 @@ export function ImageTab() {
   );
   const tip = useTip();
   return (
-    <Section title="Imagen 2D">
+    <>
+      {s.frozen && (
+        <p className="small" role="status">
+          Imagen congelada: Zoom, Invertir izq/der y Tinte responden al instante; los demás ajustes
+          se aplicarán al reanudar.
+        </p>
+      )}
+      <Section title="Imagen 2D">
       <Slider
         label="Profundidad"
         tour="depth"
@@ -219,5 +227,6 @@ export function ImageTab() {
         </div>
       </details>
     </Section>
+    </>
   );
 }
