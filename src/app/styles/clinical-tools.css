@@ -108,6 +108,82 @@
   border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
   color: var(--warn);
 }
+
+/* guided 4-step «Estudio rápido» clinical progress strip */
+.quick-study-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+}
+.quick-study-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.quick-study-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.quick-study-count.complete {
+  color: var(--ok);
+}
+.quick-study-pills {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+.qs-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 3px 4px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qs-pill:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+.qs-pill.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.qs-pill.partial {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, var(--card));
+  color: var(--text);
+}
+.qs-pill.done {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, var(--card));
+  color: var(--ok);
+}
+.qs-pill.done.active {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.qs-detail {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  opacity: 0.85;
+}
 .mod-chip {
   display: inline-flex;
   align-items: center;

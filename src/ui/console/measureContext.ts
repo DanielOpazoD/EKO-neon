@@ -288,3 +288,102 @@ export function summarizeAutoEf(
     },
   };
 }
+
+export interface QuickStudyStep {
+  id: 'plax' | 'lv-ef' | 'lvot' | 'rv';
+  label: string;
+  targetViewId: string;
+  status: 'pending' | 'partial' | 'done';
+  /** Compact progress tag when partially complete (e.g. "1/2" when only A4C of biplane is done). */
+  detail: string | null;
+  active: boolean;
+  tip: string;
+}
+
+const PLAX_MEASUREMENT_IDS = new Set([
+  'lv-edd',
+  'lv-esd',
+  'ivsd',
+  'lvpwd',
+  'lvot-diameter',
+  'aortic-root',
+  'la-ap',
+]);
+const LVOT_MEASUREMENT_IDS = new Set(['lvot-vti', 'av-vti', 'av-vmax', 'lvot-peak-velocity']);
+const RV_SINGLE_MEASUREMENT_IDS = new Set(['tapse', 'tr-vmax', 'rv-basal', 'rv-s-prime']);
+
+/**
+ * Derive the 4-step «Estudio rápido» clinical workflow checklist purely from captured measurements
+ * (zero extra store state): 1. PLAX -> 2. VI FE (A4C+A2C) -> 3. TSVI (A5C) -> 4. VD.
+ */
+export function computeQuickStudySteps(
+  measurements: readonly Measurement[],
+  currentViewId: string | null,
+): { steps: QuickStudyStep[]; completedCount: number } {
+  const ids = new Set<string>();
+  for (const m of measurements) {
+    if (m.measurementId) ids.add(m.measurementId);
+  }
+  const hasAny = (set: Set<string>) => {
+    for (const id of set) if (ids.has(id)) return true;
+    return false;
+  };
+
+  const plaxDone = hasAny(PLAX_MEASUREMENT_IDS);
+
+  const a4cDone = planeSimpsonSummary(measurements, 'a4c') !== null;
+  const a2cDone = planeSimpsonSummary(measurements, 'a2c') !== null;
+  const anyLvPair = ids.has('lv-edv-simpson') && ids.has('lv-esv-simpson');
+  const lvEfStatus: QuickStudyStep['status'] =
+    a4cDone && a2cDone ? 'done' : a4cDone || a2cDone || anyLvPair ? 'partial' : 'pending';
+  const lvEfTarget = a4cDone && !a2cDone ? 'a2c' : 'a4c';
+
+  const lvotDone = hasAny(LVOT_MEASUREMENT_IDS);
+
+  const rvVolDone = ids.has('rv-edv') && ids.has('rv-esv');
+  const rvDone = rvVolDone || hasAny(RV_SINGLE_MEASUREMENT_IDS);
+
+  const steps: QuickStudyStep[] = [
+    {
+      id: 'plax',
+      label: '1. PLAX',
+      targetViewId: 'plax',
+      status: plaxDone ? 'done' : 'pending',
+      detail: null,
+      active: currentViewId === 'plax',
+      tip: 'PLAX: mide DTDVI o diámetro del TSVI',
+    },
+    {
+      id: 'lv-ef',
+      label: '2. VI FE',
+      targetViewId: lvEfTarget,
+      status: lvEfStatus,
+      detail: lvEfStatus === 'partial' ? '1/2' : null,
+      active: currentViewId === 'a4c' || currentViewId === 'a2c',
+      tip:
+        lvEfStatus === 'partial' && lvEfTarget === 'a2c'
+          ? 'A4C listo · salta a A2C para completar Simpson biplano del VI'
+          : 'Apical A4C + A2C: Simpson biplano del VI (Auto-FE VI)',
+    },
+    {
+      id: 'lvot',
+      label: '3. TSVI',
+      targetViewId: 'a5c',
+      status: lvotDone ? 'done' : 'pending',
+      detail: null,
+      active: currentViewId === 'a5c' || currentViewId === 'a3c',
+      tip: 'A5C: Gate TSVI + Auto-VTI en Doppler pulsado',
+    },
+    {
+      id: 'rv',
+      label: '4. VD',
+      targetViewId: 'rv-focused',
+      status: rvDone ? 'done' : 'pending',
+      detail: null,
+      active: currentViewId === 'rv-focused',
+      tip: 'Apical enfocada en VD: Auto-FE VD, TAPSE o Vmax IT',
+    },
+  ];
+  const completedCount = steps.filter((s) => s.status === 'done').length;
+  return { steps, completedCount };
+}

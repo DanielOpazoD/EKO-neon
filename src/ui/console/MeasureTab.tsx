@@ -27,6 +27,7 @@ import { MeasurementPanel } from '../MeasurementPanel';
 import { ViewQuickMenu } from '../ViewQuickMenu';
 import {
   captureModalityCheck,
+  computeQuickStudySteps,
   isFreeToolCompatible,
   isTimeInCineWindow,
   phaseTag,
@@ -140,6 +141,7 @@ export function MeasureTab() {
       setActiveTool: st.setActiveTool,
       setModality: st.setModality,
       setUi: st.setUi,
+      startPresetView: st.startPresetView,
       toggleFreeze: st.toggleFreeze,
       closed: examClosed(st),
     })),
@@ -165,6 +167,22 @@ export function MeasureTab() {
     return h && h.cineLength > 0 ? h.cineWindow : null;
   }, [cineBucket]);
   const pendingCount = usePendingPointCount();
+
+  const quickStudy = useMemo(
+    () =>
+      policy.presetsEnabled && showView
+        ? computeQuickStudySteps(s.measurements, currentViewId)
+        : null,
+    [policy.presetsEnabled, showView, s.measurements, currentViewId],
+  );
+
+  const jumpQuickStudyView = (targetViewId: string) => {
+    if (s.closed || !policy.presetsEnabled) return;
+    if (currentViewId !== targetViewId && s.modality !== '2d') {
+      s.setModality('2d');
+    }
+    s.startPresetView(targetViewId);
+  };
 
   const inspectFrame = (frameId: number, target: 'ed' | 'es' = 'ed') => {
     if (s.closed) return;
@@ -371,6 +389,39 @@ export function MeasureTab() {
               {s.frozen ? 'Congelada · Reanudar' : 'En vivo · Congelar'}
             </button>
           </div>
+
+          {quickStudy && !s.closed && (
+            <div
+              className="quick-study-strip"
+              role="group"
+              aria-label="Estudio rápido en 4 pasos"
+              data-quick-study="strip"
+            >
+              <div className="quick-study-head">
+                <span>Estudio rápido</span>
+                <span className={`quick-study-count${quickStudy.completedCount === 4 ? ' complete' : ''}`}>
+                  {quickStudy.completedCount}/4
+                </span>
+              </div>
+              <div className="quick-study-pills">
+                {quickStudy.steps.map((step) => (
+                  <button
+                    key={step.id}
+                    type="button"
+                    className={`qs-pill ${step.status}${step.active ? ' active' : ''}`}
+                    onClick={() => jumpQuickStudyView(step.targetViewId)}
+                    data-tip={step.tip}
+                  >
+                    <span className="qs-label">
+                      {step.status === 'done' ? '✓ ' : ''}
+                      {step.label}
+                    </span>
+                    {step.detail && <span className="qs-detail">{step.detail}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {showView && currentViewId && (
             <ViewQuickSection

@@ -1,4 +1,5 @@
 import { frameBus } from '@/app/frameBus';
+import { examClosed } from '@/app/modePolicy';
 import type { LassoPoint } from '@/app/reviewRegion';
 import {
   imageSegmentsOn,
@@ -23,6 +24,7 @@ import {
   type PendingMeasurement,
 } from './display/measurementTools';
 import { CaptureBar } from './display/CaptureBar';
+import { hitTestMeasurementVertex, recomputeEditedMeasurement } from './display/measurementEdit';
 import { computeLivePreview } from './display/measurementPreview';
 import { drawOverlay } from './display/overlayDraw';
 import { frameSizeForBox } from './display/frameSize';
@@ -53,16 +55,29 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
   const pendingRef = useRef<PendingMeasurement>({ points: [] });
   /** Pointer coordinates over the canvas while a measurement tool is armed (ref-only: zero React re-renders). */
   const hoverPtRef = useRef<{ x: number; y: number } | null>(null);
+  /** Hovered or dragged measurement caliper vertex on a frozen frame (ref-only: zero React re-renders). */
+  const hoveredHandleRef = useRef<{ measurementId: string; vertexIndex: number } | null>(null);
   const lastOutRef = useRef<SimOutput | null>(null);
   /** the overlay redraw of the drawing effect, so tool clicks refresh the overlay without waiting for a frame */
   const redrawOverlayRef = useRef<() => void>(() => {});
   const dragRef = useRef<{
-    kind: 'box-move' | 'box-resize' | 'cursor' | 'marker' | 'cine' | 'lasso' | 'none';
+    kind:
+      | 'box-move'
+      | 'box-resize'
+      | 'cursor'
+      | 'marker'
+      | 'cine'
+      | 'lasso'
+      | 'measure-vertex'
+      | 'none';
     startX: number;
     startY: number;
     box?: { t0: number; t1: number; r0: number; r1: number };
     /** review marker being dragged (decision 135) and whether it has moved */
     markerId?: string;
+    /** measurement vertex being dragged on a frozen image */
+    measureId?: string;
+    vertexIndex?: number;
     moved?: boolean;
   }>({ kind: 'none', startX: 0, startY: 0 });
   /** the lasso being drawn in review mode (decision 340), polar */
@@ -146,6 +161,20 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         out,
         state.modality,
       );
+      const activeHandle =
+        out.frozen && state.activeTool === 'none' && !state.ui.reviewMode && !examClosed(state)
+          ? dragRef.current.kind === 'measure-vertex' &&
+            dragRef.current.measureId !== undefined &&
+            dragRef.current.vertexIndex !== undefined
+            ? {
+                measurementId: dragRef.current.measureId,
+                vertexIndex: dragRef.current.vertexIndex,
+                dragging: true,
+              }
+            : hoveredHandleRef.current
+              ? { ...hoveredHandleRef.current, dragging: false }
+              : null
+          : null;
       drawOverlay(
         canvas,
         out,
@@ -153,6 +182,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         pendingReproj,
         lassoRef.current.map((q) => polarToPixel(out.sector, q.rCm, q.thetaRad)),
         livePreview,
+        activeHandle,
       );
     };
     const unsubFrame = frameBus.subscribe((out) => {
@@ -268,6 +298,26 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       pendingSession.setCount(pendingRef.current.points.length);
       return;
     }
+    // frozen, dragging any caliper/velocity/time/manual-contour vertex edits the measurement live
+    if (hud.frozen && !examClosed(st)) {
+      const handle = hitTestMeasurementVertex(p, st.measurements, hud, st.modality);
+      if (handle) {
+        dragRef.current = {
+          kind: 'measure-vertex',
+          startX: p.x,
+          startY: p.y,
+          measureId: handle.measurementId,
+          vertexIndex: handle.vertexIndex,
+        };
+        hoveredHandleRef.current = {
+          measurementId: handle.measurementId,
+          vertexIndex: handle.vertexIndex,
+        };
+        if (ovRef.current) ovRef.current.style.cursor = 'grabbing';
+        redrawOverlayRef.current();
+        return;
+      }
+    }
     // frozen, a press on the ECG strip picks the cine frame at that instant and a drag scrubs (decision 190)
     const cineOffset = cineOffsetOnEcg(p, hud, st);
     if (cineOffset !== null) {
@@ -355,22 +405,69 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     if (dragRef.current.kind === 'none') {
       updateSegmentTip(e);
       const st = useSimStore.getState();
-      if (hud && st.activeTool !== 'none') {
-        hoverPtRef.current = toLocal(e);
+      const p = hud ? toLocal(e) : null;
+      if (hud && p && st.activeTool !== 'none') {
+        hoverPtRef.current = p;
         if (hud.frozen) redrawOverlayRef.current();
       } else if (hoverPtRef.current !== null) {
         hoverPtRef.current = null;
       }
+      // Highlight draggable caliper handles on frozen images (zero React re-renders)
+      if (hud && p && hud.frozen && st.activeTool === 'none' && !st.ui.reviewMode && !examClosed(st)) {
+        const handle = hitTestMeasurementVertex(p, st.measurements, hud, st.modality);
+        const prev = hoveredHandleRef.current;
+        const changed =
+          (handle?.measurementId ?? null) !== (prev?.measurementId ?? null) ||
+          (handle?.vertexIndex ?? null) !== (prev?.vertexIndex ?? null);
+        hoveredHandleRef.current = handle
+          ? { measurementId: handle.measurementId, vertexIndex: handle.vertexIndex }
+          : null;
+        if (changed) redrawOverlayRef.current();
+        if (ovRef.current) {
+          ovRef.current.style.cursor = handle
+            ? 'grab'
+            : cineOffsetOnEcg(p, hud, st) !== null
+              ? 'ew-resize'
+              : '';
+        }
+        return;
+      }
+      if (hoveredHandleRef.current !== null) {
+        hoveredHandleRef.current = null;
+        redrawOverlayRef.current();
+      }
       // the strip says it can be scrubbed; an armed tool keeps its crosshair from the stylesheet
-      if (hud && ovRef.current)
-        ovRef.current.style.cursor =
-          cineOffsetOnEcg(toLocal(e), hud, st) !== null ? 'ew-resize' : '';
+      if (hud && p && ovRef.current)
+        ovRef.current.style.cursor = cineOffsetOnEcg(p, hud, st) !== null ? 'ew-resize' : '';
       return;
     }
     if (!hud) return;
     const p = toLocal(e);
     const st = useSimStore.getState();
     const m = hud.sector;
+    if (
+      dragRef.current.kind === 'measure-vertex' &&
+      dragRef.current.measureId !== undefined &&
+      dragRef.current.vertexIndex !== undefined
+    ) {
+      const ms = st.measurements.find((x) => x.id === dragRef.current.measureId);
+      if (ms) {
+        const edited = recomputeEditedMeasurement(ms, dragRef.current.vertexIndex, p, hud, {
+          phaseMarks: hud.acquisition?.phaseMarks ?? st.phaseMarks,
+          lvLengthCm: st.lvLengthCm,
+          color: hud.acquisition?.color ?? st.color,
+        });
+        if (edited) {
+          dragRef.current.vertexIndex = edited.vertexIndex;
+          hoveredHandleRef.current = {
+            measurementId: ms.id,
+            vertexIndex: edited.vertexIndex,
+          };
+          st.updateMeasurement(ms.id, edited.patch);
+        }
+      }
+      return;
+    }
     if (dragRef.current.kind === 'cine') {
       const layout = ecgLayoutOf(hud, hud.acquisition?.modality ?? st.modality);
       st.setCineOffset(cineOffsetAtX(p.x, layout, hud.cineWindow, hud.cineLength));
@@ -440,6 +537,12 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       redrawOverlayRef.current();
       commitReviewLasso(drawn, lastOutRef.current, imgRef.current);
     }
+    if (d.kind === 'measure-vertex') {
+      dragRef.current = { kind: 'none', startX: 0, startY: 0 };
+      if (ovRef.current) ovRef.current.style.cursor = hoveredHandleRef.current ? 'grab' : '';
+      redrawOverlayRef.current();
+      return;
+    }
     dragRef.current = { kind: 'none', startX: 0, startY: 0 };
   };
 
@@ -461,6 +564,10 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
           if (hoverPtRef.current !== null) {
             hoverPtRef.current = null;
             if (useSimStore.getState().activeTool !== 'none') redrawOverlayRef.current();
+          }
+          if (hoveredHandleRef.current !== null) {
+            hoveredHandleRef.current = null;
+            redrawOverlayRef.current();
           }
         }}
         aria-label="Superposiciones y herramientas de medición"

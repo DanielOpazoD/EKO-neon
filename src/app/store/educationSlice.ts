@@ -100,6 +100,17 @@ export const createEducationSlice: SimSliceCreator<EducationSlice> = (set, get) 
       saveProgress(typeof localStorage !== 'undefined' ? localStorage : null, progress);
       return { measurements: [...s.measurements, m], progress };
     }),
+  updateMeasurement: (id, patch) =>
+    set((s) => {
+      if (examClosed(s)) return s;
+      let changed = false;
+      const measurements = s.measurements.map((m) => {
+        if (m.id !== id) return m;
+        changed = true;
+        return { ...m, ...patch };
+      });
+      return changed ? { measurements } : s;
+    }),
   removeMeasurement: (id) =>
     set((s) =>
       examClosed(s) ? s : { measurements: s.measurements.filter((m) => m.id !== id) },
