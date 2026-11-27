@@ -205,7 +205,9 @@ export function drawOverlay(
         'rgba(102, 224, 160, 0.88)',
       );
     }
-    drawColorBar(ctx, modality, color, m, W, sectorH, rightX, inward);
+    const rawHudBottom = canvas.parentElement?.style.getPropertyValue('--hud-tr-b');
+    const hudTopClearY = rawHudBottom ? Number(rawHudBottom) || 0 : 0;
+    drawColorBar(ctx, modality, color, m, W, sectorH, rightX, inward, hudTopClearY);
   }
   if (isStripModality(modality)) {
     const p0 = polarToPixel(m, 0.3, cursorTheta);

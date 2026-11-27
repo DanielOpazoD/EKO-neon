@@ -73,8 +73,9 @@
 }
 .sheet {
   width: min(560px, 100%);
-  max-height: 100%;
+  max-height: calc(100vh - 48px);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 16px 18px 18px;
   background: var(--panel);
   border: 1px solid var(--border-strong);
@@ -82,11 +83,17 @@
   box-shadow: var(--shadow-2);
 }
 .sheet-head {
+  position: sticky;
+  top: -16px;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 4px;
+  margin: -16px -18px 8px;
+  padding: 14px 18px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
 }
 .sheet-head h3 {
   margin: 0;

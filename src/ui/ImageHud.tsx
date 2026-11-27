@@ -56,7 +56,10 @@ export function ImageHud() {
     const right = box.parentElement?.querySelector<HTMLElement>('.hud-tr') ?? null;
     const publish = () => {
       host.style.setProperty('--hud-tl-h', `${box.offsetHeight}px`);
-      if (right) host.style.setProperty('--hud-tr-w', `${right.offsetWidth}px`);
+      if (right) {
+        host.style.setProperty('--hud-tr-w', `${right.offsetWidth}px`);
+        host.style.setProperty('--hud-tr-b', `${right.offsetTop + right.offsetHeight}`);
+      }
     };
     publish();
     if (typeof ResizeObserver === 'undefined') return;
