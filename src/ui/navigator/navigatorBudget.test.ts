@@ -125,6 +125,19 @@ describe('Torso 3D navigator render budget & invalidation', () => {
     );
     assert.equal(swDeferred.shouldRender, false);
     assert.equal(swDeferred.nextDirty, true);
+
+    // Genuine canvas resize (forceImmediate) bypasses software-WebGL cooldown so the cleared framebuffer repaints
+    const swResized = shouldRenderNavigatorFrame(
+      baseBudget({
+        dirty: true,
+        nowMs: 600,
+        lastRenderAtMs: 500,
+        softwareGl: true,
+        forceImmediate: true,
+      }),
+    );
+    assert.equal(swResized.shouldRender, true);
+    assert.equal(swResized.nextDirty, false);
   });
 
   it('ignores unrelated store updates (such as fpsUi) and flags navigator-relevant changes', () => {

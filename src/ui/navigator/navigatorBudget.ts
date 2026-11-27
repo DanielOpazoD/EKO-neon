@@ -36,6 +36,8 @@ export interface NavigatorFrameBudgetInput {
   lastRenderAtMs: number;
   lastCostMs: number;
   softwareGl: boolean;
+  /** True after a genuine canvas resize so the newly cleared WebGL framebuffer repaints immediately. */
+  forceImmediate?: boolean;
 }
 
 export interface NavigatorFrameDecision {
@@ -76,7 +78,7 @@ export function shouldRenderNavigatorFrame(
     return { shouldRender: false, minIntervalMs, nextDirty: false };
   }
   const elapsed = inp.nowMs - inp.lastRenderAtMs;
-  if (inp.lastRenderAtMs > 0 && elapsed < minIntervalMs) {
+  if (!inp.forceImmediate && inp.lastRenderAtMs > 0 && elapsed < minIntervalMs) {
     return { shouldRender: false, minIntervalMs, nextDirty: true };
   }
   return { shouldRender: true, minIntervalMs, nextDirty: false };
