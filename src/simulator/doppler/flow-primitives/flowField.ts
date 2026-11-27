@@ -4,7 +4,12 @@ import {
   samplePulmonaryRegurgitation,
   samplePulmonarySystolicFlow,
 } from './pulmonaryFlow';
-import { cavalVenousVelocityMps, sampleIvcHepaticFlow } from './systemicVeins';
+import {
+  cavalVenousVelocityMps,
+  coronarySinusVelocityMps,
+  sampleIvcHepaticFlow,
+  sampleSystemicVenousFlow,
+} from './systemicVeins';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import {
   caseLvotObstruction,
@@ -60,6 +65,7 @@ export type { ClutterContext, FlowSample };
 export {
   cavalVenousVelocityMps,
   conventionalPropagation,
+  coronarySinusVelocityMps,
   flowPropagationCmps,
   lvotNarrowing,
   prepareClutterContext,
@@ -599,6 +605,6 @@ export function sampleFlow(
     samplePulmonaryVeins(p, tables, hp, phase, x, y, z, out);
   }
   if ((mask & FLOW_MASK_SYS_VEINS) !== 0) {
-    sampleIvcHepaticFlow(p, tables, hp, phase, x, y, z, out, structure);
+    sampleSystemicVenousFlow(p, tables, hp, phase, x, y, z, out, structure);
   }
 }
