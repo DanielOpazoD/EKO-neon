@@ -22,6 +22,7 @@ import {
 } from '../display/measurementTools';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
+import { ViewQuickMenu } from '../ViewQuickMenu';
 import {
   captureModalityCheck,
   isFreeToolCompatible,
@@ -340,20 +341,22 @@ export function MeasureTab() {
           <div className="measure-ctx">
             <div className="measure-ctx-info">
               <span className="mod-chip match">{modalityLabel(s.modality)}</span>
-              {showView && currentViewId && (
-                <span className="measure-ctx-view">
-                  <i
-                    className={`ctx-dot ${
-                      (currentViewScore ?? 0) >= 75
-                        ? 'ok'
-                        : (currentViewScore ?? 0) >= 50
-                          ? 'warn'
-                          : 'muted'
-                    }`}
-                    aria-hidden="true"
-                  />
-                  {viewLabel(currentViewId)}
-                </span>
+              {showView && (
+                <ViewQuickMenu placement="down-left" currentViewId={currentViewId}>
+                  <span className="measure-ctx-view">
+                    <i
+                      className={`ctx-dot ${
+                        (currentViewScore ?? 0) >= 75
+                          ? 'ok'
+                          : (currentViewScore ?? 0) >= 50
+                            ? 'warn'
+                            : 'muted'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    {currentViewId ? viewLabel(currentViewId) : 'Cambiar vista'}
+                  </span>
+                </ViewQuickMenu>
               )}
             </div>
             <button
