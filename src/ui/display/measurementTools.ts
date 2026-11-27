@@ -4,6 +4,8 @@ import { frameBus } from '@/app/frameBus';
 import { evaluateCapture, specFor, type CaptureExtras } from '@/app/measurementCapture';
 import { useHudStore, useSimStore } from '@/app/store';
 import type { SimOutput, StripInfo } from '@/simulator/core/protocol';
+import type { AutoTraceBeatResult } from '@/simulator/core/strip/autoTrace';
+import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
 import {
   polygonAreaCm2,
   type AutoChamberFrameSnapshot,
@@ -685,4 +687,130 @@ export async function runAutoChamberVolume(chamber: ChamberId): Promise<AutoCham
   }
   if (res.result.ok) commitAutoChamberVolume(res.result);
   return res.result;
+}
+
+/**
+ * Locate the LVOT PW sample volume from the rendered 2D polar frame (~0.5 cm proximal to the AV),
+ * snap the cursor/gate there, and switch to live PW Doppler so the LVOT spectrum sweeps immediately.
+ */
+export async function runAutoLvotGate(): Promise<AutoLvotGateResult> {
+  const res = await frameBus.request({ kind: 'autoLvotGate' });
+  if (!res || res.kind !== 'autoLvotGate') {
+    return {
+      ok: false,
+      reason: 'no-frame',
+      message: 'El simulador no respondió al intento de colocar el gate en el TSVI.',
+    };
+  }
+  if (res.result.ok) {
+    const st = useSimStore.getState();
+    st.setCursor(res.result.thetaRad, res.result.rCm);
+    if (st.modality !== 'pw') st.setModality('pw');
+    else if (st.frozen) st.toggleFreeze();
+    // Shift the PW velocity window downward (`baselineShiftMps = -0.25`, raising the zero line)
+    // so negative apical LVOT ejection (~1.0–1.2 m/s away from probe) clears Nyquist without aliasing.
+    const after = useSimStore.getState();
+    if (after.spectral.baselineShiftMps >= -0.05) {
+      after.setSpectral({ baselineShiftMps: -0.25 });
+    }
+  }
+  return res.result;
+}
+
+/**
+ * Freeze the current spectral strip and automatically trace the newest complete systolic beat
+ * envelope (LVOT VTI in PW, or AV VTI if in CW), committing a full protocol measurement.
+ */
+export async function runAutoSpectralVti(
+  measurementId: 'lvot-vti' | 'av-vti' = 'lvot-vti',
+): Promise<AutoTraceBeatResult> {
+  const st = useSimStore.getState();
+  const initialHud = useHudStore.getState().hud;
+  const acquiredMod = initialHud?.acquisition?.modality ?? st.modality;
+  if (acquiredMod !== 'pw' && acquiredMod !== 'cw') {
+    return {
+      ok: false,
+      reason: 'wrong-modality',
+      message:
+        measurementId === 'lvot-vti'
+          ? 'Activa Doppler pulsado (PW) sobre el TSVI para calcular el VTI automático.'
+          : 'Activa Doppler continuo (CW) para calcular el VTI automático.',
+    };
+  }
+  // Freeze first and yield one animation frame so the worker's strip head and HUD snapshot match exactly.
+  if (!st.frozen) {
+    st.toggleFreeze();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      } else {
+        setTimeout(resolve, 25);
+      }
+    });
+  }
+  const res = await frameBus.request({ kind: 'autoTraceBeat' });
+  if (!res || res.kind !== 'autoTraceBeat') {
+    return {
+      ok: false,
+      reason: 'incomplete-beat',
+      message: 'El simulador no respondió al cálculo automático de VTI.',
+    };
+  }
+  if (!res.result.ok) return res.result;
+  const traced = res.result;
+
+  const hud = useHudStore.getState().hud;
+  if (!hud || hud.strip.kind !== 'spectral') {
+    return {
+      ok: false,
+      reason: 'wrong-modality',
+      message: 'No hay una tira espectral visible para registrar el VTI.',
+    };
+  }
+  const strip = hud.strip;
+  const spec = specFor(measurementId);
+  const modeNow = hud.acquisition?.modality ?? useSimStore.getState().modality;
+  const geometry = traced.velocitiesMps.map((v, i) => ({
+    x: strip.x + traced.x0 + i * traced.pixelsPerColumn,
+    y:
+      strip.y +
+      ((v - strip.topValue) / (strip.bottomValue - strip.topValue)) * strip.height,
+  }));
+  const stateNow = useSimStore.getState();
+  stateNow.addMeasurement({
+    id: `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
+    kind: 'vti',
+    label: spec ? spec.label : 'VTI auto',
+    measurementId: spec ? spec.id : null,
+    technique: evaluateCapture(
+      spec,
+      hud,
+      modeNow,
+      hud.acquisition?.phaseMarks ?? stateNow.phaseMarks,
+      { userAssisted: true },
+    ),
+    value: traced.vtiCm,
+    units: 'cm',
+    modality: modeNow,
+    geometry,
+    captureStrip: { ...strip },
+    acquisition: hud.acquisition,
+    beatIndex: traced.beatIndex,
+    rrS: hud.rrS,
+    derived: {
+      vmaxMps: traced.vmaxMps,
+      meanGradientMmHg: traced.meanGradientMmHg,
+      peakGradientMmHg: traced.peakGradientMmHg,
+    },
+    frameId: hud.frameId,
+    phase: hud.phase,
+    timeS: hud.timeS,
+    sourceViewId: hud.view?.bestViewId ?? null,
+    viewScore: hud.view?.score ?? null,
+    imageQualityScore: hud.view ? Math.round(hud.view.components.gain * 100) : null,
+    userAssisted: true,
+    referenceGuidelineIds: spec ? spec.referenceIds : ['ase-tte-2019'],
+    createdAt: new Date().toISOString(),
+  });
+  return traced;
 }

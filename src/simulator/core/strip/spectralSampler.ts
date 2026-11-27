@@ -41,6 +41,7 @@ export interface GateFlowCache {
   bx: number;
   by: number;
   bz: number;
+  peakStructure?: number;
 }
 
 export interface SpectralSampleOptions {
@@ -519,33 +520,39 @@ export function computeGateInfo(
       flowAngleDeg = (Math.acos(Math.min(1, cos)) * 180) / Math.PI;
     }
   } else if (inScene && tissueSample.tissue === Tissue.Blood) {
-    // Cache peak flow vector over the cycle for this heart-frame gate position.
+    // Cache peak flow vector & structure over the cycle for this heart-frame gate position.
     const gateKey = `${hx.toFixed(5)},${hy.toFixed(5)},${hz.toFixed(5)}|${ctx.modelVersion}|${ctx.tablesVersion}`;
     if (gateFlow.key !== gateKey) {
       let best = 0;
       let bx = 0,
         by = 0,
         bz = 0;
+      let peakStructure = tissueSample.structure;
+      for (let k = 0; k < 16; k++) {
+        const ph = k / 16;
+        const sc = ctx.scene(ph);
+        const cls = sceneClassifier(sc);
+        const inPh = cls(px, py, pz, tissueSample) !== 0;
+        if (!inPh || tissueSample.tissue !== Tissue.Blood) continue;
         const gateSt = tissueSample.structure;
-        for (let k = 0; k < 16; k++) {
-          const ph = k / 16;
-          sampleFlow(
-            ctx.flow,
-            ctx.tables,
-            computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph, ctx.flow.flowPeaks)),
-            ph,
-            hx,
-            hy,
-            hz,
-            flowSample,
-            gateSt,
-          );
+        sampleFlow(
+          ctx.flow,
+          ctx.tables,
+          sc.heartPose,
+          ph,
+          hx,
+          hy,
+          hz,
+          flowSample,
+          gateSt,
+        );
         const sp = Math.hypot(flowSample.vx, flowSample.vy, flowSample.vz);
         if (flowSample.present && sp > best) {
           best = sp;
           bx = flowSample.vx;
           by = flowSample.vy;
           bz = flowSample.vz;
+          peakStructure = gateSt;
         }
       }
       gateFlow.key = gateKey;
@@ -553,6 +560,9 @@ export function computeGateInfo(
       gateFlow.bx = bx;
       gateFlow.by = by;
       gateFlow.bz = bz;
+      gateFlow.peakStructure = peakStructure;
+      // Restore tissueSample at the displayed phase
+      sceneClassifier(ctx.scene(phase))(px, py, pz, tissueSample);
     }
     if (gateFlow.best > 0.05) {
       flowPresent = true;
@@ -572,6 +582,8 @@ export function computeGateInfo(
     depthCm: r,
     structure: inScene ? tissueSample.structure : 0,
     tissue: inScene ? tissueSample.tissue : 0,
+    peakFlowStructure:
+      inp.modality === 'pw' && flowPresent ? gateFlow.peakStructure : undefined,
     flowPresent,
     flowAngleDeg,
     lineStructures,

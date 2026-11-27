@@ -3,6 +3,7 @@ import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { computeAutoChamberVolume } from '@/simulator/measurements/autoVolume';
+import { findLvotGateFromPolar } from '@/simulator/measurements/autoLvotGate';
 import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import type { PolarFrame } from '@/simulator/renderer/types';
@@ -104,11 +105,49 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
     );
     return { kind: 'autoChamberVolume', result };
   }
+  if (req.kind === 'autoLvotGate') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    if (!refFrame) {
+      return {
+        kind: 'autoLvotGate',
+        result: {
+          ok: false,
+          reason: 'no-frame',
+          message: 'No hay un cuadro 2D disponible para localizar el TSVI.',
+        },
+      };
+    }
+    // Prefer a mid-systolic frame (~50% of ejection) at the same probe pose so the fixed PW gate
+    // sits at the ASE 0.5 cm LVOT station during peak systolic ejection (when VTI velocity is recorded).
+    const pm = ctx.phaseMarks();
+    const midSysPhase = pm.ejectionStart + 0.5 * (pm.ejectionEnd - pm.ejectionStart);
+    const samePose = (f: CineFrame) =>
+      Math.abs(f.acquisition.probe.u - refFrame.acquisition.probe.u) < 0.2 &&
+      Math.abs(f.acquisition.probe.v - refFrame.acquisition.probe.v) < 0.2 &&
+      Math.abs(f.acquisition.probe.rotationDeg - refFrame.acquisition.probe.rotationDeg) < 3 &&
+      Math.abs(f.acquisition.probe.tiltDeg - refFrame.acquisition.probe.tiltDeg) < 3 &&
+      Math.abs(f.acquisition.probe.rockDeg - refFrame.acquisition.probe.rockDeg) < 3;
+    const foundSys = ctx.cine.findNearestPhaseOffsetMatching(midSysPhase, samePose);
+    const sysFrame = foundSys ? ctx.cine.select(foundSys.offset) : undefined;
+    const distSys = sysFrame
+      ? Math.min(
+          Math.abs(sysFrame.phase - midSysPhase),
+          1 - Math.abs(sysFrame.phase - midSysPhase),
+        )
+      : 1;
+    const chosen = sysFrame && distSys <= 0.12 ? sysFrame : refFrame;
+    const isSystolic =
+      chosen.phase >= pm.ejectionStart && chosen.phase <= pm.ejectionEnd + 0.05;
+    const result = findLvotGateFromPolar(chosen.structure, chosen.spec, {
+      systolicFrame: isSystolic,
+    });
+    return { kind: 'autoLvotGate', result };
+  }
   if (
     ctx.input.frozen &&
     ctx.displayedFrame &&
     ctx.displayedFrame.acquisition.stripAcquisitionId !== ctx.strips.historyId
   )
     return null;
-  return ctx.strips.request(req);
+  return ctx.strips.request(req, ctx.phaseMarks());
 }

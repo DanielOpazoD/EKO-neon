@@ -10,6 +10,8 @@ import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import type { CaseDefinition } from '@/cases/schema';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type { AutoChamberVolumeResult, ChamberId } from '@/simulator/measurements/autoVolume';
+import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
+import type { AutoTraceBeatResult } from './strip/autoTrace';
 
 /**
  * The backend the user selects (Dev panel). `atlas` wraps the GPU port when available and the CPU tracer
@@ -153,9 +155,11 @@ export interface StripInfo {
 export interface GateInfo {
   thetaRad: number;
   depthCm: number;
-  /** structure/tissue ids at the PW/TDI sample volume */
+  /** structure/tissue ids at the PW/TDI sample volume on the displayed frame */
   structure: number;
   tissue: number;
+  /** Structure occupied by the PW sample volume at peak blood flow over the cycle (immune to diastolic/end-systolic annular bobbing). */
+  peakFlowStructure?: number;
   flowPresent: boolean;
   /** beam–flow angle at the gate (deg) when flow is present */
   flowAngleDeg: number | null;
@@ -262,6 +266,10 @@ export type SimRequest =
   | { kind: 'cinePhaseJump'; target: 'ed' | 'es'; frameId?: number }
   /** Automatic 2D endocardial contour tracing, EDV/ESV volume, EF, and RV FAC over the acquired cine loop. */
   | { kind: 'autoChamberVolume'; chamber: ChamberId }
+  /** Locate the optimal ASE LVOT PW gate position from the rendered 2D polar structure map. */
+  | { kind: 'autoLvotGate' }
+  /** Automatically locate the newest complete systolic beat on the spectral strip and trace its envelope. */
+  | { kind: 'autoTraceBeat' }
   /**
    * Dev hook (`__echotwin.frameBus.request`): lose the GPU port's WebGL context, or restore the one so lost, through
    * WEBGL_lose_context, to check the recovery in a browser (`core/gpuRecovery.ts`).
@@ -282,6 +290,8 @@ export type SimResponse =
   | { kind: 'autoOpt'; gainDb: number; tgcDb: number[] }
   | { kind: 'cinePhaseJump'; offset: number; phase: number }
   | { kind: 'autoChamberVolume'; result: AutoChamberVolumeResult }
+  | { kind: 'autoLvotGate'; result: AutoLvotGateResult }
+  | { kind: 'autoTraceBeat'; result: AutoTraceBeatResult }
   /** Whether there was a live context to lose, or a context lost by the hook to restore. */
   | { kind: 'gpuContext'; ok: boolean };
 

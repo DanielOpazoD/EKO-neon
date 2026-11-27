@@ -39,6 +39,8 @@ export interface GateContext {
   /** structure and tissue at the sample volume (PW/TDI) */
   structure: number;
   tissue: number;
+  /** structure occupied by the PW sample volume at peak blood flow over the cycle */
+  peakFlowStructure?: number;
   /** flow present at the gate and beam–flow angle (velocity measurements) */
   flowPresent: boolean;
   flowAngleDeg: number | null;
@@ -228,7 +230,10 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
       const g = ctx.gate;
       if (!g) add('placement', 'warn', 'Sin información del volumen de muestra.');
       else if (modalityFamily === 'pw' || modalityFamily === 'tdi') {
-        if (pl.structures.includes(g.structure))
+        const atTarget =
+          pl.structures.includes(g.structure) ||
+          (g.peakFlowStructure !== undefined && pl.structures.includes(g.peakFlowStructure));
+        if (atTarget)
           add('placement', 'ok', `Volumen de muestra en ${pl.label}.`);
         else
           add(

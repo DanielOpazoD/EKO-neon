@@ -52,8 +52,12 @@ import {
   type MmodeLine,
   type RowMap,
 } from './mmodeStrip';
-import type { GateInfo, SimInput, SimRequest, SimResponse, StripInfo } from './protocol';
-import { autoTraceSpectralEnvelope, STRIP_MM_WIDTH } from './strip/autoTrace';
+import type { GateInfo, PhaseMarks, SimInput, SimRequest, SimResponse, StripInfo } from './protocol';
+import {
+  autoTraceBestSystolicBeat,
+  autoTraceSpectralEnvelope,
+  STRIP_MM_WIDTH,
+} from './strip/autoTrace';
 import { writeCmmColumn } from './strip/cmmColumn';
 import { computeGateInfo, sampleSpectralColumn, type GateFlowCache } from './strip/spectralSampler';
 import { PATH_STEP_CM, relativeEchoAmplitude } from '@/simulator/doppler/acousticAccess';
@@ -879,8 +883,8 @@ export class StripEngine {
     return info;
   }
 
-  /** Answer an on-demand request (auto-trace of the spectral envelope between two strip columns). */
-  request(req: SimRequest): SimResponse | null {
+  /** Answer an on-demand request (auto-trace between two columns or auto-trace of the newest complete systolic beat). */
+  request(req: SimRequest, phaseMarks?: PhaseMarks): SimResponse | null {
     if (req.kind === 'autoTrace') {
       const strip = this.stripSpectral;
       if (!strip || this.stripKind !== 'spectral' || !this.acquired) return null;
@@ -893,6 +897,32 @@ export class StripEngine {
         req.x1,
         this.acquired.aliasing,
       );
+    }
+    if (req.kind === 'autoTraceBeat') {
+      const strip = this.stripSpectral;
+      if (!strip || this.stripKind !== 'spectral' || !this.acquired || !phaseMarks) {
+        return {
+          kind: 'autoTraceBeat',
+          result: {
+            ok: false,
+            reason: 'wrong-modality',
+            message: 'Activa Doppler pulsado (PW) sobre el TSVI para calcular el VTI automático.',
+          },
+        };
+      }
+      const result = autoTraceBestSystolicBeat(
+        strip,
+        this.stripCols,
+        this.displayCols,
+        this.stripHead,
+        this.stripPhase,
+        this.stripBeatIndex,
+        this.stripSampleTime,
+        this.effectiveSpectral(this.acquired),
+        phaseMarks,
+        this.acquired.aliasing,
+      );
+      return { kind: 'autoTraceBeat', result };
     }
     return null;
   }

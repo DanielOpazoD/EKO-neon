@@ -10,7 +10,8 @@ import {
   spectralRange,
   type SpectralSettings,
 } from '@/simulator/doppler/spectral/spectrum';
-import type { SimResponse } from '../protocol';
+import { summarizeEnvelope } from '@/simulator/measurements/vti';
+import type { PhaseMarks, SimResponse } from '../protocol';
 
 export const STRIP_MM_WIDTH = 100; // physical width represented by the strip (mm)
 
@@ -298,5 +299,176 @@ export function autoTraceSpectralEnvelope(
     // Align trace sample i with the painted centre of column (x0 + i)
     x0: (x0 + 0.5) * pixelsPerColumn,
     pixelsPerColumn,
+  };
+}
+
+export type AutoTraceBeatFailureReason =
+  | 'wrong-modality'
+  | 'incomplete-beat'
+  | 'no-flow';
+
+export interface AutoTraceBeatSuccess {
+  ok: true;
+  velocitiesMps: number[];
+  secondsPerColumn: number;
+  x0: number;
+  pixelsPerColumn: number;
+  beatIndex: number;
+  vtiCm: number;
+  vmaxMps: number;
+  meanGradientMmHg: number;
+  peakGradientMmHg: number;
+}
+
+export interface AutoTraceBeatFailure {
+  ok: false;
+  reason: AutoTraceBeatFailureReason;
+  message: string;
+}
+
+export type AutoTraceBeatResult = AutoTraceBeatSuccess | AutoTraceBeatFailure;
+
+const MIN_AUTO_BEAT_VTI_CM = 2.0;
+const MIN_AUTO_BEAT_VMAX_MPS = 0.22;
+
+/**
+ * Automatically locate the most recent complete non-wrapping systolic beat on the acquired
+ * spectral strip and trace its velocity envelope using `autoTraceSpectralEnvelope`.
+ * Reads only the rendered spectral history — zero cheating from ground truth.
+ */
+export function autoTraceBestSystolicBeat(
+  strip: Float32Array,
+  cols: number,
+  displayCols: number,
+  head: number,
+  stripPhase: Float32Array,
+  stripBeatIndex: Uint32Array,
+  stripSampleTime: Float64Array,
+  spectral: SpectralSettings,
+  phaseMarks: PhaseMarks,
+  modal: boolean,
+): AutoTraceBeatResult {
+  if (cols < 16 || strip.length < cols * SPECTRAL_BINS) {
+    return {
+      ok: false,
+      reason: 'incomplete-beat',
+      message: 'Aún no hay suficientes datos espectrales para detectar un latido completo.',
+    };
+  }
+
+  const headCol = ((head % cols) + cols) % cols;
+  const pixelsPerColumn = (displayCols || cols) / cols;
+  const ejStart = Math.max(0.01, phaseMarks.ejectionStart);
+  const ejEnd = Math.min(0.85, Math.max(ejStart + 0.12, phaseMarks.ejectionEnd));
+
+  // Partition written columns into contiguous non-wrapping beat segments that do not cross the sweep head.
+  interface BeatSpan {
+    beatIndex: number;
+    c0: number;
+    c1: number;
+    maxTimeS: number;
+    minPhase: number;
+    maxPhase: number;
+  }
+  const spans: BeatSpan[] = [];
+  let cur: BeatSpan | null = null;
+
+  for (let c = 0; c < cols; c++) {
+    const t = stripSampleTime[c] ?? 0;
+    // Skip unwritten columns and the 2-column sweep-marker gap so a beat never stitches old & new sweeps
+    const atSweep = c === headCol || c === (headCol + 1) % cols;
+    if (!(t > 0) || atSweep) {
+      if (cur) {
+        spans.push(cur);
+        cur = null;
+      }
+      continue;
+    }
+    const beat = stripBeatIndex[c] ?? 0;
+    const ph = stripPhase[c] ?? 0;
+    if (!cur || cur.beatIndex !== beat || Math.abs(t - cur.maxTimeS) > 0.15) {
+      if (cur) spans.push(cur);
+      cur = { beatIndex: beat, c0: c, c1: c, maxTimeS: t, minPhase: ph, maxPhase: ph };
+    } else {
+      cur.c1 = c;
+      if (t > cur.maxTimeS) cur.maxTimeS = t;
+      if (ph < cur.minPhase) cur.minPhase = ph;
+      if (ph > cur.maxPhase) cur.maxPhase = ph;
+    }
+  }
+  if (cur) spans.push(cur);
+
+  // Filter for complete systolic windows (covering onset through aortic closing click) and test newest first.
+  const candidates = spans
+    .filter((sp) => sp.minPhase <= ejStart + 0.01 && sp.maxPhase >= ejEnd + 0.03)
+    .sort((a, b) => b.maxTimeS - a.maxTimeS);
+
+  if (!candidates.length) {
+    return {
+      ok: false,
+      reason: 'incomplete-beat',
+      message: 'Espera ~1 s en PW para registrar al menos un latido sistólico completo en la tira.',
+    };
+  }
+
+  const winStartPhase = Math.max(0, ejStart - 0.03);
+  const winEndPhase = Math.min(0.95, ejEnd + 0.06);
+
+  for (const cand of candidates) {
+    let sys0 = -1;
+    let sys1 = -1;
+    for (let c = cand.c0; c <= cand.c1; c++) {
+      const ph = stripPhase[c] ?? 0;
+      if (ph >= winStartPhase && ph <= winEndPhase) {
+        if (sys0 < 0) sys0 = c;
+        sys1 = c;
+      }
+    }
+    if (sys0 < 0 || sys1 - sys0 < 4) continue;
+
+    const traced = autoTraceSpectralEnvelope(
+      strip,
+      cols,
+      displayCols,
+      spectral,
+      (sys0 + 0.5) * pixelsPerColumn,
+      (sys1 + 0.5) * pixelsPerColumn,
+      modal,
+    );
+    const vels = traced.velocitiesMps;
+    // Trim leading/trailing zero padding so the displayed curve hugs the systolic envelope cleanly
+    let firstNonZero = -1;
+    let lastNonZero = -1;
+    for (let i = 0; i < vels.length; i++) {
+      if (Math.abs(vels[i]!) > 1e-4) {
+        if (firstNonZero < 0) firstNonZero = i;
+        lastNonZero = i;
+      }
+    }
+    if (firstNonZero < 0 || lastNonZero - firstNonZero < 3) continue;
+    const i0 = Math.max(0, firstNonZero - 1);
+    const i1 = Math.min(vels.length - 1, lastNonZero + 1);
+    const trimmed = vels.slice(i0, i1 + 1);
+    const summary = summarizeEnvelope(trimmed, traced.secondsPerColumn);
+    if (summary.vtiCm >= MIN_AUTO_BEAT_VTI_CM && summary.vmaxMps >= MIN_AUTO_BEAT_VMAX_MPS) {
+      return {
+        ok: true,
+        velocitiesMps: trimmed,
+        secondsPerColumn: traced.secondsPerColumn,
+        x0: traced.x0 + i0 * traced.pixelsPerColumn,
+        pixelsPerColumn: traced.pixelsPerColumn,
+        beatIndex: cand.beatIndex,
+        vtiCm: summary.vtiCm,
+        vmaxMps: summary.vmaxMps,
+        meanGradientMmHg: summary.meanGradientMmHg,
+        peakGradientMmHg: summary.peakGradientMmHg,
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    reason: 'no-flow',
+    message: 'No se detectó un flujo sistólico claro en la tira; verifica que el gate esté dentro del TSVI.',
   };
 }

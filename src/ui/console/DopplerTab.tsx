@@ -1,5 +1,6 @@
-import { examClosed } from '@/app/modePolicy';
+import { examClosed, modePolicy } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
+import { useState } from 'react';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
 import { SPECTRAL_SCALE_RANGE, type SpectralModality } from '@/simulator/doppler/spectral/spectrum';
 import {
@@ -21,6 +22,7 @@ import {
 import { useShallow } from 'zustand/shallow';
 import { Section, Segmented, Slider, Toggle } from '../controls';
 import { IconDoppler } from '../icons';
+import { runAutoLvotGate } from '../display/measurementTools';
 import { useTip } from './useTip';
 import { wallFilterControl, wallFilterRequestFor, wallFilterText } from './wallFilterControl';
 
@@ -63,6 +65,7 @@ export function DopplerTab() {
       cursorThetaRad: st.cursorThetaRad,
       gateDepthCm: st.gateDepthCm,
       modality: st.modality,
+      mode: st.mode,
       resetColorBox: st.resetColorBox,
       setColor: st.setColor,
       setCursor: st.setCursor,
@@ -77,8 +80,20 @@ export function DopplerTab() {
     })),
   );
   const tip = useTip();
+  const [gateHint, setGateHint] = useState<string | null>(null);
   const mod = s.modality;
   const limits = acquisitionLimits(s);
+  const presetsEnabled = modePolicy(s.mode).presetsEnabled;
+
+  const snapLvotGate = async () => {
+    setGateHint(null);
+    const res = await runAutoLvotGate();
+    setGateHint(
+      res.ok
+        ? `Gate PW colocado en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm de VAo).`
+        : res.message,
+    );
+  };
 
   if (mod === '2d') {
     return (
@@ -313,6 +328,23 @@ export function DopplerTab() {
                 format={(v) => `${v.toFixed(1)} cm`}
                 onChange={(v) => s.setCursor(s.cursorThetaRad, v)}
               />
+              {mod === 'pw' && presetsEnabled && !s.closed && (
+                <div className="row end">
+                  <button
+                    type="button"
+                    className="btn-primary-soft"
+                    onClick={() => void snapLvotGate()}
+                    data-tip={tip('Detecta el TSVI en el plano A5C/A3C y sitúa el gate PW ~0,5 cm proximal a la válvula aórtica.')}
+                  >
+                    Colocar gate en TSVI
+                  </button>
+                </div>
+              )}
+              {mod === 'pw' && gateHint && (
+                <p className="small" role="status">
+                  {gateHint}
+                </p>
+              )}
             </>
           )}
           <Slider
