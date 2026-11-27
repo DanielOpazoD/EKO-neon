@@ -10,10 +10,11 @@ import { pulmonaryHypertensionRvCase } from './pulmonary-hypertension-rv';
 import { pericardialEffusionTamponadeCase } from './pericardial-effusion-tamponade';
 import { afDiastolicCase } from './af-diastolic';
 import { artifactChallengeCase } from './artifact-challenge';
+import { aorticRegurgitationSevereCase } from './aortic-regurgitation-severe';
 import type { CaseDefinition, CaseDefinitionInput } from './schema';
 import { normalizeCase } from './normalizeCase';
 
-/** The 12 mandatory initial cases (spec 56), in the order of the specification. */
+/** Clinical case catalogue (initial 12 mandatory cases + extended valvular phenotypes). */
 export const CASE_INPUTS: CaseDefinitionInput[] = [
   normalExcellentCase,
   normalDifficultWindowCase,
@@ -27,6 +28,7 @@ export const CASE_INPUTS: CaseDefinitionInput[] = [
   pericardialEffusionTamponadeCase,
   afDiastolicCase,
   artifactChallengeCase,
+  aorticRegurgitationSevereCase,
 ];
 
 export function listCases(): { id: string; title: string; difficulty: number }[] {

@@ -70,6 +70,7 @@ const CASE_MR_GRADE: Record<string, ValveGrade | null> = {
   'pericardial-effusion-tamponade': null,
   'af-diastolic': 'mild',
   'artifact-challenge': 'mild',
+  'aortic-regurgitation-severe': null,
 };
 
 const SPANISH: Record<ValveGrade, string> = {

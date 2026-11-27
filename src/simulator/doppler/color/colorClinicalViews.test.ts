@@ -375,3 +375,43 @@ test('view-level Color fidelity: severe TR septal-curving jet, 3D RV PISA, LV di
     `Expected laminar Windkessel runoff in DescendingAorta, got ${JSON.stringify(descDia)}`,
   );
 });
+
+test('view-level Color fidelity: severe chronic AR diastolic LVOT jet, aortic PISA, and suprasternal holodiastolic reversal', () => {
+  // Diastolic turbulent AR jet in PLAX, A5C & A3C LVOT/LV + laminar aortic-side PISA with clean chamber isolation
+  for (const viewId of ['plax', 'a5c', 'a3c'] as const) {
+    const arDia = auditSlice('aortic-regurgitation-severe', viewId, 0.56);
+    const lvot = requireStat(arDia, Structure.Lvot, `AR ${viewId} Lvot`);
+    const lv = requireStat(arDia, Structure.LvCavity, `AR ${viewId} LvCavity`);
+    const root = requireStat(arDia, Structure.AorticRoot, `AR ${viewId} AorticRoot`);
+    const la = requireStat(arDia, Structure.LaCavity, `AR ${viewId} LaCavity`);
+    const rv = requireStat(arDia, Structure.RvCavity, `AR ${viewId} RvCavity`);
+    assert.ok(
+      lvot.fillPct >= 28 && lvot.maxSpeed >= 2.5 && lvot.maxDisp >= 0.4,
+      `Expected turbulent diastolic AR jet in ${viewId} LVOT, got ${JSON.stringify(lvot)}`,
+    );
+    assert.ok(
+      lv.fillPct >= 18 && lv.maxSpeed >= 2.5 && lv.maxDisp >= 0.4,
+      `Expected diastolic AR jet extending into ${viewId} LvCavity, got ${JSON.stringify(lv)}`,
+    );
+    assert.ok(
+      root.fillPct >= 30 && root.maxDisp <= 0.12,
+      `Expected laminar aortic-side AR PISA in ${viewId} AorticRoot, got ${JSON.stringify(root)}`,
+    );
+    assert.ok(la.maxDisp <= 0.15, `AR jet must not bleed into ${viewId} LaCavity (d=${la.maxDisp.toFixed(2)})`);
+    assert.ok(rv.maxDisp <= 0.15, `AR jet must not bleed into ${viewId} RvCavity (d=${rv.maxDisp.toFixed(2)})`);
+  }
+
+  // Suprasternal arch in mid-diastole: holodiastolic flow reversal in DescendingAorta (> 20 cm/s, opposite sign to normal Windkessel)
+  const ssnNormDia = auditSlice('normal-excellent', 'suprasternal-arch', 0.62);
+  const ssnArDia = auditSlice('aortic-regurgitation-severe', 'suprasternal-arch', 0.62);
+  const descNorm = requireStat(ssnNormDia, Structure.DescendingAorta, 'normal suprasternal mid-dia DescendingAorta');
+  const descAr = requireStat(ssnArDia, Structure.DescendingAorta, 'AR suprasternal mid-dia DescendingAorta');
+  assert.ok(
+    descAr.fillPct >= 85 && descAr.maxSpeed >= 0.25,
+    `Expected brisk holodiastolic reversal (> 0.25 m/s) in AR DescendingAorta, got ${JSON.stringify(descAr)}`,
+  );
+  assert.ok(
+    descNorm.meanSignedAxial * descAr.meanSignedAxial < 0,
+    `Expected opposite diastolic flow direction in AR DescendingAorta vs normal: norm=${descNorm.meanSignedAxial.toFixed(2)}, ar=${descAr.meanSignedAxial.toFixed(2)}`,
+  );
+});

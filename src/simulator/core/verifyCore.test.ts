@@ -27,9 +27,9 @@ import { allocPolarFrame, DEFAULT_ACQUISITION } from '@/simulator/renderer/types
 import { DEFAULT_SPECTRAL } from '@/simulator/doppler/spectral/spectrum';
 
 describe('EchoTwin TTE core physiology and clinical cases', () => {
-  it('loads and validates all 12 clinical cases with finite ground-truth hemodynamics and Zod schema parity', () => {
+  it('loads and validates all clinical cases with finite ground-truth hemodynamics and Zod schema parity', () => {
     const catalog = listCases();
-    assert.equal(catalog.length, 12, 'Expected 12 clinical cases');
+    assert.equal(catalog.length, 13, 'Expected 13 clinical cases');
 
     for (const raw of CASE_INPUTS) {
       const validated = validateCase(raw);
