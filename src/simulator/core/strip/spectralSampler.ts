@@ -124,11 +124,14 @@ export function sampleSpectralColumn(
       (px0 - hf.origin.x) * hf.ey.x + (py0 - hf.origin.y) * hf.ey.y + (pz0 - hf.origin.z) * hf.ey.z;
     const hz0 =
       (px0 - hf.origin.x) * hf.ez.x + (py0 - hf.origin.y) * hf.ez.y + (pz0 - hf.origin.z) * hf.ez.z;
-    sampleFlow(ctx.flow, ctx.tables, hp, pPrev, hx0, hy0, hz0, flowSample);
+    const gateCls = classifyScene(px0, py0, pz0, tissueSample);
+    const gateStructure =
+      gateCls !== 0 && tissueSample.tissue === Tissue.Blood ? tissueSample.structure : undefined;
+    sampleFlow(ctx.flow, ctx.tables, hp, pPrev, hx0, hy0, hz0, flowSample, gateStructure);
     const vPrev = flowSample.present
       ? -(flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz)
       : 0;
-    sampleFlow(ctx.flow, ctx.tables, hp, pNext, hx0, hy0, hz0, flowSample);
+    sampleFlow(ctx.flow, ctx.tables, hp, pNext, hx0, hy0, hz0, flowSample, gateStructure);
     const vNext = flowSample.present
       ? -(flowSample.vx * dhx + flowSample.vy * dhy + flowSample.vz * dhz)
       : 0;
@@ -188,7 +191,7 @@ export function sampleSpectralColumn(
     const cwDepthBalance = isCw ? 1 / Math.max(0.45, focusingGain(r, focusCm)) : 1;
     const power = received(r) ** 2 * beamWeight * cwDepthBalance;
     if (power <= 0) return cls;
-    sampleFlow(ctx.flow, ctx.tables, hp, phase, hx, hy, hz, flowSample);
+    sampleFlow(ctx.flow, ctx.tables, hp, phase, hx, hy, hz, flowSample, tissueSample.structure);
     if (!flowSample.present) {
       samples.push({ v: 0, weight: 0.3 * power, dispersion: 0.05, depthCm: r });
       return cls;
@@ -488,6 +491,7 @@ export function computeGateInfo(
             oyH + dhy * rr,
             ozH + dhz * rr,
             flowSample,
+            tissueSample.structure,
           );
           if (!flowSample.present) continue;
           const sp = Math.hypot(flowSample.vx, flowSample.vy, flowSample.vz);
@@ -522,18 +526,20 @@ export function computeGateInfo(
       let bx = 0,
         by = 0,
         bz = 0;
-      for (let k = 0; k < 16; k++) {
-        const ph = k / 16;
-        sampleFlow(
-          ctx.flow,
-          ctx.tables,
-          computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph, ctx.flow.flowPeaks)),
-          ph,
-          hx,
-          hy,
-          hz,
-          flowSample,
-        );
+        const gateSt = tissueSample.structure;
+        for (let k = 0; k < 16; k++) {
+          const ph = k / 16;
+          sampleFlow(
+            ctx.flow,
+            ctx.tables,
+            computeHeartPose(ctx.heart, cycleStateAt(ctx.tables, ph, ctx.flow.flowPeaks)),
+            ph,
+            hx,
+            hy,
+            hz,
+            flowSample,
+            gateSt,
+          );
         const sp = Math.hypot(flowSample.vx, flowSample.vy, flowSample.vz);
         if (flowSample.present && sp > best) {
           best = sp;

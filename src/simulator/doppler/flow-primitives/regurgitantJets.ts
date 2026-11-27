@@ -14,7 +14,14 @@ import { smoothstep } from '@/core/vec3';
 import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { atrialScale, RA_ROOF_DESCENT_SHARE } from '@/simulator/anatomy/classify/atria';
 import { PV_RADIUS, PV_REACH, pulmonaryVeinSegment } from '@/simulator/anatomy/pulmonaryVeins';
-import type { FlowFieldParams } from './flowField';
+import {
+  FLOW_MASK_ALL,
+  FLOW_MASK_AR_JET,
+  FLOW_MASK_AR_PISA,
+  FLOW_MASK_MR_JET,
+  FLOW_MASK_MR_PISA,
+  type FlowFieldParams,
+} from './flowField';
 import {
   convergenceWeight,
   fadeOut,
@@ -116,10 +123,13 @@ export function sampleRegurgitantJets(
   y: number,
   z: number,
   out: FlowSample,
+  mask = FLOW_MASK_ALL,
 ): void {
   const zAnn = hp.zAnn;
   // ---- MR jet (vena contracta neck + turbulent LA free jet + hemispheric LV PISA) ----
-  if (p.enabled['mr-jet'] !== false && p.mrEroCm2 > 0) {
+  const allowMrJet = (mask & FLOW_MASK_MR_JET) !== 0;
+  const allowMrPisa = (mask & FLOW_MASK_MR_PISA) !== 0;
+  if ((allowMrJet || allowMrPisa) && p.enabled['mr-jet'] !== false && p.mrEroCm2 > 0) {
     const q = sampleTable(tables.mrFlowMlps, phase);
     if (q > 1) {
       const vj = Math.max(1e-3, sampleTable(tables.mrVelocityMps, phase));
@@ -139,7 +149,7 @@ export function sampleRegurgitantJets(
       const px = dx - dirX * along,
         pz = dz - dirZ * along;
       const rho = Math.hypot(px, dy, pz);
-      if (dz <= 0 && along >= 0 && along < 5.5) {
+      if (dz <= 0 && allowMrJet && along >= 0 && along < 5.5) {
         // Vena contracta neck (first 0.35 cm beyond coaptation): collimated core matching rVc before
         // organic free-jet shear expansion into the LA.
         const expandAlong = Math.max(0, along - 0.35);
@@ -160,7 +170,7 @@ export function sampleRegurgitantJets(
           );
           out.present = 1;
         }
-      } else if (dz > 0) {
+      } else if (dz > 0 && allowMrPisa) {
         // Proximal Isovelocity Surface Area (PISA): hemispheric continuity v(d) = Q / (2·π·d²·100)
         // on the LV side (dz > 0) of the anatomical mitral coaptation plane, even for eccentric jets.
         const d = Math.hypot(dx, dy, dz);
@@ -185,7 +195,9 @@ export function sampleRegurgitantJets(
     }
   }
   // ---- AR jet ----
-  if (p.enabled['ar-jet'] !== false && p.arEroCm2 > 0) {
+  const allowArJet = (mask & FLOW_MASK_AR_JET) !== 0;
+  const allowArPisa = (mask & FLOW_MASK_AR_PISA) !== 0;
+  if ((allowArJet || allowArPisa) && p.enabled['ar-jet'] !== false && p.arEroCm2 > 0) {
     const q = sampleTable(tables.arFlowMlps, phase);
     if (q > 1) {
       const vj = q / p.arEroCm2 / 100;
@@ -201,7 +213,7 @@ export function sampleRegurgitantJets(
         qz = dz - ax.z * t;
       const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
       const along = -t;
-      if (along >= 0 && along < 6) {
+      if (along >= 0 && allowArJet && along < 6) {
         const spreadSlope = 0.31 * (1 - 0.05 * Math.min(4, along));
         const rHalf = 0.84 * (r0 + along * spreadSlope);
         if (rho < jetReach(rHalf, along, FAST_JET_SHEAR)) {
@@ -217,7 +229,7 @@ export function sampleRegurgitantJets(
           );
           out.present = 1;
         }
-      } else if (along < 0) {
+      } else if (along < 0 && allowArPisa) {
         // convergence in the root, fading out where it used to stop
         const d = Math.hypot(dx, dy, dz);
         if (d > 0.05 && d < 1.5) {

@@ -284,7 +284,8 @@ export class ColorFieldDriver {
         const hx = ohx + dhx * r;
         const hy = ohy + dhy * r;
         const hz = ohz + dhz * r;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        const bloodStructure = tId === Tissue.Blood ? structure[pIdx] : undefined;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
         if (fs.present) {
           const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
           const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
@@ -428,7 +429,8 @@ export class ColorFieldDriver {
             return;
           }
         }
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        const bloodStructure = tId === Tissue.Blood ? syntheticFrame.structure[idx] : undefined;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
         const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
         const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
         o.v = vAxial;
@@ -552,7 +554,8 @@ export class ColorFieldDriver {
             return;
           }
         }
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        const bloodStructure = tId === Tissue.Blood ? frame.structure[idx] : undefined;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
         const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz); // + = toward the transducer
         const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
         o.v = vAxial;

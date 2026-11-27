@@ -670,7 +670,8 @@ export function compareDeferredDoppler(
         const hz = ohz + dhz * r;
         const tId = frame.tissue[pIdx]!;
         const isClutterTissue = tId === Tissue.Myocardium || tId === Tissue.Valve;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs);
+        const bloodStructure = tId === Tissue.Blood ? frame.structure[pIdx] : undefined;
+        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
         if (fs.present) {
           const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
           const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;

@@ -18,6 +18,7 @@ import { sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 import type { CaseDefinition } from '@/cases/schema';
 import { smoothstep } from '@/core/vec3';
 import { lvotRadiusAt } from '@/simulator/anatomy/aorticValve';
+import { Structure } from '@/simulator/anatomy/tissue';
 import {
   convergenceWeight,
   conventionalPropagation,
@@ -174,10 +175,70 @@ export function buildFlowParams(
   };
 }
 
+/** Bitmask flags governing which hemodynamic flow primitives may occupy each anatomical blood structure. */
+export const FLOW_MASK_AORTA_NET = 1 << 0;
+export const FLOW_MASK_LVOT_AV = 1 << 1;
+export const FLOW_MASK_MITRAL_IN = 1 << 2;
+export const FLOW_MASK_MR_JET = 1 << 3;
+export const FLOW_MASK_MR_PISA = 1 << 4;
+export const FLOW_MASK_AR_JET = 1 << 5;
+export const FLOW_MASK_AR_PISA = 1 << 6;
+export const FLOW_MASK_PV = 1 << 7;
+export const FLOW_MASK_TRICUSPID_IN = 1 << 8;
+export const FLOW_MASK_RVOT_PA = 1 << 9;
+export const FLOW_MASK_TR_JET = 1 << 10;
+export const FLOW_MASK_TR_PISA = 1 << 11;
+export const FLOW_MASK_SYS_VEINS = 1 << 12;
+export const FLOW_MASK_ALL = 0xffff;
+
+const STRUCTURE_FLOW_MASK = new Uint16Array(64).fill(FLOW_MASK_ALL);
+// Left ventricle & outflow
+STRUCTURE_FLOW_MASK[Structure.LvCavity] =
+  FLOW_MASK_MITRAL_IN | FLOW_MASK_LVOT_AV | FLOW_MASK_MR_PISA | FLOW_MASK_AR_JET;
+STRUCTURE_FLOW_MASK[Structure.Lvot] =
+  FLOW_MASK_MITRAL_IN | FLOW_MASK_LVOT_AV | FLOW_MASK_MR_PISA | FLOW_MASK_AR_JET;
+// Aortic root & arterial tree
+STRUCTURE_FLOW_MASK[Structure.AorticRoot] =
+  FLOW_MASK_AORTA_NET | FLOW_MASK_LVOT_AV | FLOW_MASK_AR_PISA;
+STRUCTURE_FLOW_MASK[Structure.AscendingAorta] =
+  FLOW_MASK_AORTA_NET | FLOW_MASK_LVOT_AV | FLOW_MASK_AR_PISA;
+STRUCTURE_FLOW_MASK[Structure.AorticArch] = FLOW_MASK_AORTA_NET;
+STRUCTURE_FLOW_MASK[Structure.BrachiocephalicArtery] = FLOW_MASK_AORTA_NET;
+STRUCTURE_FLOW_MASK[Structure.LeftCommonCarotid] = FLOW_MASK_AORTA_NET;
+STRUCTURE_FLOW_MASK[Structure.LeftSubclavian] = FLOW_MASK_AORTA_NET;
+STRUCTURE_FLOW_MASK[Structure.DescendingAorta] = FLOW_MASK_AORTA_NET;
+// Left atrium & pulmonary veins
+STRUCTURE_FLOW_MASK[Structure.LaCavity] = FLOW_MASK_MITRAL_IN | FLOW_MASK_MR_JET | FLOW_MASK_PV;
+STRUCTURE_FLOW_MASK[Structure.LaAppendage] = FLOW_MASK_MITRAL_IN | FLOW_MASK_MR_JET | FLOW_MASK_PV;
+STRUCTURE_FLOW_MASK[Structure.PulmonaryVein] = FLOW_MASK_PV;
+// Right ventricle, outflow & pulmonary artery
+STRUCTURE_FLOW_MASK[Structure.RvCavity] =
+  FLOW_MASK_TRICUSPID_IN | FLOW_MASK_RVOT_PA | FLOW_MASK_TR_PISA;
+STRUCTURE_FLOW_MASK[Structure.Rvot] =
+  FLOW_MASK_TRICUSPID_IN | FLOW_MASK_RVOT_PA | FLOW_MASK_TR_PISA;
+STRUCTURE_FLOW_MASK[Structure.PulmonaryArtery] = FLOW_MASK_RVOT_PA;
+// Right atrium & systemic veins
+STRUCTURE_FLOW_MASK[Structure.RaCavity] =
+  FLOW_MASK_TRICUSPID_IN | FLOW_MASK_TR_JET | FLOW_MASK_SYS_VEINS;
+STRUCTURE_FLOW_MASK[Structure.RaAppendage] =
+  FLOW_MASK_TRICUSPID_IN | FLOW_MASK_TR_JET | FLOW_MASK_SYS_VEINS;
+STRUCTURE_FLOW_MASK[Structure.Svc] = FLOW_MASK_SYS_VEINS;
+STRUCTURE_FLOW_MASK[Structure.Ivc] = FLOW_MASK_SYS_VEINS;
+STRUCTURE_FLOW_MASK[Structure.HepaticVein] = FLOW_MASK_SYS_VEINS;
+STRUCTURE_FLOW_MASK[Structure.CoronarySinus] = FLOW_MASK_SYS_VEINS;
+
+/** Return the allowed flow-primitive mask for an anatomical structure (non-blood/unknown -> all). */
+export function flowMaskForStructure(structure?: number): number {
+  if (structure === undefined || structure < 0 || structure >= STRUCTURE_FLOW_MASK.length) {
+    return FLOW_MASK_ALL;
+  }
+  return STRUCTURE_FLOW_MASK[structure]!;
+}
+
 /** Reusable scratch sample for aortic-network blending (zero per-sample allocation). */
 const AORTA_TMP: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
 
-/** Sample the flow field at heart-frame point (x,y,z) for the given phase. */
+/** Sample the flow field at heart-frame point (x,y,z) for the given phase, gated to `structure` when known. */
 export function sampleFlow(
   p: FlowFieldParams,
   tables: BeatTables,
@@ -187,14 +248,19 @@ export function sampleFlow(
   y: number,
   z: number,
   out: FlowSample,
+  structure?: number,
 ): void {
   out.vx = 0;
   out.vy = 0;
   out.vz = 0;
   out.dispersion = 0;
   out.present = 0;
+  const mask = flowMaskForStructure(structure);
   const aortaEnabled = p.enabled['lvot'] !== false || p.enabled['aortic-valve'] !== false;
-  const inAorta = sampleAorticNetwork(p.heart, p.thorax, tables, hp, phase, x, y, z, AORTA_TMP);
+  const allowAortaNet = (mask & FLOW_MASK_AORTA_NET) !== 0;
+  const allowLvotAv = (mask & FLOW_MASK_LVOT_AV) !== 0;
+  const inAorta =
+    allowAortaNet && sampleAorticNetwork(p.heart, p.thorax, tables, hp, phase, x, y, z, AORTA_TMP);
   if (inAorta && !aortaEnabled) return;
 
   const qao = sampleTable(tables.aorticFlowMlps, phase);
@@ -210,7 +276,7 @@ export function sampleFlow(
   const hasStenoticJet = p.avAreaCm2 < 2.0 || p.lvotObstruction !== null;
 
   // Far downstream in the arch / descending aorta / branches: pure mass-conserving aortic network.
-  if (inAorta && (tAv >= (hasStenoticJet ? 5.5 : 3.2) || qao <= 1)) {
+  if (inAorta && (!allowLvotAv || tAv >= (hasStenoticJet ? 5.5 : 3.2) || qao <= 1)) {
     out.vx = AORTA_TMP.vx;
     out.vy = AORTA_TMP.vy;
     out.vz = AORTA_TMP.vz;
@@ -223,6 +289,7 @@ export function sampleFlow(
   const zrMv = z - zAnn; // distance beyond the annulus into the LV
   if (
     !inAorta &&
+    (mask & FLOW_MASK_MITRAL_IN) !== 0 &&
     p.enabled['mitral-inflow'] !== false &&
     zrMv > -FUNNEL_FADE_TO_CM &&
     zrMv < hp.lengthNow - 0.2
@@ -243,7 +310,7 @@ export function sampleFlow(
     );
 
   // ---- LVOT → aortic valve → proximal ascending aorta ----
-  if (aortaEnabled && qao > 1) {
+  if (aortaEnabled && allowLvotAv && qao > 1) {
     const qx = dxAv - ax.x * tAv,
       qy = dyAv - ax.y * tAv,
       qz = dzAv - ax.z * tAv;
@@ -431,7 +498,12 @@ export function sampleFlow(
 
   // ---- Tricuspid inflow ----
   const zrTv = z - (p.tvCenter.z + hp.tvZ);
-  if (p.enabled['tricuspid-inflow'] !== false && zrTv > -FUNNEL_FADE_TO_CM && zrTv < 5)
+  if (
+    (mask & FLOW_MASK_TRICUSPID_IN) !== 0 &&
+    p.enabled['tricuspid-inflow'] !== false &&
+    zrTv > -FUNNEL_FADE_TO_CM &&
+    zrTv < 5
+  )
     inflowJet(
       tables,
       tables.tricuspidFlowMlps,
@@ -448,7 +520,7 @@ export function sampleFlow(
     );
 
   // ---- RVOT / pulmonary ----
-  if (p.enabled['rvot'] !== false) {
+  if ((mask & FLOW_MASK_RVOT_PA) !== 0 && p.enabled['rvot'] !== false) {
     const qpv = sampleTable(tables.pulmonaryFlowMlps, phase);
     if (qpv > 1) {
       const axR = p.rvotB.x - p.rvotA.x,
@@ -487,7 +559,9 @@ export function sampleFlow(
   }
 
   // ---- TR jet (systole) ----
-  if (p.enabled['tr-jet'] !== false && p.trVmaxMps) {
+  const allowTrJet = (mask & FLOW_MASK_TR_JET) !== 0;
+  const allowTrPisa = (mask & FLOW_MASK_TR_PISA) !== 0;
+  if ((allowTrJet || allowTrPisa) && p.enabled['tr-jet'] !== false && p.trVmaxMps) {
     const vmax = sampleTable(tables.trVelocityMps, phase);
     if (vmax > 0.02 * p.trVmaxMps) {
       const ox = p.tvCenter.x,
@@ -511,7 +585,7 @@ export function sampleFlow(
         const spreadSlope = isTraceTr ? 0.16 : 0.26 * (1 - 0.055 * Math.min(4, Math.max(0, dzj)));
         const Rj = r0 + Math.max(0, dzj) * spreadSlope;
         const rHalf = 0.84 * Rj;
-        if (dzj >= 0 && rho < jetReach(rHalf, dzj, FAST_JET_SHEAR)) {
+        if (dzj >= 0 && allowTrJet && rho < jetReach(rHalf, dzj, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, dzj, FAST_JET_SHEAR);
           const decay =
             freeJetCentreline(dzj, (2 * r0) / 1.1) * fadeOut(dzj, fadeStart, maxReach);
@@ -522,7 +596,7 @@ export function sampleFlow(
               (isTraceTr ? 0.08 : 0.2) * Math.min(1, rho / Math.max(0.08, Rj)),
           );
           out.present = 1;
-        } else if (dzj < 0 && !isTraceTr) {
+        } else if (dzj < 0 && allowTrPisa && !isTraceTr) {
           const d = Math.hypot(rho, -dzj) + 0.2;
           if (d < 1.4) {
             const conv =
@@ -537,6 +611,12 @@ export function sampleFlow(
       }
     }
   }
-  sampleRegurgitantJets(p, tables, hp, phase, x, y, z, out);
-  samplePulmonaryVeins(p, tables, hp, phase, x, y, z, out);
+  if (
+    (mask & (FLOW_MASK_MR_JET | FLOW_MASK_MR_PISA | FLOW_MASK_AR_JET | FLOW_MASK_AR_PISA)) !== 0
+  ) {
+    sampleRegurgitantJets(p, tables, hp, phase, x, y, z, out, mask);
+  }
+  if ((mask & FLOW_MASK_PV) !== 0) {
+    samplePulmonaryVeins(p, tables, hp, phase, x, y, z, out);
+  }
 }
