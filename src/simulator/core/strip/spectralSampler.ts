@@ -268,7 +268,9 @@ export function sampleSpectralColumn(
         centerCls === 1 &&
         (tissueSample.tissue === Tissue.Blood ||
           tissueSample.structure === Structure.DescendingAorta ||
-          tissueSample.structure === Structure.Mediastinum ||
+          tissueSample.structure === Structure.PosteriorMediastinum ||
+          tissueSample.structure === Structure.SuperiorMediastinum ||
+          tissueSample.structure === Structure.PericardialFat ||
           tissueSample.structure === Structure.Diaphragm ||
           (tissueSample.structure === Structure.ChestWall &&
             tissueSample.sdf > -Math.max(0.55 * wl, 0.5 * we) - 0.1))

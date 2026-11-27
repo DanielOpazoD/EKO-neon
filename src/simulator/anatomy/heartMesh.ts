@@ -149,7 +149,11 @@ export const AORTA_GROUP: GroupSpec = {
   label: 'Arco y aorta torácica',
   color: 0xcf6a6a,
   opacity: 0.7,
-  has: (s) => s === Structure.DescendingAorta || s >= Structure.AscendingAorta,
+  // the arch and its branches by name: `s >= AscendingAorta` took in every structure added after them (the right atrial
+  // appendage, the esophagus, the mediastinum)
+  has: (s) =>
+    s === Structure.DescendingAorta ||
+    (s >= Structure.AscendingAorta && s <= Structure.LeftSubclavian),
 };
 
 const DEFAULT_BOUNDS = {

@@ -165,10 +165,13 @@ bool classifyThorax(vec3 p, out Sample s, float heartDist) {
   // the pleural cavities wrap the pericardium (decision 144)
   // beyond the pericardial fat pad and the corridor, outside the posterior and superior mediastinum (thoraxModel.ts, decision 150),
   // and not under the heart, which rests on the diaphragm (decision 229)
-  bool outsideMediastinum = mediastinumDistance(x, y, z - TH_COL_SHIFT) > 0.0;
+  float posteriorMd = posteriorMediastinumDistance(x, y, z - TH_COL_SHIFT);
+  float superiorMd = superiorMediastinumDistance(x, y, z - TH_COL_SHIFT);
+  bool outsideMediastinum = min(posteriorMd, superiorMd) > 0.0;
   bool aroundHeart = heartDist > PERICARDIAL_FAT_CM && depth > T + ANTERIOR_CORRIDOR_CM;
   if ((lungL || lungR || aroundHeart) && outsideMediastinum && !isUnderHeart(x, y, z)) { s.tissue = T_LUNG; s.structure = S_LUNG; s.sdf = -1.0; s.n = vec3(0.0, 0.0, 1.0); return true; }
-  s.tissue = T_FAT; s.structure = S_MEDIAST; s.sdf = -1.0;
+  // the soft tissue left, named by region (thoraxModel.ts): the mediastinum proper, or the pericardial fat
+  s.tissue = T_FAT; s.structure = outsideMediastinum ? S_PERI_FAT : (superiorMd < posteriorMd ? S_SUP_MEDIAST : S_POST_MEDIAST); s.sdf = -1.0;
   return true;
 }
 `;

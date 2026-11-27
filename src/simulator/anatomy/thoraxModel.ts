@@ -449,9 +449,22 @@ export const LIVER_LEFT_LOBE_DEPTH_CM = 7;
  * (decision 213).
  */
 export function mediastinumDistance(x: number, y: number, z: number): number {
+  return Math.min(posteriorMediastinumDistance(x, y, z), superiorMediastinumDistance(x, y, z));
+}
+
+/** The posterior part of `mediastinumDistance`: the column behind the left atrium and the cuff of the descending aorta. */
+export function posteriorMediastinumDistance(x: number, y: number, z: number): number {
   const px = (x + 0.5) / 1.8,
     pz = (z - POSTERIOR_MEDIASTINUM_Z) / 4.0;
   const posterior = px * px + pz * pz - 1;
+  const rs = DESC_AORTA_R + DESC_AORTA_WALL + DESC_AORTA_SLEEVE;
+  const ax = (x - DESC_AORTA_X) / rs,
+    az = (z - DESC_AORTA_Z - Math.min(Math.max(z - DESC_AORTA_Z, 0), DESC_AORTA_SLEEVE_REACH)) / rs;
+  return Math.min(posterior, ax * ax + az * az - 1);
+}
+
+/** The superior part of `mediastinumDistance`: around the great vessels above the base, and its bridge to the aortic cuff. */
+export function superiorMediastinumDistance(x: number, y: number, z: number): number {
   // around the root and the ascending aorta it starts lower and, above them, fades into the taper of decision 150 (386)
   const u = Math.min(1, Math.max(0, (y - 2) / 4));
   const v = Math.min(
@@ -471,9 +484,6 @@ export function mediastinumDistance(x: number, y: number, z: number): number {
     superior = sx * sx + sz * sz - 1;
   }
   const rs = DESC_AORTA_R + DESC_AORTA_WALL + DESC_AORTA_SLEEVE;
-  const ax = (x - DESC_AORTA_X) / rs,
-    az = (z - DESC_AORTA_Z - Math.min(Math.max(z - DESC_AORTA_Z, 0), DESC_AORTA_SLEEVE_REACH)) / rs;
-  const aorta = ax * ax + az * az - 1;
   // Connect the superior visceral space to the existing periaortic cuff. The lung cannot
   // split the connective-tissue envelope of the arch and proximal descending aorta.
   // Idealized transverse capsule, using the existing cuff radius and superior taper;
@@ -488,7 +498,7 @@ export function mediastinumDistance(x: number, y: number, z: number): number {
       dz = (z + 8 - t * bz) / radius;
     bridge = dx * dx + dz * dz - 1;
   }
-  return Math.min(posterior, superior, aorta, bridge);
+  return Math.min(superior, bridge);
 }
 
 const ribProbe = makeSample();
@@ -663,7 +673,10 @@ export function classifyThorax(
   // diaphragm (decision 229)
   const lungL = x > leftLungBorderX(t, y);
   const lungR = x < rightLungBorderX(t);
-  const outsideMediastinum = mediastinumDistance(x, y, z - t.columnShiftCm) > 0;
+  const zc = z - t.columnShiftCm;
+  const posteriorMd = posteriorMediastinumDistance(x, y, zc);
+  const superiorMd = superiorMediastinumDistance(x, y, zc);
+  const outsideMediastinum = Math.min(posteriorMd, superiorMd) > 0;
   const aroundHeart = heartDistCm > PERICARDIAL_FAT_CM && depth > T + ANTERIOR_CORRIDOR_CM;
   if ((lungL || lungR || aroundHeart) && outsideMediastinum && !isUnderHeart(t, x, y, z)) {
     out.tissue = Tissue.Lung;
@@ -673,9 +686,14 @@ export function classifyThorax(
     out.nz = 1;
     return true;
   }
-  // the mediastinum's fat, named (decision 377): it read «outside the model» in the review
+  // what is left is soft tissue, named by region (decision 377; one «grasa del mediastino» until then): the mediastinum
+  // proper, posterior or superior, or else the pericardial fat in front of the heart, over the diaphragm and on the sac
   out.tissue = Tissue.Fat;
-  out.structure = Structure.Mediastinum;
+  out.structure = outsideMediastinum
+    ? Structure.PericardialFat
+    : superiorMd < posteriorMd
+      ? Structure.SuperiorMediastinum
+      : Structure.PosteriorMediastinum;
   out.sdf = -1;
   return true;
 }

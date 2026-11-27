@@ -212,8 +212,19 @@ export const enum Structure {
   AortomitralCurtain,
   /** The esophagus in the posterior mediastinum, behind the left atrium (decision 377). */
   Esophagus,
-  /** The mediastinum's fat around the heart and the great vessels (decision 377); it had no name. */
-  Mediastinum,
+  /**
+   * The posterior mediastinum's soft tissue around the descending aorta, the esophagus and the front of the spine
+   * (decision 377). The mediastinum's tissue was one structure, «grasa del mediastino», the leftover of the thorax wherever
+   * no organ was: its outline came out as disjoint blocks. It is named by region now, as it is in the body.
+   */
+  PosteriorMediastinum,
+  /** The superior mediastinum's soft tissue around the great vessels above the base: the suprasternal window. */
+  SuperiorMediastinum,
+  /**
+   * The pericardial fat outside the parietal layer: in front of the heart under the chest wall, where the anterior lung
+   * leaves the acoustic windows, at the cardiophrenic contact over the diaphragm, and the film between sac and pleura.
+   */
+  PericardialFat,
 }
 
 export function makeSample(): TissueSample {

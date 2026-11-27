@@ -223,11 +223,18 @@ float avGrooveBlend(float h) {
   float t = min(1.0, max(0.0, (h - AV_GROOVE_BLEND_TOP_CM) / AV_GROOVE_BLEND_FADE_CM));
   return max(AV_GROOVE_BLEND_MIN_CM, AV_GROOVE_BLEND_CM * (1.0 - t));
 }
-// src/simulator/anatomy/thoraxModel.ts: mediastinumDistance
-float mediastinumDistance(float x, float y, float z) {
+// src/simulator/anatomy/thoraxModel.ts: posteriorMediastinumDistance
+float posteriorMediastinumDistance(float x, float y, float z) {
   float px = (x + 0.5) / 1.8;
   float pz = (z - POSTERIOR_MEDIASTINUM_Z) / 4.0;
   float posterior = px * px + pz * pz - 1.0;
+  float rs = DESC_AORTA_R + DESC_AORTA_WALL + DESC_AORTA_SLEEVE;
+  float ax = (x - DESC_AORTA_X) / rs;
+  float az = (z - DESC_AORTA_Z - min(max(z - DESC_AORTA_Z, 0.0), DESC_AORTA_SLEEVE_REACH)) / rs;
+  return min(posterior, ax * ax + az * az - 1.0);
+}
+// src/simulator/anatomy/thoraxModel.ts: superiorMediastinumDistance
+float superiorMediastinumDistance(float x, float y, float z) {
   float u = min(1.0, max(0.0, (y - 2.0) / 4.0));
   float v = min(1.0, max(0.0, (y - SUPERIOR_MEDIASTINUM_FROM_Y) / SUPERIOR_MEDIASTINUM_RISE_CM));
   float w = min(1.0, max(0.0, (y - SUPERIOR_MEDIASTINUM_FADE_FROM_Y) / SUPERIOR_MEDIASTINUM_FADE_CM));
@@ -239,9 +246,6 @@ float mediastinumDistance(float x, float y, float z) {
     superior = sx * sx + sz * sz - 1.0;
   }
   float rs = DESC_AORTA_R + DESC_AORTA_WALL + DESC_AORTA_SLEEVE;
-  float ax = (x - DESC_AORTA_X) / rs;
-  float az = (z - DESC_AORTA_Z - min(max(z - DESC_AORTA_Z, 0.0), DESC_AORTA_SLEEVE_REACH)) / rs;
-  float aorta = ax * ax + az * az - 1.0;
   float bridge = 1.0;
   float radius = min(rs, halfWidth);
   if (radius > 0.05) {
@@ -252,7 +256,11 @@ float mediastinumDistance(float x, float y, float z) {
     float dz = (z + 8.0 - t * bz) / radius;
     bridge = dx * dx + dz * dz - 1.0;
   }
-  return min(min(min(posterior, superior), aorta), bridge);
+  return min(superior, bridge);
+}
+// src/simulator/anatomy/thoraxModel.ts: mediastinumDistance
+float mediastinumDistance(float x, float y, float z) {
+  return min(posteriorMediastinumDistance(x, y, z), superiorMediastinumDistance(x, y, z));
 }
 // src/simulator/anatomy/classify/atriaVessels.ts: atrialScale
 float atrialScale(float booster, float reservoir, float contraction) {
