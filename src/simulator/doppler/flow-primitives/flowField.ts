@@ -461,7 +461,10 @@ export function sampleFlow(
             fadeOut(tAv, 3.8, 5.4);
       }
       const reach = rho < jetReach(rHalf, sShear, shear);
-      if (reach || vJet > 0) {
+      const asSev = isStenotic ? smoothstep(2.0, 0.65, p.avAreaCm2) : 0;
+      const rSinus = p.avR * 1.42;
+      const inSinusPlume = isStenotic && tAv > 0.18 && tAv < 3.4 && rho < rSinus;
+      if (reach || vJet > 0 || inSinusPlume) {
         const v = qao / area / 100;
         // Physiologic radial shear for laminar LVOT/AV (= 1.00 on centerline rho = 0, so PW/CW Vmax is exact)
         const rNorm = Math.min(1.4, rho / Math.max(0.25, R));
@@ -472,10 +475,41 @@ export function sampleFlow(
         const vTract = reach
           ? v * radialCore * jetProfile(rho, rHalf, sShear, shear) * fadeOut(tAv, 3.8, 5.4)
           : 0;
-        const vOut = Math.max(vTract, vJet);
-        rootVx = ax.x * vOut;
-        rootVy = ax.y * vOut;
-        rootVz = ax.z * vOut;
+        // Post-stenotic sinus shear-layer entrainment plume around the narrow vena contracta core
+        // (strictly slower than the central jet so CW Vmax/VTI remains 100% invariant).
+        let vEddy = 0;
+        if (inSinusPlume) {
+          const eddyEnv =
+            smoothstep(0.18, 0.65, tAv) *
+            fadeOut(tAv, 2.4, 3.4) *
+            (1 - smoothstep(rSinus * 0.68, rSinus, rho));
+          vEddy = (qao / areaAsc / 100) * (0.45 + 0.55 * asSev) * eddyEnv;
+        }
+        const vOut = Math.max(vTract, vJet, vEddy);
+        // Distal LVOT laminar proximal flow convergence right beneath a stenotic AV (tAv in [-0.38, 0.14];
+        // strictly zero at the PW LVOT plane tAv = -0.5 cm and on the centerline rho = 0).
+        let dirX = ax.x;
+        let dirY = ax.y;
+        let dirZ = ax.z;
+        if (asSev > 0 && tAv > -0.38 && tAv < 0.14 && rho > 1e-4) {
+          const inwardAs =
+            asSev *
+            0.46 *
+            smoothstep(-0.38, -0.04, tAv) *
+            fadeOut(tAv, 0.02, 0.14) *
+            Math.min(1, rho / Math.max(0.22, rLvot));
+          const invRho = 1 / rho;
+          const rawX = ax.x - qx * invRho * inwardAs;
+          const rawY = ax.y - qy * invRho * inwardAs;
+          const rawZ = ax.z - qz * invRho * inwardAs;
+          const rawL = Math.hypot(rawX, rawY, rawZ) || 1;
+          dirX = rawX / rawL;
+          dirY = rawY / rawL;
+          dirZ = rawZ / rawL;
+        }
+        rootVx = dirX * vOut;
+        rootVy = dirY * vOut;
+        rootVz = dirZ * vOut;
         rootSpeed = vOut;
         const stenotic =
           isStenotic && tAv > 0
@@ -486,11 +520,13 @@ export function sampleFlow(
                   vJet > 1.5 ? Math.min(0.55, (vJet - 1.2) * 0.16) : 0,
                 )
               : 0;
+        const eddyTurb = vEddy > vTract && inSinusPlume ? 0.42 + 0.3 * asSev : 0;
         rootDisp = Math.max(
           (p.turbulence['lvot'] ?? 0.04) +
             stenotic * (tAv > 0 ? 1 : 0.35) +
             (isStenotic ? 0.12 : 0.04) * Math.pow(Math.min(1, rho / Math.max(0.25, R)), 4),
           tAv > 0 ? (p.turbulence['aortic-valve'] ?? 0) : 0,
+          eddyTurb,
         );
         rootPresent = 1;
       }
