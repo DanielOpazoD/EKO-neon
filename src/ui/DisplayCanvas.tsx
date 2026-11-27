@@ -235,7 +235,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       dragRef.current = { kind: 'cine', startX: p.x, startY: p.y };
       return;
     }
-    if (st.modality === 'color' && inSector) {
+    if (!hud.frozen && st.modality === 'color' && inSector) {
       const { rCm, thetaRad } = pixelToPolar(m, p.x, p.y);
       const c = st.color;
       const inside =
@@ -261,7 +261,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       }
       return;
     }
-    if (isStripModality(st.modality) && inSector) {
+    if (!hud.frozen && isStripModality(st.modality) && inSector) {
       const { rCm, thetaRad } = pixelToPolar(m, p.x, p.y);
       st.setCursor(
         Math.max(-m.sectorRad / 2, Math.min(m.sectorRad / 2, thetaRad)),
@@ -325,7 +325,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     const st = useSimStore.getState();
     const m = hud.sector;
     if (dragRef.current.kind === 'cine') {
-      const layout = ecgLayoutOf(hud, st.modality);
+      const layout = ecgLayoutOf(hud, hud.acquisition?.modality ?? st.modality);
       st.setCineOffset(cineOffsetAtX(p.x, layout, hud.cineWindow, hud.cineLength));
       return;
     }

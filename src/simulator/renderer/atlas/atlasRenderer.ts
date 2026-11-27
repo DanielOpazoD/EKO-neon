@@ -30,8 +30,8 @@ import { decodeTransmission, encodeTransmission, TRANS_DECODE } from '../transmi
  *    movement beyond POSE_EPS renders the new pose at the exact phase. Up to four cines are kept;
  *    incomplete ones are evicted before complete ones.
  *
- * Frames are stored compactly (amplitude as 16-bit fixed point, transmission as 8-bit log) and are
- * pre-console, so every console control stays causal on top of the cache.
+ * Frames are stored pre-console (amplitude as 32-bit float so weak echoes below the noise floor are
+ * never truncated, transmission as 8-bit log), so every console control stays causal on top of the cache.
  *
  * `renderDisplay` (GPU console, decision 54) is delegated to the source only for frames rendered directly;
  * in cache mode it declines and the simulator uses `render` and the CPU console.
@@ -41,7 +41,7 @@ interface Anchor {
   spec: PolarFrameSpec;
   physics: ScenePhysics;
   contact: number;
-  amp: (Uint16Array | undefined)[];
+  amp: (Float32Array | undefined)[];
   trans: (Uint8Array | undefined)[];
   structure: (Uint8Array | undefined)[];
   tissue: (Uint8Array | undefined)[];
@@ -77,7 +77,6 @@ export const ENTER_AFTER_FRAMES = 4;
 export const REMEASURE_EVERY = 16;
 /** Consecutive direct frames after which kept cines are released. */
 const RELEASE_AFTER_FRAMES = 120;
-const AMP_SCALE = 2048; // amplitude 0..31.99 → uint16
 export { decodeTransmission, encodeTransmission };
 
 export type AtlasMode = 'direct' | 'cache';
@@ -331,7 +330,7 @@ export class AtlasRenderer implements RendererBackend {
       spec: { ...spec },
       physics: { ...physics },
       contact: beam.contact,
-      amp: new Array<Uint16Array | undefined>(ATLAS_PHASES),
+      amp: new Array<Float32Array | undefined>(ATLAS_PHASES),
       trans: new Array<Uint8Array | undefined>(ATLAS_PHASES),
       structure: new Array<Uint8Array | undefined>(ATLAS_PHASES),
       tissue: new Array<Uint8Array | undefined>(ATLAS_PHASES),
@@ -360,14 +359,11 @@ export class AtlasRenderer implements RendererBackend {
   }
 
   private store(a: Anchor, slot: number, f: PolarFrame, n: number): void {
-    const amp = new Uint16Array(n);
     const tr = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
-      const v = (f.amplitude[i] ?? 0) * AMP_SCALE;
-      amp[i] = v > 65535 ? 65535 : v < 0 ? 0 : v;
       tr[i] = encodeTransmission(f.transmission[i] ?? 0);
     }
-    a.amp[slot] = amp;
+    a.amp[slot] = f.amplitude.slice(0, n);
     a.trans[slot] = tr;
     a.structure[slot] = f.structure.slice(0, n);
     a.tissue[slot] = f.tissue.slice(0, n);
@@ -381,10 +377,9 @@ export class AtlasRenderer implements RendererBackend {
     const ti = a.tissue[slot];
     const sg = a.segment[slot];
     if (!amp || !tr || !st || !ti || !sg) return;
-    const oa = out.amplitude;
+    out.amplitude.set(amp);
     const ot = out.transmission;
     for (let k = 0; k < n; k++) {
-      oa[k] = (amp[k] ?? 0) / AMP_SCALE;
       ot[k] = TRANS_DECODE[tr[k] ?? 255] ?? 0;
     }
     out.structure.set(st);

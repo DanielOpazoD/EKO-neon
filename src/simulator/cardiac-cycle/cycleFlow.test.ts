@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { loadCaseById } from '@/cases';
-import { heartAnchors, computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { heartAnchors, computeHeartPose, createHeartModel } from '@/simulator/anatomy/heartModel';
+import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
+import { tricuspidRegurgitation } from './rightHeartFlow';
 import { sceneClassifier } from '@/simulator/anatomy/sceneClassifier';
 import { makeSample, Tissue } from '@/simulator/anatomy/tissue';
 import { baseInput } from '@/simulator/core/baseInput';
@@ -670,5 +672,66 @@ describe('Cardiac cycle model & Doppler hemodynamic physiology', () => {
       hfRv.sCmps >= 7.5 && hfRv.sCmps <= 9.5,
       `HFrEF RV S' should reflect impaired RV systolic velocity (~8.3 cm/s), got ${hfRv.sCmps.toFixed(1)} cm/s`,
     );
+  });
+
+  it('keeps right-heart TR timing, TV inflow area, and RA reservoir decoupled from left-heart parameters', () => {
+    // 1. TR spans RV IVCT -> RV ejection -> RV IVRT and does not depend on LV ejectionStartS/ejectionEndS
+    const ph = loadCaseById('pulmonary-hypertension-rv');
+    const { tables: phTables } = buildCaseModels(ph, REST_PATIENT);
+    const tm = phTables.timings;
+    const baseTr = tricuspidRegurgitation(ph.hemodynamics, tm, phTables.rrS, phTables.n);
+    const shiftedLvTm = {
+      ...tm,
+      ejectionStartS: tm.ejectionStartS + 0.04,
+      ejectionEndS: tm.ejectionEndS - 0.04,
+    };
+    const shiftedTr = tricuspidRegurgitation(ph.hemodynamics, shiftedLvTm, phTables.rrS, phTables.n);
+    assert.deepEqual(
+      Array.from(baseTr.velocityMps),
+      Array.from(shiftedTr.velocityMps),
+      'TR waveform must be driven by RV valve timings, not LV ejectionStartS/ejectionEndS',
+    );
+    const dt = phTables.rrS / phTables.n;
+    const idxIvct = Math.floor((tm.pulmonaryOpenS - 0.01) / dt);
+    const idxIvrt = Math.floor((0.5 * (tm.pulmonaryCloseS + tm.tricuspidOpenS)) / dt);
+    const idxAfterTvOpen = Math.floor((tm.tricuspidOpenS + 0.015) / dt);
+    assert.ok(baseTr.velocityMps[idxIvct]! > 0.5, `Expected TR flow during RV IVCT, got ${baseTr.velocityMps[idxIvct]}`);
+    assert.ok(baseTr.velocityMps[idxIvrt]! > 0.5, `Expected TR flow during RV IVRT, got ${baseTr.velocityMps[idxIvrt]}`);
+    assert.equal(baseTr.velocityMps[idxAfterTvOpen], 0, 'TR must cease once tricuspid valve opens');
+    let peakV = 0;
+    for (let i = 0; i < baseTr.velocityMps.length; i++) peakV = Math.max(peakV, baseTr.velocityMps[i]!);
+    assert.ok(Math.abs(peakV - baseTr.vmaxMps) < 0.02, `TR peak (${peakV}) must match Bernoulli vmax (${baseTr.vmaxMps})`);
+
+    // 2. Flow field uses tables.tvEffectiveAreaCm2 directly, not mvEffectiveAreaCm2 * 1.35 (independent of MR)
+    const mrCase = loadCaseById('mvp-primary-mr');
+    const mrModels = buildCaseModels(mrCase, REST_PATIENT);
+    const mrFlow = buildFlowParams(mrCase, mrModels.heart, mrModels.tables, mrModels.thorax);
+    assert.equal(mrFlow.tvAreaCm2, mrModels.tables.tvEffectiveAreaCm2);
+    assert.ok(
+      Math.abs(mrFlow.tvAreaCm2 - mrModels.tables.mvEffectiveAreaCm2 * 1.35) > 2.0,
+      'Severe MR inflates MV flow area; TV flow area must stay decoupled on its own right-heart balance',
+    );
+
+    // 3. RA reservoir depends on ra.volumeMl, never la.volumeMl
+    const normal = loadCaseById('normal-excellent-window');
+    const baseRa = heartAnchors(createHeartModel(normal.anatomy, normal.physiology, undefined, normal.seed)).raReservoir;
+    const bigLa = heartAnchors(
+      createHeartModel(
+        { ...normal.anatomy, la: { ...normal.anatomy.la, volumeMl: 120 } },
+        normal.physiology,
+        undefined,
+        normal.seed,
+      ),
+    ).raReservoir;
+    const bigRa = heartAnchors(
+      createHeartModel(
+        { ...normal.anatomy, ra: { ...normal.anatomy.ra, volumeMl: 110 } },
+        normal.physiology,
+        undefined,
+        normal.seed,
+      ),
+    ).raReservoir;
+    assert.equal(bigLa, baseRa, 'Changing LA volume must not alter RA reservoir');
+    assert.ok(bigRa > baseRa + 0.05, `Dilating RA volume must raise RA reservoir (${baseRa} -> ${bigRa})`);
   });
 });

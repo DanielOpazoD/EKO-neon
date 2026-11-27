@@ -188,13 +188,25 @@ function CineControls() {
 /**
  * One glanceable chip that states what the active modality is doing — colour Nyquist, the PW/TDI
  * gate depth, the CW cursor or the M-mode sweep. Read-only: the control lives in the Doppler tab.
+ * Locked to the displayed cine frame's acquisition while frozen (returns null from HUD store while live
+ * so live ticks trigger zero re-renders).
  */
 function ContextChip() {
-  const modality = useSimStore((s) => s.modality);
-  const scaleMps = useSimStore((s) => s.color.scaleMps);
-  const baselineShiftMps = useSimStore((s) => s.color.baselineShiftMps);
-  const gateDepthCm = useSimStore((s) => s.gateDepthCm);
-  const sweepSpeed = useSimStore((s) => s.spectral.sweepSpeedMmPerS);
+  const live = useSimStore(
+    useShallow((s) => ({
+      modality: s.modality,
+      scaleMps: s.color.scaleMps,
+      baselineShiftMps: s.color.baselineShiftMps,
+      gateDepthCm: s.gateDepthCm,
+      sweepSpeed: s.spectral.sweepSpeedMmPerS,
+    })),
+  );
+  const frozenAcq = useHudStore((h) => (h.hud?.frozen ? (h.hud.acquisition ?? null) : null));
+  const modality = frozenAcq ? frozenAcq.modality : live.modality;
+  const scaleMps = frozenAcq ? frozenAcq.color.scaleMps : live.scaleMps;
+  const baselineShiftMps = frozenAcq ? frozenAcq.color.baselineShiftMps : live.baselineShiftMps;
+  const gateDepthCm = frozenAcq ? frozenAcq.gateDepthCm : live.gateDepthCm;
+  const sweepSpeed = frozenAcq ? frozenAcq.spectral.sweepSpeedMmPerS : live.sweepSpeed;
   const fmtSigned = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
   const colorText =
     Math.abs(baselineShiftMps) < 0.005
@@ -209,7 +221,10 @@ function ContextChip() {
     cw: { text: 'Cursor', title: 'Cursor CW activo — sin compuerta' },
     tdi: { text: `Gate ${gateDepthCm.toFixed(1)} cm`, title: 'Profundidad de la compuerta TDI' },
     'm-mode': { text: `${sweepSpeed} mm/s`, title: 'Velocidad de barrido del modo M' },
-    cmm: { text: `${sweepSpeed} mm/s`, title: 'Velocidad de barrido del modo M' },
+    cmm: {
+      text: `${colorText} · ${sweepSpeed} mm/s`,
+      title: 'Escala de color y velocidad de barrido del modo M color (pestaña Doppler)',
+    },
   };
   const chip = spec[modality];
   if (!chip) return null;

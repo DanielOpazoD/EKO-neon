@@ -341,18 +341,11 @@ float laRootHold(float rootT, float rootOuter, float lateralCm) {
   return ((1.0 - q * q * (3.0 - 2.0 * q)) * a * a * (3.0 - 2.0 * a) * b * b * (3.0 - 2.0 * b) * sx * sx * (3.0 - 2.0 * sx));
 }
 // src/simulator/anatomy/classify/pericardium.ts: parietalSdf
-float parietalSdf(float eff, float dFull, float dEpi, float behind, float footprint, float colDist) {
-  float thin = min(eff, OBLIQUE_SINUS_EFFUSION_CM);
-  float tb = min(1.0, max(0.0, behind / OBLIQUE_SINUS_BEHIND));
-  float tf = min(1.0, max(0.0, (footprint - OBLIQUE_SINUS_FOOTPRINT_FROM) / (OBLIQUE_SINUS_FOOTPRINT_TO - OBLIQUE_SINUS_FOOTPRINT_FROM)));
-  float w = tb * tb * (3.0 - 2.0 * tb) * (1.0 - tf * tf * (3.0 - 2.0 * tf));
-  float col = 2.0 * PERICARDIUM_CM - colDist;
-  float full = smax(dFull, col, PARIETAL_COLUMN_BLEND_CM);
-  float thinned = smax(dFull + (eff - thin) * w, col, PARIETAL_COLUMN_BLEND_CM);
-  return max(full, min(thinned, dEpi - PERICARDIUM_CM - thin));
+float parietalSdf(float dSac, float colDist) {
+  return smax(dSac, PERICARDIUM_CM - colDist, PARIETAL_COLUMN_BLEND_CM);
 }
 // src/simulator/anatomy/classify/pericardium.ts: posteriorColumnDistance
-float posteriorColumnDistance(float x, float y, float z, float ux, float uy, float uz, float ax, float ay, float az, float sx, float sy, float sz) {
+float posteriorColumnDistance(float x, float y, float z, float ux, float uy, float uz, float ax, float ay, float az, float sx, float sy, float sz, float pnx, float pny, float pnz) {
   float dax = x - ax;
   float day = y - ay;
   float daz = z - az;
@@ -363,7 +356,22 @@ float posteriorColumnDistance(float x, float y, float z, float ux, float uy, flo
   float dsz = z - sz;
   float ts = dsx * ux + dsy * uy + dsz * uz;
   float dS = sqrt(max(0.0, dsx * dsx + dsy * dsy + dsz * dsz - ts * ts)) - SPINE_R;
-  return min(dA, dS);
+  float ezOff = ESOPHAGUS_Z - SPINE_Z;
+  float dex = x - (sx - ezOff * pnx);
+  float dey = y - (sy - ezOff * pny);
+  float dez = z - (sz - ezOff * pnz);
+  float te = dex * ux + dey * uy + dez * uz;
+  float pex = dex - te * ux;
+  float pey = dey - te * uy;
+  float pez = dez - te * uz;
+  float ezProj = pex * pnx + pey * pny + pez * pnz;
+  float ex2 = max(0.0, pex * pex + pey * pey + pez * pez - ezProj * ezProj);
+  float nx2 = ex2 / (ESOPHAGUS_RX * ESOPHAGUS_RX);
+  float nz2 = (ezProj * ezProj) / (ESOPHAGUS_RZ * ESOPHAGUS_RZ);
+  float k0 = sqrt(nx2 + nz2);
+  float k1 = sqrt(nx2 / (ESOPHAGUS_RX * ESOPHAGUS_RX) + nz2 / (ESOPHAGUS_RZ * ESOPHAGUS_RZ));
+  float dE = k0 > 1e-6 ? (k0 * (k0 - 1.0)) / k1 : -ESOPHAGUS_RZ;
+  return min(dA, min(dS, dE));
 }
 // src/simulator/anatomy/classify/rightVentricle.ts: rvFreeWallNow
 float rvFreeWallNow(float freeWallCm, float contraction) {

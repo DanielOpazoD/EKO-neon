@@ -12,11 +12,6 @@ import {
   DIAPHRAGM_MAP_N,
   DIAPHRAGM_MAP_NONE_CM,
   UNDERSIDE_FAT_CM,
-  ESOPHAGUS_X,
-  ESOPHAGUS_Z,
-  ESOPHAGUS_RX,
-  ESOPHAGUS_RZ,
-  ESOPHAGUS_MUCOSA,
 } from '@/simulator/anatomy/thoraxModel';
 
 const f = (v: number): string => (Number.isInteger(v) ? `${v}.0` : `${v}`);
@@ -33,11 +28,6 @@ const float FASCIA_HALF_CM = ${f(FASCIA_HALF_CM)};
 const int DM_N = ${DIAPHRAGM_MAP_N};
 const float DM_NONE = ${f(DIAPHRAGM_MAP_NONE_CM)};
 const float UNDERSIDE_FAT_CM = ${f(UNDERSIDE_FAT_CM)};
-const float ESOPHAGUS_X = ${f(ESOPHAGUS_X)};
-const float ESOPHAGUS_Z = ${f(ESOPHAGUS_Z)};
-const float ESOPHAGUS_RX = ${f(ESOPHAGUS_RX)};
-const float ESOPHAGUS_RZ = ${f(ESOPHAGUS_RZ)};
-const float ESOPHAGUS_MUCOSA = ${f(ESOPHAGUS_MUCOSA)};
 float skinZ(float x, float y) {
   float ax = min(abs(x) / TH_AW, 0.999);
   float inner = 1.0 - pow(ax, TH_N);

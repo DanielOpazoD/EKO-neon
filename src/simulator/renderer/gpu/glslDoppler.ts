@@ -8,7 +8,6 @@ import {
   CLUTTER_JITTER_RAD,
   CLUTTER_SIGMA_V_MPS,
   COLOR_PACKET,
-  COLOR_TURBULENT_WIDTH_K,
   KASAI_LIN_BASIS,
   KASAI_QUAD_BASIS,
   LAMINAR_DECORRELATION,
@@ -49,7 +48,6 @@ export function dopplerDefinesGlsl(): string {
     `#define NOISE_COHERENCE ${glslFloat(NOISE_COHERENCE)}`,
     `#define NOISE_POWER_GATE ${glslFloat(NOISE_POWER_GATE)}`,
     `#define LAMINAR_DECORRELATION ${glslFloat(LAMINAR_DECORRELATION)}`,
-    `#define COLOR_TURBULENT_WIDTH_K ${glslFloat(COLOR_TURBULENT_WIDTH_K)}`,
     spatiotemporalDefinesGlsl(),
     `const float KASAI_LIN_BASIS[COLOR_PACKET] = float[COLOR_PACKET](${linBasisLiterals});`,
     `const float KASAI_QUAD_BASIS[COLOR_PACKET] = float[COLOR_PACKET](${quadBasisLiterals});`,
@@ -76,8 +74,8 @@ vec2 hashGaussianPair(int li, int si, uint stream, uint seed) {
 
 // Resolution-cell spatially correlated unit-variance Gaussian pair (2x2 box: Var = 4 * 0.25 = 1.0)
 vec2 correlatedGaussianPair(int li, int si, uint stream, uint seed) {
-  int l0 = max(0, li - 1);
-  int s0 = max(0, si - 1);
+  int l0 = li - 1;
+  int s0 = si - 1;
   return 0.5 * (
     hashGaussianPair(li, si, stream, seed) +
     hashGaussianPair(l0, si, stream, seed) +
@@ -95,9 +93,7 @@ vec2 correlatedGaussianPair(int li, int si, uint stream, uint seed) {
  * (`uGbufEnv` transmission + `uGbufIds` tissue IDs) plus sparse ROI-only hemodynamic flow (`uFlowRaw`).
  * Executed strictly inside a scissor-clipped Color ROI box so mid-range GPUs shade only ~15-25% of texels.
  *
- * Output (`RGBA32F`):
- *  - Kasai mode (`uUseKasai != 0`): `(r0, r1r, r1i, 1.0)` when valid, `vec4(0.0)` otherwise.
- *  - Expected mode (`uUseKasai == 0`): `(vSigned, sigmaVMps, relTrans, 1.0)` when valid, `vec4(0.0)` otherwise.
+ * Output (`RGBA32F`): `(r0, r1r, r1i, classFlag)` when valid (`1.0` blood, `0.5` clutter), `vec4(0.0)` otherwise.
  */
 export const GLSL_DOPPLER_AUTOCORR_FRAG = /* glsl */ `#version 300 es
 precision highp float;
@@ -115,7 +111,6 @@ uniform float uScaleMps;
 uniform vec3 uWallShares;     // shares of P0, P1, P2 the wall filter removes: kasaiEstimator.ts wallFilterShares
 uniform int uBloomSamples;
 uniform int uInvert;
-uniform int uUseKasai;
 uniform uint uRealization;
 uniform uint uSeed;
 
@@ -182,12 +177,6 @@ void main() {
     : (uInvert != 0 ? -raw.a : raw.a);
   float sigmaV = useBlood ? raw.g : CLUTTER_SIGMA_V_MPS;
   float rel = min(1.0, relTrans) * (useBlood ? 1.0 : CLUTTER_BLOOD_RATIO_POW);
-
-  // Expected (noise-free) mode forwards exact flow/clutter parameters directly to Pass D2
-  if (uUseKasai == 0) {
-    outCorr = vec4(v, sigmaV, rel, classFlag);
-    return;
-  }
 
   // 4. Kasai 8-pulse complex echo packet synthesis + 3-basis Legendre regression wall filter
   float scale = max(1e-3, uScaleMps);
@@ -315,25 +304,16 @@ uniform sampler2D uHist;     // Previous ping-pong circular phasor history (RGBA
 uniform ivec4 uBoxBounds;    // (siMin, liMin, siMax, liMax) inclusive
 uniform float uScaleMps;
 uniform float uBaselineMps;
-uniform float uWallFilterMps;
 uniform float uGainLin;
 uniform float uPersist;
 uniform float uSmoothing;
 uniform int uUseHistory;
-uniform int uUseKasai;
 
 layout(location = 0) out vec4 outShade;
 layout(location = 1) out vec4 outHist;
 
 const float PI = 3.141592653589793;
 ${dopplerDefinesGlsl()}
-
-float wallFilterResponse(float vAbs, float cutoffMps) {
-  if (cutoffMps <= 0.0) return 1.0;
-  float x = (vAbs / cutoffMps);
-  x = x * x;
-  return x / sqrt(1.0 + x * x);
-}
 
 float aliasVelocity(float v, float scale, float baseline) {
   float span = 2.0 * scale;
@@ -366,53 +346,40 @@ void main() {
   float vEstimate = 0.0;
   float variance = 0.0;
 
-  if (uUseKasai != 0) {
-    // 3x3 binomial [1 2 1] resolution-cell averaging strictly within the same class (blood 1.0 vs clutter 0.5)
-    float sumR0 = 0.0;
-    float sumR1r = 0.0;
-    float sumR1i = 0.0;
-    float wSum = 0.0;
-    for (int dl = -1; dl <= 1; dl++) {
-      int ll = li + dl;
-      if (ll < uBoxBounds.y || ll > uBoxBounds.w) continue;
-      float wl = (dl == 0) ? 2.0 : 1.0;
-      for (int ds = -1; ds <= 1; ds++) {
-        int ss = si + ds;
-        if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
-        vec4 tap = texelFetch(uCorr, ivec2(ss, ll), 0);
-        if (tap.a < 0.25 || abs(tap.a - center.a) >= 0.25) continue;
-        float wt = wl * ((ds == 0) ? 2.0 : 1.0);
-        sumR0 += wt * tap.r;
-        sumR1r += wt * tap.g;
-        sumR1i += wt * tap.b;
-        wSum += wt;
-      }
+  // 3x3 binomial [1 2 1] resolution-cell averaging strictly within the same class (blood 1.0 vs clutter 0.5)
+  float sumR0 = 0.0;
+  float sumR1r = 0.0;
+  float sumR1i = 0.0;
+  float wSum = 0.0;
+  for (int dl = -1; dl <= 1; dl++) {
+    int ll = li + dl;
+    if (ll < uBoxBounds.y || ll > uBoxBounds.w) continue;
+    float wl = (dl == 0) ? 2.0 : 1.0;
+    for (int ds = -1; ds <= 1; ds++) {
+      int ss = si + ds;
+      if (ss < uBoxBounds.x || ss > uBoxBounds.z) continue;
+      vec4 tap = texelFetch(uCorr, ivec2(ss, ll), 0);
+      if (tap.a < 0.25 || abs(tap.a - center.a) >= 0.25) continue;
+      float wt = wl * ((ds == 0) ? 2.0 : 1.0);
+      sumR0 += wt * tap.r;
+      sumR1r += wt * tap.g;
+      sumR1i += wt * tap.b;
+      wSum += wt;
     }
-    if (wSum > 0.0) {
-      float R0 = sumR0 / wSum;
-      if (R0 > 0.0) {
-        float R1r = sumR1r / wSum;
-        float R1i = sumR1i / wSum;
-        vEstimate = (scale * safeAtan2(R1i, R1r)) / PI;
-        float rawPow = max(0.0, R0 - NOISE_POWER);
-        power = min(1.0, uGainLin * rawPow);
-        float coherence = length(vec2(R1r, R1i)) / R0;
-        bool rejectedNoise = coherence < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD;
-        float rawVar = 1.0 - coherence;
-        variance = clamp((rawVar - LAMINAR_DECORRELATION) / (1.0 - LAMINAR_DECORRELATION), 0.0, 1.0);
-        hasCurr = !rejectedNoise && power >= COLOR_THRESHOLD;
-      }
-    }
-  } else {
-    float vTrue = center.r;
-    float sigmaV = center.g;
-    float rel = center.b;
-    if (abs(vTrue) >= uWallFilterMps) {
-      power = min(1.0, uGainLin * rel * wallFilterResponse(abs(vTrue), uWallFilterMps));
-      vEstimate = vTrue;
-      float effDisp = min(1.0, sigmaV / max(0.08, COLOR_TURBULENT_WIDTH_K * abs(vTrue)));
-      variance = min(1.0, effDisp * 1.6);
-      hasCurr = power >= COLOR_THRESHOLD;
+  }
+  if (wSum > 0.0) {
+    float R0 = sumR0 / wSum;
+    if (R0 > 0.0) {
+      float R1r = sumR1r / wSum;
+      float R1i = sumR1i / wSum;
+      vEstimate = (scale * safeAtan2(R1i, R1r)) / PI;
+      float rawPow = max(0.0, R0 - NOISE_POWER);
+      power = min(1.0, uGainLin * rawPow);
+      float coherence = length(vec2(R1r, R1i)) / R0;
+      bool rejectedNoise = coherence < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD;
+      float rawVar = 1.0 - coherence;
+      variance = clamp((rawVar - LAMINAR_DECORRELATION) / (1.0 - LAMINAR_DECORRELATION), 0.0, 1.0);
+      hasCurr = !rejectedNoise && power >= COLOR_THRESHOLD;
     }
   }
 

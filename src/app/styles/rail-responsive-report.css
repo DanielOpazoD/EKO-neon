@@ -281,7 +281,7 @@
   .topbar select {
     flex: 1 1 80px;
     min-width: 0;
-    max-width: 130px;
+    max-width: 175px;
   }
   .modebar {
     order: 1;

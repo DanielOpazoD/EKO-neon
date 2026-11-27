@@ -721,15 +721,11 @@ export function canonicalBeam(view: ViewTarget, heart: HeartModel, thorax: Thora
 }
 
 /**
- * Rotation of the great-vessel short axis about its beam, toward the tricuspid inflow (decision 148). The section
- * perpendicular to the aortic root at the coaptation of its cusps (decision 133) passes 0.5–1.5 cm on the atrial side of
- * the tricuspid annulus through the cycle: the tricuspid valve lies at or below the aortic annulus, and the coaptation
- * 0.5–0.9 cm above it. A sonographer turns the probe until the valve shows at 9–10 o'clock while the aorta stays round,
- * and the standard view is that compromise. Pivoting about the beam keeps the cut at the centre of the root where it was;
- * at 12° the tricuspid valve enters the plane through diastole in all twelve cases. From 14° the preset jumps to the
- * space below in the atrial fibrillation case, the instability decision 138 found at 8–10° with a pivot off the valve.
+ * Great-vessel short-axis tilt about the beam axis (degrees). Kept at 0° so the canonical PSAX-AV plane stays
+ * perpendicular to the aortic root axis (`avAxis`) and stenotic aortic valve planimetry matches the true geometric
+ * orifice area instead of being inflated by obliquity (a 12° tilt inflated severe AS planimetry from 0.97 to 1.17 cm²).
  */
-export const PSAX_AV_INFLOW_TILT_DEG = 12;
+export const PSAX_AV_INFLOW_TILT_DEG = 0;
 
 /**
  * How far from the midline (cm) the mitral short axis sits when it climbs (decision 368): at the sternal edge (2.2 cm) the
@@ -789,15 +785,6 @@ export function canonicalPlane(
     downH = normalize(sub(view.planeDown, scale(n, dot(view.planeDown, n))));
     const r = cross(downH, n);
     rightH = dot(r, view.planeRight) < 0 ? scale(r, -1) : r;
-    {
-      // rotate the plane about its beam direction so the side toward the tricuspid valve dips into it (the turn that
-      // brings the tricuspid centre nearer the plane)
-      const b = (PSAX_AV_INFLOW_TILT_DEG * Math.PI) / 180;
-      const turn = (sgn: number): Vec3 =>
-        normalize(add(scale(rightH, Math.cos(b)), scale(cross(downH, rightH), sgn * Math.sin(b))));
-      const off = (rr: Vec3): number => Math.abs(dot(cross(rr, downH), sub(A.tvCenter, targetH)));
-      rightH = off(turn(1)) < off(turn(-1)) ? turn(1) : turn(-1);
-    }
   }
   if (view.id === 'subcostal-ivc') {
     // The long axis of the cava is the anatomy this view is defined by, and where the cava runs depends on the case

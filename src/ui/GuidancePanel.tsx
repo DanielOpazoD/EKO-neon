@@ -22,10 +22,14 @@ export function ExamNotice() {
 
 export function GuidancePanel() {
   const v = useHudStore((h) => h.hud?.view ?? null);
+  const frozenSettings = useHudStore((h) =>
+    h.hud?.frozen ? (h.hud.acquisition?.settings ?? null) : null,
+  );
   const showHints = useSimStore((s) => s.ui.showHints);
   const mode = useSimStore((s) => s.mode);
   const targetId = useSimStore((s) => s.targetViewId);
-  const settings = useSimStore((s) => s.settings);
+  const liveSettings = useSimStore((s) => s.settings);
+  const settings = frozenSettings ?? liveSettings;
   if (!modePolicy(mode).hintsEnabled) return <ExamNotice />;
   if (!v) return <div className="guidance small">Analizando vista…</div>;
   const targetScore = targetId ? v.perView.find((p) => p.id === targetId)?.score : undefined;

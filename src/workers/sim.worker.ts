@@ -162,7 +162,11 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
       // the learner is back on the scanner: ticking resumes (a paused worker schedules nothing)
       const wake = input?.paused === true && !msg.input.paused;
       input = msg.input;
+      const prevTruthVersion = core.truthVersion;
       core.setInput(msg.input);
+      if (core.truthVersion !== prevTruthVersion) {
+        post({ type: 'truth', truth: core.truth, caseId: core.caseDef.id });
+      }
       if (newFrame || wake) {
         nextDue = 0;
         schedule(1);

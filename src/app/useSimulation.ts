@@ -40,6 +40,10 @@ export function useSimulation(
         useSimStore
           .getState()
           .caseReady({ truth, caseId, phaseMarks, lvLengthCm, workerMode: client.mode }),
+      onTruth: (truth, caseId) => {
+        const s = useSimStore.getState();
+        if (s.caseId === caseId) s.setTruth(truth);
+      },
       onError: (m) => useSimStore.getState().setError(m),
     });
     clientRef.current = client;

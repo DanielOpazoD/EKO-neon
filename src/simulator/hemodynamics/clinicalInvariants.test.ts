@@ -14,8 +14,14 @@ import { gradeMitralRegurgitation } from '@/clinical/guidelines/valveGrading';
 import { assessDiastolic } from '@/clinical/guidelines/diastolicAssessment';
 import { buildFlowParams } from '@/simulator/doppler/flow-primitives/flowField';
 import { sampleRegurgitantJets } from '@/simulator/doppler/flow-primitives/regurgitantJets';
-import { computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { classifyHeart, computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { makeSample, Structure } from '@/simulator/anatomy/tissue';
+import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
 import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
+import { caseOutflow } from '@/simulator/cardiac-cycle/outflow';
+import { baseInput } from '@/simulator/core/baseInput';
+import { buildChainedBeatTables } from '@/simulator/core/beatChaining';
+import { SimulatorCore } from '@/simulator/core/simulatorCore';
 import {
   GLSL_HEART,
   GLSL_HEART_CHAMBERS,
@@ -275,5 +281,105 @@ test('ASE 2025 sinus-rhythm LAP tie-breaker uses PV S/D < 1 in non-MR ties and s
     pulmonaryVeinSd: 0.4, // blunted by MR jet, not isolated LAP
   });
   assert.equal(mrTie.fillingPressure, 'indeterminate');
+});
+
+test('ground truth matches chained AF and free-breathing beat ensembles and updates when toggling respiration', () => {
+  const meanChainedLvotVti = (caseId: string, breathing: boolean) => {
+    const c = loadCaseById(caseId);
+    const { tables: nom } = buildCaseModels(c, REST_PATIENT);
+    const clock = new CardiacClock(c.rhythm, c.seed ^ 0x5555);
+    const lvotArea = caseOutflow(c).lvotAreaCm2;
+    let prev = nom;
+    let timeS = 0;
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < 140; i++) {
+      const b = clock.current;
+      const t = buildChainedBeatTables(c, b, timeS, breathing, prev, nom);
+      prev = t;
+      if (i >= 10) {
+        const dt = t.rrS / t.n;
+        let vti = 0;
+        for (let k = 0; k < t.n; k++) {
+          const q = t.aorticFlowMlps[k] ?? 0;
+          if (q > 0) vti += (q / lvotArea) * dt;
+        }
+        sum += vti;
+        cnt++;
+      }
+      clock.advance(b.rrS);
+      timeS += b.rrS;
+    }
+    return sum / cnt;
+  };
+
+  // AF default expiration: nominal beat overstated LVOT VTI by ~11%; ensemble truth matches independent-seed beats within 2.5%
+  const afCase = loadCaseById('af-diastolic');
+  const afTruth = computeGroundTruth(afCase);
+  const afSimVti = meanChainedLvotVti('af-diastolic', false);
+  assert.ok(
+    Math.abs(afTruth.lvot.vtiCm - afSimVti) / afSimVti < 0.025,
+    `AF truth LVOT VTI (${afTruth.lvot.vtiCm.toFixed(2)}) drifted from visible chained mean (${afSimVti.toFixed(2)})`,
+  );
+
+  // Free breathing in tamponade: respiratory inflow drop lowers mean LVOT VTI and mitral E substantially
+  const tampCase = loadCaseById('pericardial-effusion-tamponade');
+  const tampExp = computeGroundTruth(tampCase);
+  const tampFree = computeGroundTruth(tampCase, undefined, { breathing: true });
+  const tampSimVti = meanChainedLvotVti('pericardial-effusion-tamponade', true);
+  assert.ok(
+    tampFree.lvot.vtiCm < tampExp.lvot.vtiCm * 0.9 &&
+      Math.abs(tampFree.lvot.vtiCm - tampSimVti) / tampSimVti < 0.02,
+    `Free-breathing tamponade truth VTI (${tampFree.lvot.vtiCm.toFixed(2)}) should match chained mean (${tampSimVti.toFixed(2)}) and fall below expiratory (${tampExp.lvot.vtiCm.toFixed(2)})`,
+  );
+  assert.ok(
+    tampFree.mitral.ePeakMps < tampExp.mitral.ePeakMps * 0.9,
+    `Free-breathing tamponade mean E (${tampFree.mitral.ePeakMps.toFixed(2)}) should fall below expiratory (${tampExp.mitral.ePeakMps.toFixed(2)})`,
+  );
+
+  // SimulatorCore updates core.truth and increments truthVersion when toggling free-breathing
+  const inp = baseInput();
+  const core = new SimulatorCore(tampCase, inp);
+  const v0 = core.truthVersion;
+  const vtiBefore = core.truth.lvot.vtiCm;
+  core.setInput({ ...inp, patient: { ...inp.patient, respiration: 'free-breathing' } });
+  assert.equal(core.truthVersion, v0 + 1);
+  assert.ok(core.truth.lvot.vtiCm < vtiBefore * 0.9);
+  core.dispose();
+});
+
+test('LV EDD and ESD ground truth match the PLAX anteroseptal-inferolateral SDF caliper across normal, RWMA and PH', () => {
+  const s = makeSample();
+  const dx = -0.5;
+  const dy = Math.sqrt(3) / 2;
+  const cav = [Structure.LvCavity, Structure.PapillaryMuscle, Structure.Chordae];
+
+  for (const id of ['normal-excellent-window', 'inferior-rwma', 'pulmonary-hypertension-rv', 'hfref-severe-mr']) {
+    const c = loadCaseById(id);
+    const { heart, tables } = buildCaseModels(c, REST_PATIENT);
+    const truth = computeGroundTruth(c, tables, { heart });
+    const edPose = computeHeartPose(heart, cycleStateAt(tables, 0));
+    const esPose = computeHeartPose(heart, cycleStateAt(tables, tables.endSystoleS / tables.rrS));
+    const measurePlax = (pose: ReturnType<typeof computeHeartPose>, z: number) => {
+      const inside = (u: number) =>
+        classifyHeart(heart, pose, dx * u, dy * u, z, s) && cav.includes(s.structure);
+      let a = 0;
+      let b = 0;
+      while (a > -6 && inside(a - 0.005)) a -= 0.005;
+      while (b < 6 && inside(b + 0.005)) b += 0.005;
+      return b - a;
+    };
+    const eddSdf = measurePlax(edPose, 2.0);
+    const zEs = esPose.zAnn + (2.0 / heart.lv.lengthCm) * esPose.lengthNow;
+    const esdSdf = measurePlax(esPose, zEs);
+    assert.ok(
+      Math.abs(truth.lv.eddCm - eddSdf) < 0.03,
+      `${id}: truth EDD (${truth.lv.eddCm.toFixed(3)}) must match PLAX SDF (${eddSdf.toFixed(3)})`,
+    );
+    assert.ok(
+      Math.abs(truth.lv.esdCm - esdSdf) < 0.03,
+      `${id}: truth ESD (${truth.lv.esdCm.toFixed(3)}) must match PLAX SDF (${esdSdf.toFixed(3)})`,
+    );
+  }
 });
 

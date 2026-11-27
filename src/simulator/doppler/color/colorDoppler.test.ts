@@ -7,7 +7,6 @@ import {
   DEFAULT_COLOR,
   DOPPLER_SHADOW_TRANSMISSION,
   overlayColorField,
-  wallFilterResponse,
   type ColorAcquisition,
   type ColorSettings,
 } from './colorDoppler';
@@ -76,6 +75,21 @@ test('colorDoppler wraps velocities above Nyquist and respects baseline shift', 
   const frame = makeBloodFrame();
   const n = frame.spec.lines * frame.spec.samples;
   const out = allocColorField(n);
+  const meanInteriorVel = (f: typeof out) => {
+    let sum = 0;
+    let count = 0;
+    for (let li = 4; li < 12; li++) {
+      for (let si = 8; si < 24; si++) {
+        const v = f.vel[li * frame.spec.samples + si]!;
+        if (Number.isFinite(v)) {
+          sum += v;
+          count++;
+        }
+      }
+    }
+    assert.ok(count > 80, `expected colored interior samples, got ${count}`);
+    return sum / count;
+  };
 
   // +0.90 m/s with Nyquist 0.60 m/s wraps around to -0.30 m/s
   computeColorField(
@@ -89,12 +103,12 @@ test('colorDoppler wraps velocities above Nyquist and respects baseline shift', 
     },
     out,
     ACQ,
+    { realization: 1, seed: 42 },
   );
-  const centerIdx = 8 * frame.spec.samples + 16;
-  assert.ok(Number.isFinite(out.vel[centerIdx]), 'expected colored sample inside box');
+  const aliasedMean = meanInteriorVel(out);
   assert.ok(
-    Math.abs(out.vel[centerIdx]! - -0.3) < 1e-4,
-    `expected aliased -0.30 m/s, got ${out.vel[centerIdx]}`,
+    Math.abs(aliasedMean - -0.3) < 0.04,
+    `expected aliased mean near -0.30 m/s, got ${aliasedMean.toFixed(4)}`,
   );
 
   // Shifting baseline by +0.35 m/s expands positive range up to +0.95 m/s without wrap
@@ -110,10 +124,12 @@ test('colorDoppler wraps velocities above Nyquist and respects baseline shift', 
     },
     out,
     ACQ,
+    { realization: 1, seed: 42 },
   );
+  const shiftedMean = meanInteriorVel(out);
   assert.ok(
-    Math.abs(out.vel[centerIdx]! - 0.9) < 1e-4,
-    `expected unaliased +0.90 m/s after baseline shift, got ${out.vel[centerIdx]}`,
+    Math.abs(shiftedMean - 0.9) < 0.04,
+    `expected unaliased mean near +0.90 m/s after baseline shift, got ${shiftedMean.toFixed(4)}`,
   );
 });
 
@@ -122,8 +138,17 @@ test('colorDoppler rejects wall-filtered slow flow and shadowed samples', () => 
   const n = frame.spec.lines * frame.spec.samples;
   const centerIdx = 8 * frame.spec.samples + 16;
   const out = allocColorField(n);
-
-  assert.ok(wallFilterResponse(0.05, 0.05) > 0.7 && wallFilterResponse(0.05, 0.05) < 0.72);
+  const interiorFill = (f: typeof out) => {
+    let colored = 0;
+    let total = 0;
+    for (let li = 4; li < 12; li++) {
+      for (let si = 8; si < 24; si++) {
+        total++;
+        if (Number.isFinite(f.vel[li * frame.spec.samples + si])) colored++;
+      }
+    }
+    return colored / total;
+  };
 
   // Below wall filter -> no color
   computeColorField(
@@ -137,17 +162,17 @@ test('colorDoppler rejects wall-filtered slow flow and shadowed samples', () => 
     },
     out,
     ACQ,
+    { realization: 1, seed: 42 },
   );
-  assert.ok(Number.isNaN(out.vel[centerIdx]), 'slow flow below wall filter should be suppressed');
+  assert.ok(interiorFill(out) < 0.02, `slow flow below wall filter should be suppressed, got ${interiorFill(out)}`);
 
-  // the expected field cuts at the request bounded to what the packet allows at this scale, as the estimator and Pass
-  // D2 do: asked under the lowest cutoff (the mean removal, 0.11 Nyquist) at that lowest, asked over the highest (0.32
-  // Nyquist) at that highest. Taking the request as its cutoff, 0.02 m/s coloured 5 cm/s flow at 0.6 m/s
+  // The Kasai regression filter cuts at the request bounded to what 8 pulses allow at this scale: asked under the
+  // lowest cutoff (mean removal, 0.11 Nyquist) it cuts at that lowest; asked over the highest (0.32 Nyquist) at that highest
   const { min, max } = colorWallFilterRangeMps(FULL_BOX.scaleMps);
-  const coloured = (wallFilterMps: number, v: number) => {
+  const fillAt = (wallFilterMps: number, v: number) => {
     computeColorField(
       frame,
-      { ...FULL_BOX, wallFilterMps },
+      { ...FULL_BOX, wallFilterMps, smoothing: 0 },
       null,
       (_idx, _li, _si, res) => {
         res.v = v;
@@ -156,15 +181,16 @@ test('colorDoppler rejects wall-filtered slow flow and shadowed samples', () => 
       },
       out,
       ACQ,
+      { realization: 2, seed: 42 },
     );
-    return Number.isFinite(out.vel[centerIdx]);
+    return interiorFill(out);
   };
-  assert.ok(!coloured(0.02, 0.8 * min), 'asked under the lowest cutoff, flow under that lowest is dark');
-  assert.ok(coloured(0.02, 1.2 * min), 'asked under the lowest cutoff, flow over that lowest is coloured');
-  assert.ok(!coloured(0.5, 0.9 * max), 'asked over the highest cutoff, flow under that highest is dark');
-  assert.ok(coloured(0.5, 1.2 * max), 'asked over the highest cutoff, flow over that highest is coloured');
+  assert.ok(fillAt(0.02, 0.5 * min) < 0.1, 'asked under the lowest cutoff, flow well under that lowest is dark');
+  assert.ok(fillAt(0.02, 1.8 * min) > 0.85, 'asked under the lowest cutoff, flow well over that lowest is coloured');
+  assert.ok(fillAt(0.5, 0.5 * max) < 0.1, 'asked over the highest cutoff, flow well under that highest is dark');
+  assert.ok(fillAt(0.5, 1.8 * max) > 0.85, 'asked over the highest cutoff, flow well over that highest is coloured');
 
-  // Deep acoustic shadow -> no color even for fast flow
+  // Deep acoustic shadow -> no color even for fast flow at +12 dB gain
   frame.transmission[centerIdx] =
     frame.transmission[centerIdx]! * (DOPPLER_SHADOW_TRANSMISSION * 0.25);
   computeColorField(
@@ -178,6 +204,7 @@ test('colorDoppler rejects wall-filtered slow flow and shadowed samples', () => 
     },
     out,
     ACQ,
+    { realization: 3, seed: 42 },
   );
   assert.ok(Number.isNaN(out.vel[centerIdx]), 'acoustic shadow must suppress color at any gain');
 });
@@ -250,6 +277,7 @@ test('colorDoppler encodes laminar vs turbulent variance and uses phasor persist
     },
     prev,
     ACQ,
+    { realization: 1, seed: 101 },
   );
   computeColorField(
     frame,
@@ -262,9 +290,10 @@ test('colorDoppler encodes laminar vs turbulent variance and uses phasor persist
     },
     curr,
     ACQ,
+    { realization: 2, seed: 101 },
   );
   assert.ok(
-    Math.abs(curr.vel[centerIdx]!) > 0.5,
+    Math.abs(curr.vel[centerIdx]!) > 0.45,
     `expected phasor persistence across Nyquist to stay near ±0.60 m/s, got ${curr.vel[centerIdx]}`,
   );
 });

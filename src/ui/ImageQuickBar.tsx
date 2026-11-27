@@ -12,10 +12,12 @@ export function ImageQuickBar() {
     useShallow((st) => ({
       autoOptimize: st.autoOptimize,
       depthCm: st.settings.depthCm,
+      frozen: st.frozen,
       gainDb: st.settings.gainDb,
       setSettings: st.setSettings,
     })),
   );
+  if (s.frozen) return null;
   return (
     <div className="quick-bar" role="group" aria-label="Profundidad y ganancia">
       <Stepper

@@ -91,6 +91,9 @@ export function classifyChambers(
     A.colSpine.x,
     A.colSpine.y,
     A.colSpine.z,
+    A.laPostN.x,
+    A.laPostN.y,
+    A.laPostN.z,
   );
   rootCoordinates(c);
   if (classifyValves(c)) return true;

@@ -11,12 +11,10 @@ import {
   CLUTTER_JITTER_RAD,
   CLUTTER_SIGMA_V_MPS,
   COLOR_PACKET,
-  COLOR_TURBULENT_WIDTH_K,
   NOISE_COHERENCE,
   NOISE_POWER,
   NOISE_POWER_GATE,
   TRANSIT_JITTER_RAD,
-  colorWallFilterCutoffMps,
   wallFilterShares,
 } from '@/simulator/doppler/color/kasaiEstimator';
 import { ATTEN_NP_PER_DB, SOFT_TISSUE_ATTEN_DB } from '../acoustic/acoustics';
@@ -291,7 +289,6 @@ test('GLSL deferred Doppler shaders synchronize all physical constants with Type
   assert.ok(defs.includes(`#define ST_HYSTERESIS_RATIO ${ST_HYSTERESIS_RATIO}`));
   assert.ok(defs.includes(`#define ST_SPATIAL_LAMINAR_MIX ${ST_SPATIAL_LAMINAR_MIX}`));
   assert.ok(defs.includes(`#define ST_SPATIAL_TURB_MIX ${ST_SPATIAL_TURB_MIX}`));
-  assert.ok(defs.includes(`#define COLOR_TURBULENT_WIDTH_K ${COLOR_TURBULENT_WIDTH_K}`));
   assert.ok(defs.includes('const float KASAI_LIN_BASIS[COLOR_PACKET]'));
   assert.ok(defs.includes('const float KASAI_QUAD_BASIS[COLOR_PACKET]'));
 
@@ -302,9 +299,16 @@ test('GLSL deferred Doppler shaders synchronize all physical constants with Type
     GLSL_DOPPLER_AUTOCORR_FRAG.includes('float turbulent = (PI * sigmaV) / scale * INV_SQRT2;'),
     'Pass D1 must compute Kasai turbulent jitter directly from absolute sigmaVMps',
   );
+  // Expected-mode branch (uUseKasai == 0 / wallFilterResponse) must be completely retired from Pass D1 and Pass D2
   assert.ok(
-    GLSL_DOPPLER_SHADE_FRAG.includes('COLOR_TURBULENT_WIDTH_K * abs(vTrue)'),
-    'Pass D2 expected mode must convert absolute sigmaVMps using COLOR_TURBULENT_WIDTH_K',
+    !GLSL_DOPPLER_AUTOCORR_FRAG.includes('uUseKasai'),
+    'Pass D1 must always run the 8-pulse Kasai estimator (no uUseKasai branch)',
+  );
+  assert.ok(
+    !GLSL_DOPPLER_SHADE_FRAG.includes('uUseKasai') &&
+      !GLSL_DOPPLER_SHADE_FRAG.includes('uWallFilterMps') &&
+      !GLSL_DOPPLER_SHADE_FRAG.includes('wallFilterResponse'),
+    'Pass D2 must always shade from Kasai autocorrelations (no expected-mode branch)',
   );
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 0) out vec4 outShade;'));
   assert.ok(GLSL_DOPPLER_SHADE_FRAG.includes('layout(location = 1) out vec4 outHist;'));
@@ -398,7 +402,7 @@ test('DeferredDopplerPipeline allocates lazily, clips to ROI scissor box, upload
   assert.equal(pipe.valid, false);
 });
 
-test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU estimator and Pass D2 its cutoff, bounded to what the packet allows', () => {
+test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU estimator, bounded to what the packet allows', () => {
   const mock = makeInstrumentedGl();
   const pipe = new DeferredDopplerPipeline(mock.gl);
   const gbuf: PolarGBuffer = {
@@ -434,14 +438,9 @@ test('DeferredDopplerPipeline gives Pass D1 the wall-filter shares of the CPU es
     const cpu = wallFilterShares(wallFilterMps, scaleMps);
     assert.ok(sent, 'Pass D1 must receive uWallShares');
     assert.deepEqual(sent, [cpu.mean, cpu.trend, cpu.quad], `WF ${wallFilterMps} at scale ${scaleMps}`);
-    // the expected field's cutoff (Pass D2 without an estimate) is the request bounded as computeColorField bounds it:
-    // the settings carry the request (the store keeps it), not a cutoff already bounded
-    assert.equal(
-      mock.log.uniform1f.get('uWallFilterMps'),
-      colorWallFilterCutoffMps(wallFilterMps, scaleMps),
-      `Pass D2 cutoff for WF ${wallFilterMps} at scale ${scaleMps}`,
-    );
   }
+  assert.equal(mock.log.uniform1f.has('uWallFilterMps'), false, 'Pass D2 no longer takes uWallFilterMps');
+  assert.equal(mock.log.uniform1i.has('uUseKasai'), false, 'Deferred passes no longer take uUseKasai');
   assert.deepEqual(
     wallFilterShares(0.3, 0.4),
     { mean: 1, trend: 1, quad: 1 },
@@ -484,6 +483,7 @@ test('DeferredDopplerPipeline.readbackBox decodes complex phasors back into alia
     frequencyMHz: 2.5,
     harmonics: true,
     rawFlowBox: new Float32Array(box.boxW * box.boxH * 4),
+    estimate: { realization: 0, seed: 1 },
   });
 
   const velOut = new Float32Array(TEST_SPEC.lines * TEST_SPEC.samples);
@@ -554,6 +554,7 @@ test('Webgl2Renderer defers Doppler allocation in B-mode and binds GPU-resident 
       frequencyMHz: 2.5,
       harmonics: true,
       rawFlowBox: new Float32Array(4),
+      estimate: { realization: 0, seed: 7 },
     }),
     false,
   );
@@ -605,6 +606,7 @@ test('Webgl2Renderer defers Doppler allocation in B-mode and binds GPU-resident 
       settings: TEST_DOPPLER,
       frequencyMHz: 2.5,
       harmonics: true,
+      estimate: { realization: 1, seed: 7 },
     }),
     false,
   );

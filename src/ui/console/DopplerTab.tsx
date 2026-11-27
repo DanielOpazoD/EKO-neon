@@ -89,6 +89,7 @@ export function DopplerTab() {
           <button onClick={() => s.setModality('cw')} disabled={s.closed}>CW</button>
           <button onClick={() => s.setModality('tdi')} disabled={s.closed}>TDI</button>
           <button onClick={() => s.setModality('m-mode')} disabled={s.closed}>M</button>
+          <button onClick={() => s.setModality('cmm')} disabled={s.closed}>CMM</button>
         </div>
       </div>
     );
@@ -489,7 +490,7 @@ export function DopplerTab() {
               scaleMps={limits.color.scaleMps}
               onChange={(v) => s.setColor({ wallFilterMps: v })}
               title={tip(
-                'Velocidad de corte a −3 dB: la tira aplica a la velocidad de cada muestra la respuesta del filtro de 8 pulsos del color 2D, sin el ruido de su estimación. Va de 0,11 a 0,32 × Nyquist.',
+                'Velocidad de corte a −3 dB del filtro de regresión (8 pulsos, mismo estimador Kasai que el color 2D). Va de 0,11 a 0,32 × Nyquist.',
               )}
             />
           </details>

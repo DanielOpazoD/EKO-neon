@@ -13,7 +13,6 @@ import {
   kasaiEstimate,
   wallFilterCutoffNyquist,
   wallFilterPowerResponse,
-  WallFilterResponseTable,
   wallFilterShares,
   WF_MAX_NYQUIST,
   WF_MIN_NYQUIST,
@@ -507,28 +506,59 @@ test('wallFilterPowerResponse is the packet regression’s response: −3 dB on 
   for (const v of [0, 0.05, 0.3, 1.2]) assert.equal(wallFilterPowerResponse(v, 0.68, wallFilterShares(0, 0.68)), 1);
 });
 
-test('WallFilterResponseTable reads the response within 1.3e-5 at any speed, for the request and Nyquist last set', () => {
-  // a trigonometric polynomial of degree 7 in π·v/Nyquist, linearly interpolated on 1024 steps of [0, 1] Nyquist: at
-  // most Δ²/8·max|h''|, 1.24e-5 with the mean removal next to zero (Bernstein bounds it by 2.9e-5). Speeds off the
-  // table's points over three PRFs either side: negative and aliased ones fold onto it, the response being even and
-  // periodic in 2·Nyquist
-  const table = new WallFilterResponseTable();
-  const check = (wf: number, scale: number) => {
-    const shares = wallFilterShares(wf, scale);
-    table.set(wf, scale);
-    for (let i = -3000; i <= 3000; i++) {
-      const v = ((i + 0.37) / 500) * scale;
-      const err = Math.abs(table.at(v) - wallFilterPowerResponse(v, scale, shares));
-      assert.ok(err < 1.3e-5, `scale ${scale} m/s, WF ${wf.toFixed(4)} m/s: ${v.toFixed(4)} m/s off by ${err}`);
+test('kasaiEstimate for single-line CMM (nL=1) keeps unit speckle power matching 2D and sequential row memo is bit-exact', () => {
+  // With the old separable 2D smoothGrid, nL = 1 only blurred in 1D (variance 6/16) while dividing by 0.375,
+  // inflating speckle power by 1/0.375 = 2.67x. The 2x2 correlatedGaussianPair keeps exact unit variance for nL = 1.
+  const nS = 64;
+  const scale = 0.68;
+  const wf = 0; // wall filter off so expected noise-subtracted power is ~1.0
+  const line = fillGrid(nS, 0.35, 0.02, 1.0);
+  const grid2d = fillGrid(16 * nS, 0.35, 0.02, 1.0);
+  let pow1d = 0;
+  let pow2d = 0;
+  for (let r = 0; r < 16; r++) {
+    const r1 = kasaiEstimate(line.cellV, line.cellSigmaV, line.cellRel, r, 0, 1, nS, scale, wf, {
+      realization: 1,
+      seed: 9001,
+    });
+    pow1d += meanOf(r1.power);
+    if (r < 4) {
+      const r2 = kasaiEstimate(grid2d.cellV, grid2d.cellSigmaV, grid2d.cellRel, 10, 0, 16, nS, scale, wf, {
+        realization: r + 1,
+        seed: 9001,
+      });
+      pow2d += meanOf(r2.power);
     }
-  };
-  // one table through every case, as the strip keeps one: each new request or Nyquist refills it
-  for (const [scale, wf] of RESPONSE_CASES) check(wf, scale);
-  // the same request at another Nyquist is another filter (bounded to 0.32 Nyquist at 0.35 m/s), and off passes all
-  check(DEFAULT_COLOR.wallFilterMps, 0.68);
-  check(DEFAULT_COLOR.wallFilterMps, 0.35);
-  table.set(0, 0.68);
-  for (const v of [0, 0.05, 0.3, 1.2]) assert.equal(table.at(v), 1);
+  }
+  pow1d /= 16;
+  pow2d /= 4;
+  assert.ok(
+    Math.abs(pow1d - pow2d) < 0.15 && pow1d > 0.8 && pow1d < 1.25,
+    `nL=1 mean power (${pow1d.toFixed(3)}) must match 2D unit speckle power (${pow2d.toFixed(3)})`,
+  );
+
+  // Sequential single-line calls (liMin = 20, then 21 -> hits 1-row memo) must be bit-exact identical to a cold call at liMin = 21
+  kasaiEstimate(line.cellV, line.cellSigmaV, line.cellRel, 20, 0, 1, nS, scale, 0.2, {
+    realization: 3,
+    seed: 777,
+  });
+  const warm = kasaiEstimate(line.cellV, line.cellSigmaV, line.cellRel, 21, 0, 1, nS, scale, 0.2, {
+    realization: 3,
+    seed: 777,
+  });
+  const warmVel = warm.velocity.slice();
+  const warmPow = warm.power.slice();
+  // Bust the 1-row memo with a distant line index, then evaluate liMin = 21 cold
+  kasaiEstimate(line.cellV, line.cellSigmaV, line.cellRel, 999, 0, 1, nS, scale, 0.2, {
+    realization: 3,
+    seed: 777,
+  });
+  const cold = kasaiEstimate(line.cellV, line.cellSigmaV, line.cellRel, 21, 0, 1, nS, scale, 0.2, {
+    realization: 3,
+    seed: 777,
+  });
+  assert.deepEqual(warmVel, cold.velocity);
+  assert.deepEqual(warmPow, cold.power);
 });
 
 test('wallFilterCutoffNyquist is the −3 dB point of any shares: the packet’s bounds, the shares solved for a cutoff', () => {

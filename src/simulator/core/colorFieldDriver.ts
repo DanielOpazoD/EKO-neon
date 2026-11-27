@@ -52,9 +52,10 @@ export interface ColorUpdateContext {
 
 /**
  * Owns the double-buffered Color Doppler polar field (CPU path) and the sparse ROI-box raw flow
- * sampler for the independent GPU deferred Doppler shading pipeline, including packet cadence
- * (every other B-mode frame), acquisition invalidation keys, the freeze of the GPU field on screen, and lazy
- * frozen-cine reconstruction from each frame's own beat.
+ * sampler for the independent GPU deferred Doppler shading pipeline, including full acquired-frame
+ * cadence (matching `cadenceHz`, which already accounts for Color packets), acquisition
+ * invalidation keys, the freeze of the GPU field on screen, and lazy frozen-cine reconstruction
+ * from each frame's own beat.
  */
 export class ColorFieldDriver {
   /** The two colour field buffers: each update writes the one that does not hold `prev` (decision 56). */
@@ -64,7 +65,6 @@ export class ColorFieldDriver {
    * blends it (persistence). Null until the first update after a polar spec or modality change.
    */
   private prev: ColorField | null = null;
-  private frameCounter = 0;
   private acquisitionKey = '';
   private gpuGeometryKey = '';
   private gpuSettingsKey = '';
@@ -130,26 +130,17 @@ export class ColorFieldDriver {
     const gKey = this.geometryKey(ctx);
     const sKey = ColorFieldDriver.settingsKey(ctx.color);
     const geometryChanged = gKey !== this.gpuGeometryKey;
-    const settingsChanged = sKey !== this.gpuSettingsKey;
     if (geometryChanged) this.gpuGeometryKey = gKey;
     this.gpuSettingsKey = sKey;
 
-    this.frameCounter++;
-    const needUpdate =
-      geometryChanged ||
-      settingsChanged ||
-      this.frameCounter % 2 === 0 ||
-      !gpu.hasDeferredDoppler;
-    if (!needUpdate) return true;
-
     const colorElapsed = Number.isFinite(this._lastTimeS)
       ? ctx.timeS - this._lastTimeS
-      : 2 * ctx.frameIntervalS;
+      : ctx.frameIntervalS;
     this._lastTimeS = ctx.timeS;
     const effPersist = persistenceOverTime(
       ctx.color.persistence,
       colorElapsed,
-      2 * ctx.frameIntervalS,
+      ctx.frameIntervalS,
     );
 
     const box = computeDopplerBoxBounds(ctx.spec, ctx.color);
@@ -457,7 +448,7 @@ export class ColorFieldDriver {
     cf.colorPower = out.power;
   }
 
-  /** Step Color Doppler for one B-mode frame (CPU fallback path); recomputes every other frame or when settings/geometry changed. */
+  /** Step Color Doppler for one acquired Color frame (CPU fallback path). */
   step(ctx: ColorUpdateContext): {
     vel: Float32Array | null;
     variance: Float32Array | null;
@@ -475,9 +466,8 @@ export class ColorFieldDriver {
       this.prev = null;
       this.acquisitionKey = colorKey;
     }
-    this.frameCounter++;
-    // colour packets cost frames: update the colour field every other B-mode frame
-    if (this.frameCounter % 2 === 0 || !this.prev) this.compute(ctx);
+    // Acquisition cadence already accounts for Color Doppler packets (`cadenceHz`): update every acquired frame.
+    this.compute(ctx);
     return this.prev
       ? { vel: this.prev.vel, variance: this.prev.variance, power: this.prev.power }
       : { vel: null, variance: null, power: null };
@@ -493,10 +483,10 @@ export class ColorFieldDriver {
     // write into the buffer that does not hold the previous field, which persistence blends
     const [a, b] = this.buffers!;
     const out = this.prev === a ? b : a;
-    // the colour field updates every other B-mode frame: its persistence decays over that nominal interval (decision 94)
+    // persistence decays over the acquired Color frame interval (decision 94)
     const colorElapsed = Number.isFinite(this._lastTimeS)
       ? ctx.timeS - this._lastTimeS
-      : 2 * ctx.frameIntervalS;
+      : ctx.frameIntervalS;
     this._lastTimeS = ctx.timeS;
     // Cache per-line beam direction & heart-frame basis projection (reused across all depth samples on line `li`)
     let cachedLi = -1;
@@ -521,7 +511,7 @@ export class ColorFieldDriver {
         persistence: persistenceOverTime(
           ctx.color.persistence,
           colorElapsed,
-          2 * ctx.frameIntervalS,
+          ctx.frameIntervalS,
         ),
       },
       this.prev,

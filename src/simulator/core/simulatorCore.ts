@@ -1,11 +1,15 @@
 import type { CaseDefinition } from '@/cases/schema';
 import { buildCaseModels } from '@/simulator/anatomy/caseModels';
+import { fastAtan2 } from '@/core/noise';
 import {
   computeHeartPose,
+  heartAnchors,
   heartLandmarks,
   type HeartModel,
   type HeartPose,
 } from '@/simulator/anatomy/heartModel';
+import { lvSegmentCode } from '@/simulator/anatomy/lvSegments';
+import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import type { AssetFetcher } from '@/simulator/anatomy/roderoAsset';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import { CardiacClock } from '@/simulator/cardiac-cycle/clock';
@@ -89,7 +93,8 @@ import { StripEngine, type StripCtx } from './stripEngine';
  */
 export class SimulatorCore {
   readonly caseDef: CaseDefinition;
-  readonly truth: StructuredEchoTruth;
+  truth: StructuredEchoTruth;
+  truthVersion = 0;
   private thorax: ThoraxModel;
   private heart: HeartModel;
   private tables: BeatTables;
@@ -143,6 +148,7 @@ export class SimulatorCore {
   private display: Uint8ClampedArray | null = null;
   private colorDriver = new ColorFieldDriver();
   private colorFps = 0;
+  private lastAcquisitionFps = 0;
   private displayOnGpu = false;
   private dopplerOnGpu = false;
   private transCodeScratch = new Uint8Array(0);
@@ -205,7 +211,10 @@ export class SimulatorCore {
     this.artifactKey = artifactOverridesKey(input.artifactOverrides);
     this.nominalTables = this.tables;
     this.clock = new CardiacClock(caseDef.rhythm, caseDef.seed);
-    this.truth = computeGroundTruth(caseDef, this.tables);
+    this.truth = computeGroundTruth(caseDef, this.tables, {
+      breathing: input.patient.respiration === 'free-breathing',
+      heart: this.heart,
+    });
     this.syncBeatTables(false);
     this.consoleState = createConsoleState(caseDef.seed);
     this.caseArtifacts = caseArtifactLevels(caseDef);
@@ -331,6 +340,8 @@ export class SimulatorCore {
       const models = buildCaseModels(this.caseDef, input.patient);
       this.thorax = models.thorax;
       this.heart = models.heart;
+      const wasBreathing = this.input.patient.respiration === 'free-breathing';
+      const nowBreathing = input.patient.respiration === 'free-breathing';
       if (
         input.patient.respiration !== this.input.patient.respiration &&
         this.caseDef.rhythm.type !== 'atrial-fibrillation'
@@ -338,6 +349,13 @@ export class SimulatorCore {
         this.tables = this.nominalTables;
         this.tablesBeat = -1;
         this.tablesVersion++;
+      }
+      if (wasBreathing !== nowBreathing) {
+        this.truth = computeGroundTruth(this.caseDef, this.nominalTables, {
+          breathing: nowBreathing,
+          heart: this.heart,
+        });
+        this.truthVersion++;
       }
       this.flow = this.buildFlow();
       this.atlas.invalidate();
@@ -460,6 +478,7 @@ export class SimulatorCore {
         : 0;
     const acquisitionFps = this.acquisitionFps();
     const fps = cadenceHz(spec, acquisitionFps, colorLines);
+    this.lastAcquisitionFps = acquisitionFps;
     this.colorFps = inp.modality === 'color' ? acquisitionFps : 0;
     const beam = beamFrameFromPose(
       poseFromControl(this.thorax, inp.probe),
@@ -750,6 +769,12 @@ export class SimulatorCore {
       onGpu = this.formDisplay(scene, beam, spec, phase, hints, settings, needSegments);
     }
     this.displayOnGpu = onGpu;
+    // When GPU renderDisplay skips the second readPixels (4 of 5 frames with segment overlay off),
+    // reconstruct AHA segment codes from the already-read structure/tissue maps (~0.1 ms, bit-exact)
+    // so every captured GPU cine frame carries a valid segment map when frozen or scrubbed.
+    if (onGpu && !needSegments) {
+      populateLvSegmentsFromStructure(this.frame, scene, beam, spec);
+    }
     let colorVel: Float32Array | null = null;
     let colorVar: Float32Array | null = null;
     let colorPower: Float32Array | null = null;
@@ -1013,6 +1038,9 @@ export class SimulatorCore {
       analysisMs: t.analysisMs,
       cineMs: t.cineMs,
       persistence: this.lastPersistence,
+      acquisitionFps: this.lastAcquisitionFps || this.acquisitionFps(),
+      cadenceHz: 1 / this.frameIntervalS,
+      colorFps: this.colorFps,
     };
   }
 
@@ -1022,6 +1050,7 @@ export class SimulatorCore {
     frozen: boolean,
     cf?: CineFrame,
   ): SimOutput | null {
+    const form = frozen && cf ? cf.formation : this.formation();
     const res = this.compositor.composite({
       input: this.input,
       beam,
@@ -1036,19 +1065,19 @@ export class SimulatorCore {
       onGpuContextLost: () => this.dropGpu(),
       // a frozen frame is described as it was formed, a live one by the pipeline forming it; the port's state goes apart
       // in both, since a frame cannot keep it: it moves on after the capture (an attempt, the return)
-      formation: frozen && cf ? cf.formation : this.formation(),
+      formation: form,
       gpuLive: this.gpuLive,
       colorCurrent: this.colorDriver.current,
       colorVersion: this.colorDriver.version,
-      colorFps: this.colorFps,
+      colorFps: form.colorFps,
       strips: this.strips,
       stripCtx: () => this.stripCtx(),
       lastAnalysis: this.lastAnalysis,
       clockCurrent: this.clock.current,
       timeS: this.timeS,
       frameId: this.frameId,
-      frameIntervalS: this.frameIntervalS,
-      acquisitionFps: this.acquisitionFps(),
+      frameIntervalS: 1 / form.cadenceHz,
+      acquisitionFps: form.acquisitionFps,
       ecgRing: this.ecgRing,
       cine: this.cine,
       timing: this.timing,
@@ -1107,6 +1136,73 @@ export interface SimulatorCoreOptions {
   createGpu?: GpuFactory;
   /** Wall clock (ms) the GPU recovery spaces its attempts by; `performance.now` by default. */
   now?: () => number;
+}
+
+/**
+ * Populate `frame.segment` from `frame.structure` and `frame.tissue` when GPU `renderDisplay`
+ * skipped the segment texture readback (`needSegments === false`). Matches `classifyLeftVentricle`
+ * bit-for-bit without issuing a second GPU `readPixels`.
+ */
+function populateLvSegmentsFromStructure(
+  frame: PolarFrame,
+  scene: Scene,
+  beam: BeamFrame,
+  spec: PolarFrameSpec,
+): void {
+  const seg = frame.segment;
+  if (scene.heartVolumeGpu || scene.heartClassifier) {
+    seg.fill(0);
+    return;
+  }
+  const structure = frame.structure;
+  const tissue = frame.tissue;
+  const heart = scene.heart;
+  const hp = scene.heartPose;
+  const hf = heart.frame;
+  const A = heartAnchors(heart);
+  const { lines, samples, sectorRad, depthCm } = spec;
+  const dr = depthCm / samples;
+  const zAnn = hp.zAnn;
+  const invLen = 1 / Math.max(hp.lengthNow, 1);
+  const rvA = A.rvAzA;
+  const rvP = A.rvAzP;
+  const ox = beam.origin.x - hf.origin.x;
+  const oy = beam.origin.y - hf.origin.y;
+  const oz = beam.origin.z - hf.origin.z;
+  const ohx = ox * hf.ex.x + oy * hf.ex.y + oz * hf.ex.z - hp.swingX;
+  const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
+  const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
+
+  for (let li = 0; li < lines; li++) {
+    const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
+    const ct = Math.cos(theta);
+    const sn = Math.sin(theta);
+    const dx = beam.forward.x * ct + beam.lateral.x * sn;
+    const dy = beam.forward.y * ct + beam.lateral.y * sn;
+    const dz = beam.forward.z * ct + beam.lateral.z * sn;
+    const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
+    const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
+    const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+    const row = li * samples;
+    for (let si = 0; si < samples; si++) {
+      const idx = row + si;
+      const st = structure[idx]!;
+      if (
+        tissue[idx] === Tissue.Myocardium &&
+        st >= Structure.LvWallSeptal &&
+        st <= Structure.LvApex
+      ) {
+        const r = (si + 0.5) * dr;
+        const hx = ohx + dhx * r;
+        const hy = ohy + dhy * r;
+        const hz = ohz + dhz * r;
+        const levelFrac = Math.min(1, Math.max(0, (hz - zAnn) * invLen));
+        seg[idx] = lvSegmentCode(fastAtan2(hy, hx), levelFrac, rvA, rvP);
+      } else {
+        seg[idx] = 0;
+      }
+    }
+  }
 }
 
 /** The app's assets, fetched under its base URL (the worker's and the page's). */

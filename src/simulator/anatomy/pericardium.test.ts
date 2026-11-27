@@ -8,18 +8,20 @@ import { makeSample, Structure } from './tissue';
 import { ctx } from './classify/context';
 import { smax } from './sdf';
 import {
-  OBLIQUE_SINUS_BEHIND,
   OBLIQUE_SINUS_EFFUSION_CM,
-  OBLIQUE_SINUS_FOOTPRINT_FROM,
-  OBLIQUE_SINUS_FOOTPRINT_TO,
   PARIETAL_AZ_BINS,
   PARIETAL_COLUMN_BLEND_CM,
   PARIETAL_POLAR_BINS,
   PERICARDIUM_CM,
+  obliqueSinusWeight,
   parietalSacDistance,
   parietalSdf,
   posteriorColumnDistance,
 } from './classify/pericardium';
+import { ESOPHAGUS_RX, ESOPHAGUS_RZ, ESOPHAGUS_X, ESOPHAGUS_Z } from './thoraxModel';
+import { torsoToHeart } from './heartFrame';
+import { canonicalBeam, getViewTarget } from '@/simulator/windows/viewTargets';
+import { add, scale, v3 } from '@/core/vec3';
 import { RAA_TIP_FROM_AV } from './atrialAppendages';
 import { GLSL_GENERATED } from '@/simulator/renderer/gpu/glslGenerated';
 import { GLSL_HEART_CHAMBERS } from '@/simulator/renderer/gpu/glslHeartChambers';
@@ -189,12 +191,8 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
       const m = buildCaseModels(caseDef, { position, respiration, headElevationDeg: 0 });
       const A = heartAnchors(m.heart);
       const sac = A.parietal!;
-      const la = A.laCenter,
-        lr = A.laR;
-      const eff = m.heart.anatomy.pericardium.effusionCm;
-      // at a point fixed in the torso, NaN by the column: the full sac held off the column (decision 273), past which the
-      // face never lies wherever the heart is, and the face with the heart far from it, the still sac thinned over the
-      // atrium (parietalSdf), where it stays while the heart is; `held` false leaves the column out
+      // at a point fixed in the torso, NaN by the column: the still parietal sac held off the descending aorta,
+      // esophagus and vertebral body (decision 273); `held` false leaves the column out
       const column = (x: number, y: number, z: number): number =>
         posteriorColumnDistance(
           x,
@@ -209,27 +207,17 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
           A.colSpine.x,
           A.colSpine.y,
           A.colSpine.z,
+          A.laPostN.x,
+          A.laPostN.y,
+          A.laPostN.z,
         );
-      const fullSac = (x: number, y: number, z: number, held = true): number => {
-        const colDist = column(x, y, z);
-        if (colDist < 2 * PERICARDIUM_CM) return NaN;
-        const col = held ? 2 * PERICARDIUM_CM - colDist : -Infinity;
-        return smax(parietalSacDistance(sac, x, y, z), col, PARIETAL_COLUMN_BLEND_CM);
-      };
       const stillFace = (x: number, y: number, z: number, held = true): number => {
         const colDist = column(x, y, z);
-        if (colDist < 2 * PERICARDIUM_CM) return NaN;
-        return parietalSdf(
-          eff,
-          parietalSacDistance(sac, x, y, z),
-          Infinity,
-          (la.y - y) / lr.y,
-          ((x - la.x) / lr.x) ** 2 + ((z - la.z) / lr.z) ** 2,
-          held ? colDist : Infinity,
-        );
+        if (colDist < PERICARDIUM_CM) return NaN;
+        return parietalSdf(parietalSacDistance(sac, x, y, z), held ? colDist : Infinity);
       };
       // the still points probed in every phase: [x, y, z, par] past the face, [x, y, z] inside it; and over the sinus the
-      // runs of [x, y, z, full sac, column bends it] along each ray, walked in every phase
+      // runs of [x, y, z, stillFace, column bends it, sinusWeight] along each ray, walked in every phase
       const pastPoints: number[] = [],
         insidePoints: number[] = [],
         sinusRuns: number[][] = [];
@@ -238,56 +226,55 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
         const dx = Math.sin(phi) * Math.cos(th),
           dy = Math.sin(phi) * Math.sin(th),
           dz = Math.cos(phi);
-        const full = (t: number): number => fullSac(sac.cx + dx * t, sac.cy + dy * t, sac.cz + dz * t);
-        // the radii of the table's cell the ray runs through bound the full sac's face
+        const face = (t: number): number => stillFace(sac.cx + dx * t, sac.cy + dy * t, sac.cz + dz * t);
+        // the radii of the table's cell the ray runs through bound the still sac's face
         const fi = (((th + 2 * Math.PI) % (2 * Math.PI)) * PARIETAL_AZ_BINS) / (2 * Math.PI);
         const i0 = Math.floor(fi) % PARIETAL_AZ_BINS,
           i1 = (i0 + 1) % PARIETAL_AZ_BINS,
           j0 = Math.min(PARIETAL_POLAR_BINS - 2, Math.floor((phi * (PARIETAL_POLAR_BINS - 1)) / Math.PI));
         const corners = [j0, j0 + 1].flatMap((j) => [i0, i1].map((i) => sac.r[j * PARIETAL_AZ_BINS + i]!));
         const tOut = Math.max(...corners) + 0.6;
-        // past the full sac is past the face wherever the heart is
+        // past the still sac is past the face wherever the heart is
         if (probePast)
           for (let t = Math.min(...corners) - 0.3; t < tOut; t += 0.05) {
-            const par = full(t);
+            const par = face(t);
             if (par >= 0 && par < 0.25) pastPoints.push(sac.cx + dx * t, sac.cy + dy * t, sac.cz + dz * t, par);
           }
-        // the run over the sinus, where the still faces part: from 0.3 cm inside the thinned face, which lies up to the
-        // effusion less the sinus' film inside the full one, to 0.25 cm past the full face
+        // the run over the sinus, where oblique-sinus thinning is active
         const run: number[] = [];
-        let parts = false;
-        for (let t = Math.min(...corners) - eff + Math.min(eff, OBLIQUE_SINUS_EFFUSION_CM) - 0.6; t < tOut; t += 0.05) {
+        let over = false;
+        for (let t = Math.min(...corners) - 0.6; t < tOut; t += 0.05) {
           const x = sac.cx + dx * t,
             y = sac.cy + dy * t,
             z = sac.cz + dz * t;
-          const lo = fullSac(x, y, z),
-            hi = stillFace(x, y, z);
-          if (Number.isNaN(lo)) continue;
-          if (!run.length && hi < -0.3) continue;
-          const bent = lo !== fullSac(x, y, z, false) || hi !== stillFace(x, y, z, false);
-          run.push(x, y, z, lo, bent ? 1 : 0);
-          parts ||= lo < hi;
-          if (lo >= 0.25) break;
+          const par = stillFace(x, y, z);
+          if (Number.isNaN(par)) continue;
+          if (!run.length && par < -0.35) continue;
+          const w = obliqueSinusWeight(x, y, z, A);
+          const bent = par !== stillFace(x, y, z, false);
+          run.push(x, y, z, par, bent ? 1 : 0, w);
+          if (w > 0.25) over = true;
+          if (par >= 0.25) break;
         }
-        if (parts) {
+        if (over) {
           sinusRuns.push(run);
           sinusDirections.push([phi, th]);
         }
-        // the outermost point 0.05 cm inside the full sac's face: stepped in from beyond it, then halved to 5e-5 cm
+        // the outermost point 0.05 cm inside the still sac's face: stepped in from beyond it, then halved to 5e-5 cm
         let t = tOut;
-        while (t > 0 && !(full(t) < -0.05)) t -= 0.05;
-        if (t <= 0 || Number.isNaN(full(t + 0.05))) return; // the face here is the column's
+        while (t > 0 && !(face(t) < -0.05)) t -= 0.05;
+        if (t <= 0 || Number.isNaN(face(t + 0.05))) return; // the face here is the column's
         let lo = t,
           hi = t + 0.05;
         for (let k = 0; k < 10; k++) {
           const mid = (lo + hi) / 2;
-          if (full(mid) < -0.05) lo = mid;
+          if (face(mid) < -0.05) lo = mid;
           else hi = mid;
         }
         const x = sac.cx + dx * lo,
           y = sac.cy + dy * lo,
           z = sac.cz + dz * lo;
-        // where that is the face, still and not bent by the column (over the sinus the runs ask for the fluid)
+        // where that is the face, still and not bent by the column
         if (stillFace(x, y, z) === parietalSacDistance(sac, x, y, z)) insidePoints.push(x, y, z);
       };
       // the table's rays
@@ -369,13 +356,27 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
             in20 = -1,
             at05 = '',
             at20 = '',
-            fullFace = false;
-          for (let k = 0; k < run.length && after < 6; k += 5) {
+            overSinusHere = false,
+            prevX = NaN,
+            prevY = NaN,
+            prevZ = NaN;
+          for (let k = 0; k < run.length && after < 6; k += 6) {
             const x = run[k]!,
               y = run[k + 1]!,
               z = run[k + 2]!,
-              full = run[k + 3]!,
-              bent = run[k + 4]! === 1;
+              faceVal = run[k + 3]!,
+              bent = run[k + 4]! === 1,
+              w = run[k + 5]!;
+            // A step larger than 0.10 cm means the ray crossed through the posterior column (esophagus/aorta/spine)
+            // where the sac is held off and skipped: reset state so tissue on the anterior side is not paired with
+            // points on the far posterior side of the column.
+            if (!Number.isNaN(prevX) && Math.hypot(x - prevX, y - prevY, z - prevZ) > 0.1) {
+              last = '';
+              in05 = in20 = -1;
+            }
+            prevX = x;
+            prevY = y;
+            prevZ = z;
             overSinus++;
             if (after >= 0) after++;
             ctx.parietal = NaN;
@@ -386,7 +387,7 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
               continue;
             }
             if (hit && !SAC.has(st)) {
-              if (last === 'past' || full >= 0)
+              if (!bent && (last === 'past' || faceVal >= 0))
                 assert.fail(`${where(x, y, z)}: structure ${st} past the parietal layer over the oblique sinus`);
               last = 'heart';
               heart = st;
@@ -395,12 +396,15 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
             // the pericardium's block drew or left the point (outside the bounding sphere it does not run)
             const par = Number.isNaN(ctx.parietal) ? Infinity : ctx.parietal;
             if (par >= 0) {
-              if (last === 'heart')
+              if (last === 'heart' && !bent)
                 assert.fail(
                   `${where(x, y, z)}: structure ${heart} against the parietal layer over the oblique sinus`,
                 );
               // the parietal layer itself is pericardium: a visceral layer or fat past it is not
-              if (st === Structure.EpicardialFat || (st === Structure.Pericardium && par >= PERICARDIUM_CM))
+              if (
+                !bent &&
+                (st === Structure.EpicardialFat || (st === Structure.Pericardium && par >= PERICARDIUM_CM))
+              )
                 assert.fail(
                   `${where(x, y, z)}: structure ${st} ${par.toFixed(3)} cm past the parietal layer over the oblique sinus`,
                 );
@@ -412,7 +416,7 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
                     `${at05}: structure ${in05} 0.05 cm inside the parietal layer over the oblique sinus, not fluid`,
                   );
                 // the film is 0.3 cm, asked for 0.2 cm in: a step of the run beyond the parietal layer's distance
-                if (!fullFace && in20 >= 0 && !LEAVE_THE_SAC.has(in20))
+                if (overSinusHere && in20 >= 0 && !LEAVE_THE_SAC.has(in20))
                   assert.fail(
                     `${at20}: structure ${in20} 0.2 cm inside the parietal layer over the oblique sinus, not its film`,
                   );
@@ -428,8 +432,7 @@ test('effusion: no heart tissue reaches the parietal layer over the beat, obliqu
                 in20 = bent ? -1 : st;
                 at20 = where(x, y, z);
               }
-              // where the full sac sets the face the heart may come nearer it than the sinus' film
-              fullFace = full >= par;
+              overSinusHere = w > 0.5;
               last = 'in';
             }
           }
@@ -550,43 +553,107 @@ test('GLSL mirror: parietalSacDistance and parietalSdf evaluate as the TypeScrip
     assert.ok(Number.isFinite(g) && Math.abs(g - parietalSacDistance(f32, x, y, z)) < 1e-9);
   }
 
-  const sdf =
-    /float parietalSdf\(float eff, float dFull, float dEpi, float behind, float footprint, float colDist\) \{([\s\S]*?)\n\}/.exec(
-      GLSL_GENERATED,
-    );
+  const sdf = /float parietalSdf\(float dSac, float colDist\) \{([\s\S]*?)\n\}/.exec(GLSL_GENERATED);
   assert.ok(sdf, 'parietalSdf missing from GLSL_GENERATED');
-  const sdfJs = sdf[1]!
-    .replace(/\bfloat\s+/g, 'let ')
-    .replace(/(?<![.\w])(min|max)\(/g, 'Math.$1(');
+  const sdfJs = sdf[1]!.replace(/\bfloat\s+/g, 'let ').replace(/(?<![.\w])(min|max)\(/g, 'Math.$1(');
   const glslSdf = new Function(
-    'eff',
-    'dFull',
-    'dEpi',
-    'behind',
-    'footprint',
+    'dSac',
     'colDist',
     'smax',
-    'OBLIQUE_SINUS_EFFUSION_CM',
-    'OBLIQUE_SINUS_BEHIND',
-    'OBLIQUE_SINUS_FOOTPRINT_FROM',
-    'OBLIQUE_SINUS_FOOTPRINT_TO',
     'PERICARDIUM_CM',
     'PARIETAL_COLUMN_BLEND_CM',
     sdfJs,
   ) as (...a: unknown[]) => number;
   for (let k = 0; k < 2000; k++) {
-    // dEpi over the range where the heart sets the face over the sinus, between the full and the thinned sac
-    const a = [2.5 * (rnd() + 1), 3 * rnd(), 3 * rnd(), 2 * rnd(), 2 * (rnd() + 1), 3 * (rnd() + 1)] as const;
-    const g = glslSdf(
-      ...a,
-      smax,
-      OBLIQUE_SINUS_EFFUSION_CM,
-      OBLIQUE_SINUS_BEHIND,
-      OBLIQUE_SINUS_FOOTPRINT_FROM,
-      OBLIQUE_SINUS_FOOTPRINT_TO,
-      PERICARDIUM_CM,
-      PARIETAL_COLUMN_BLEND_CM,
-    );
-    assert.ok(Math.abs(g - parietalSdf(...a)) < 1e-12, `parietalSdf(${a.join(', ')})`);
+    const dSac = 3 * rnd(),
+      colDist = 3 * (rnd() + 1);
+    const g = glslSdf(dSac, colDist, smax, PERICARDIUM_CM, PARIETAL_COLUMN_BLEND_CM);
+    assert.ok(Math.abs(g - parietalSdf(dSac, colDist)) < 1e-12, `parietalSdf(${dSac}, ${colDist})`);
   }
+});
+
+test('effusion: behind the left atrium the oblique sinus stays thin and still and clears the esophagus', () => {
+  const m = modelsOf('pericardial-effusion-tamponade');
+  const A = heartAnchors(m.heart);
+  const es = endSystole(m);
+
+  // 1. Over the oblique sinus, the parietal layer stays still across the beat (used to travel 2.32 cm with the LA).
+  const phases = [0, 0.125, 0.25, 0.375, es, 0.625, 0.75, 0.875];
+  const poses = phases.map((ph) => computeHeartPose(m.heart, cycleStateAt(m.tables, ph)));
+  const pn = A.laPostN;
+  let maxTravel = 0;
+  let maxPerpFluid = 0;
+  for (const dy of [-0.6, 0, 0.6])
+    for (const dz of [-0.6, 0, 0.6]) {
+      const o = v3(A.laCenter.x, A.laCenter.y + dy, A.laCenter.z + dz);
+      const faces: number[] = [];
+      for (const hp of poses) {
+        const runs = runsAlong(m, hp, [o.x, o.y, o.z], [pn.x, pn.y, pn.z], 8, 0.01);
+        const lastSac = [...runs].reverse().find((r) => SAC.has(r[0]));
+        if (lastSac) faces.push(lastSac[2]);
+        const laIdx = runs.findIndex((r) => r[0] === Structure.LaCavity || r[0] === Structure.LaWall);
+        if (laIdx >= 0) {
+          const fl = runs
+            .slice(laIdx + 1)
+            .filter((r) => r[0] === Structure.PericardialEffusion)
+            .reduce((acc, r) => acc + (r[2] - r[1]), 0);
+          if (fl > maxPerpFluid) maxPerpFluid = fl;
+        }
+      }
+      if (faces.length === poses.length) {
+        const travel = Math.max(...faces) - Math.min(...faces);
+        if (travel > maxTravel) maxTravel = travel;
+      }
+    }
+  assert.ok(maxTravel < 0.05, `oblique sinus parietal layer moved ${maxTravel.toFixed(3)} cm over the beat`);
+  assert.ok(maxPerpFluid < 1.0, `posterior-LA effusion along laPostN reached ${maxPerpFluid.toFixed(2)} cm`);
+
+  // 2. Directly behind the LA body in PLAX (0°..12°), the effusion stays thin instead of ballooning to 3.5-4.0 cm.
+  const bf = canonicalBeam(getViewTarget('plax')!, m.heart, m.thorax);
+  let maxPlaxBehindLa = 0;
+  for (const ph of [0, 0.25, es, 0.75]) {
+    const hp = computeHeartPose(m.heart, cycleStateAt(m.tables, ph));
+    for (let deg = 0; deg <= 12; deg += 1) {
+      const th = (deg * Math.PI) / 180;
+      const dir = add(scale(bf.forward, Math.cos(th)), scale(bf.lateral, Math.sin(th)));
+      let seenLa = false,
+        fluid = 0;
+      for (let r = 6; r <= 17; r += 0.05) {
+        const p = torsoToHeart(m.heart.frame, add(bf.origin, scale(dir, r)));
+        const hit = classifyHeart(m.heart, hp, p.x, p.y, p.z, s);
+        const st = hit ? s.structure : Structure.None;
+        if (st === Structure.LaCavity || st === Structure.LaWall) {
+          seenLa = true;
+          fluid = 0;
+        } else if (seenLa && st === Structure.PericardialEffusion) {
+          fluid += 0.05;
+        }
+      }
+      if (fluid > maxPlaxBehindLa) maxPlaxBehindLa = fluid;
+    }
+  }
+  assert.ok(
+    maxPlaxBehindLa < 0.9,
+    `PLAX effusion behind LA body reached ${maxPlaxBehindLa.toFixed(2)} cm (expected < 0.9 cm)`,
+  );
+
+  // 3. The pericardial sac never invades the esophagus interior behind the left atrium (was ~48% invaded).
+  let esoTotal = 0,
+    esoInvaded = 0;
+  for (const ph of [0, es]) {
+    const hp = computeHeartPose(m.heart, cycleStateAt(m.tables, ph));
+    for (let y = -10; y <= 6; y += 0.25)
+      for (let dx = -ESOPHAGUS_RX; dx <= ESOPHAGUS_RX; dx += 0.1)
+        for (let dz = -ESOPHAGUS_RZ; dz <= ESOPHAGUS_RZ; dz += 0.1) {
+          if ((dx / ESOPHAGUS_RX) ** 2 + (dz / ESOPHAGUS_RZ) ** 2 >= 0.99) continue;
+          esoTotal++;
+          const p = torsoToHeart(
+            m.heart.frame,
+            v3(ESOPHAGUS_X + dx, y, ESOPHAGUS_Z + m.heart.columnShiftCm + dz),
+          );
+          if (classifyHeart(m.heart, hp, p.x, p.y, p.z, s)) esoInvaded++;
+        }
+  }
+  assert.ok(esoTotal > 10_000, `expected > 10000 esophagus samples, got ${esoTotal}`);
+  assert.equal(esoInvaded, 0, `pericardial sac invaded ${esoInvaded}/${esoTotal} esophagus samples`);
 });

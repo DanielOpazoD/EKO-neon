@@ -354,6 +354,7 @@ export type WorkerToMain =
        */
       generation?: number;
     }
+  | { type: 'truth'; truth: StructuredEchoTruth; caseId: string }
   | { type: 'frame'; output: SimOutput }
   | { type: 'response'; id: number; res: SimResponse | null }
   | { type: 'error'; message: string };

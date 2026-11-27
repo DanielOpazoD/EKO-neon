@@ -183,9 +183,7 @@ export function accumulateSpectrum(
   out.fill(0);
   for (const smp of samples) {
     if (smp.weight <= 0) continue;
-    if (Math.abs(smp.v) < effectiveSettings.wallFilterMps) continue; // wall filter on true velocity
-    const wfGain = clutterFilterPowerResponse(smp.v, effectiveSettings.wallFilterMps);
-    if (wfGain <= 0) continue;
+    if (Math.abs(smp.v) < effectiveSettings.wallFilterMps) continue; // reject slow clutter before spreading
     let v = effectiveSettings.invert ? -smp.v : smp.v;
     if (aliasing) v = aliasVelocity(v, effectiveSettings.scaleMps, effectiveSettings.baselineShiftMps);
     const spread = spectralSpread(smp, effectiveSettings);
@@ -207,7 +205,7 @@ export function accumulateSpectrum(
     // zero, and reversed ones, weak, only in its mixing layer.
     const zeroBin = (vMax / span) * SPECTRAL_BINS;
     const crossesAt = !aliasing && (zeroBin - centerBin) * baselineSide > 0 ? zeroBin : NaN;
-    const weighted = smp.weight * wfGain;
+    const weighted = smp.weight;
     // In CW high-velocity turbulent jets, erythrocytes traversing the vena contracta potential core
     // create a crisper outer velocity rim atop the broad turbulent shear fill toward baseline.
     const isCwJetRim = !aliasing && smp.dispersion > 0.22 && Math.abs(smp.v) > 1.2;
@@ -230,6 +228,16 @@ export function accumulateSpectrum(
       }
       const k = aliasing ? ((b % SPECTRAL_BINS) + SPECTRAL_BINS) % SPECTRAL_BINS : b;
       out[k] = (out[k] ?? 0) + weighted * w;
+    }
+  }
+  // Apply the baseband high-pass wall filter per velocity bin (matching pulsedIq's FFT-bin wall filter),
+  // so high-velocity turbulent tails and aliased wraparound never fill a bright band inside the clutter stopband.
+  if (effectiveSettings.wallFilterMps > 0 && span > 0) {
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const val = out[b]!;
+      if (val <= 0) continue;
+      const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      out[b] = val * clutterFilterPowerResponse(vBin, effectiveSettings.wallFilterMps);
     }
   }
 }

@@ -17,7 +17,6 @@ import {
   COLOR_TURBULENT_WIDTH_K,
   colorScratch,
   colorSpectralWidthMps,
-  colorWallFilterCutoffMps,
   KASAI_QUAD_BASIS,
   kasaiEstimate,
   NOISE_COHERENCE,
@@ -109,13 +108,6 @@ export function relativeTransmission(
   );
 }
 
-/** Second-order wall-filter magnitude at |v| over the cutoff: −3 dB at the cutoff, flat from about twice it. */
-export function wallFilterResponse(vAbs: number, cutoffMps: number): number {
-  if (cutoffMps <= 0) return 1;
-  const x = (vAbs / cutoffMps) ** 2;
-  return x / Math.sqrt(1 + x * x);
-}
-
 /** Per-sample colour result buffers (polar). vel in m/s after aliasing, NaN where no colour. */
 export interface ColorField {
   vel: Float32Array;
@@ -173,7 +165,7 @@ export function computeColorField(
   ) => void,
   out: ColorField,
   acquisition: ColorAcquisition,
-  estimate?: ColorEstimate,
+  estimate: ColorEstimate,
 ): { colorLines: number } {
   const { lines, samples, sectorRad, depthCm } = frame.spec;
   const tmp: { v: number; disp: number; present: number; vPerp?: number; vWall?: number } = {
@@ -273,7 +265,7 @@ export function computeColorField(
   }
   // the estimate of this update (decision 300): a packet of echoes per sample, 3-basis Legendre wall-filtered and autocorrelated
   const kasai =
-    estimate && nL > 0 && nS > 0
+    nL > 0 && nS > 0
       ? kasaiEstimate(
           cellV,
           cellSigmaV,
@@ -289,10 +281,6 @@ export function computeColorField(
         )
       : null;
 
-  // the expected field (no estimate: tests and debugCompare's deterministic CPU/GPU parity, never a frame shown) keeps
-  // its second-order shape, on the cutoff the estimator filters with, the request bounded at this scale; Pass D2 receives
-  // the same bounded cutoff (deferredDoppler.ts), so its mirror is unchanged
-  const wfCutMps = colorWallFilterCutoffMps(s.wallFilterMps, s.scaleMps);
   const tIn: TemporalStepInput = {
     isBloodValid: false,
     hasCurr: false,
@@ -338,21 +326,6 @@ export function computeColorField(
           const rejectedNoise =
             kasai.coherence[g]! < NOISE_COHERENCE && power < NOISE_POWER_GATE * COLOR_THRESHOLD;
           hasCurr = !rejectedNoise && power >= COLOR_THRESHOLD;
-        }
-      } else {
-        // the expected field: the wall filter's response on the true velocity, its spectral spread as variance
-        if (Math.abs(vTrue) >= wfCutMps) {
-          power = Math.min(
-            1,
-            gainLin * cellRel[g]! * wallFilterResponse(Math.abs(vTrue), wfCutMps),
-          );
-          vEstimate = vTrue;
-          const effDisp = Math.min(
-            1,
-            cellSigmaV[g]! / Math.max(0.08, COLOR_TURBULENT_WIDTH_K * Math.abs(vTrue)),
-          );
-          variance = Math.min(1, effDisp * 1.6);
-          hasCurr = power >= COLOR_THRESHOLD;
         }
       }
 

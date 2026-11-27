@@ -2,7 +2,14 @@ import { makeSample, Structure, Tissue } from '../tissue';
 import { sdCapsule, sdEllipsoid, smax, smin } from '../sdf';
 import { ctx, setSample, type ClassifyCtx } from './context';
 import { AORTIC_ROOT_WALL_CM } from '../aorticValve';
-import { DESC_AORTA_MAX_OUTER_R, SPINE_R } from '../thoraxModel';
+import {
+  DESC_AORTA_MAX_OUTER_R,
+  ESOPHAGUS_RX,
+  ESOPHAGUS_RZ,
+  ESOPHAGUS_Z,
+  SPINE_R,
+  SPINE_Z,
+} from '../thoraxModel';
 import { pulmonaryTrunkEpiDistance, trunkFrontDistance } from '../greatVessels';
 import { rvCrescent, rvInflowSdf } from '../rv';
 import { rootCoordinates } from './root';
@@ -49,9 +56,10 @@ export function avGrooveBlend(h: number): number {
 
 /**
  * Distance (cm) from a heart-frame point to the surface of the posterior column (decision 273): the descending aorta at
- * its largest systolic size and the vertebral body, two vertical cylinders whose axes run along `u` through `a` and `s`.
- * The heart lay across them: the left atrium of the dilated cases ran into the vertebral body, and the sac into the wall
- * of the aorta.
+ * its largest systolic size, the vertebral body, and the esophagus in front of the spine (`ESOPHAGUS_Z`, `ESOPHAGUS_RX`,
+ * `ESOPHAGUS_RZ` in `thoraxModel.ts`). `u` is torso +y (vertical), `a` and `s` lie on the descending-aorta and spine
+ * axes, and `pn` is `laPostN` (torso −z, posterior). Keeping the esophagus in the column prevents a large pericardial
+ * effusion from invading the esophagus behind the left atrium. Mirrored in `glslGenerated.ts`.
  */
 export function posteriorColumnDistance(
   x: number,
@@ -66,6 +74,9 @@ export function posteriorColumnDistance(
   sx: number,
   sy: number,
   sz: number,
+  pnx: number,
+  pny: number,
+  pnz: number,
 ): number {
   const dax = x - ax,
     day = y - ay,
@@ -78,77 +89,49 @@ export function posteriorColumnDistance(
     dsz = z - sz;
   const ts = dsx * ux + dsy * uy + dsz * uz;
   const dS = Math.sqrt(Math.max(0, dsx * dsx + dsy * dsy + dsz * dsz - ts * ts)) - SPINE_R;
-  return Math.min(dA, dS);
+  // Esophagus elliptic cylinder along u, centred (ESOPHAGUS_Z − SPINE_Z) anterior (−pn) of the spine (ESOPHAGUS_X = 0)
+  const ezOff = ESOPHAGUS_Z - SPINE_Z;
+  const dex = x - (sx - ezOff * pnx),
+    dey = y - (sy - ezOff * pny),
+    dez = z - (sz - ezOff * pnz);
+  const te = dex * ux + dey * uy + dez * uz;
+  const pex = dex - te * ux,
+    pey = dey - te * uy,
+    pez = dez - te * uz;
+  const ezProj = pex * pnx + pey * pny + pez * pnz;
+  const ex2 = Math.max(0, pex * pex + pey * pey + pez * pez - ezProj * ezProj);
+  const nx2 = ex2 / (ESOPHAGUS_RX * ESOPHAGUS_RX);
+  const nz2 = (ezProj * ezProj) / (ESOPHAGUS_RZ * ESOPHAGUS_RZ);
+  const k0 = Math.sqrt(nx2 + nz2);
+  const k1 = Math.sqrt(
+    nx2 / (ESOPHAGUS_RX * ESOPHAGUS_RX) + nz2 / (ESOPHAGUS_RZ * ESOPHAGUS_RZ),
+  );
+  const dE = k0 > 1e-6 ? (k0 * (k0 - 1)) / k1 : -ESOPHAGUS_RZ;
+  return Math.min(dA, Math.min(dS, dE));
 }
 
 /** Effusion (cm) the sac holds over the left atrium (decision 255). */
 export const OBLIQUE_SINUS_EFFUSION_CM = 0.3;
-/** The oblique sinus behind the left atrium, in its own semi-axes (decision 383): the fluid thins from its centre plane
- * to OBLIQUE_SINUS_BEHIND behind it, within the atrium's footprint (its normalised lateral and vertical radius squared
+/** The oblique sinus behind the left atrium along torso posterior (`laPostN`): the fluid thins from its centre plane
+ * to OBLIQUE_SINUS_BEHIND behind it, within the atrium's posterior transverse footprint (normalised radius squared
  * from OBLIQUE_SINUS_FOOTPRINT_FROM to OBLIQUE_SINUS_FOOTPRINT_TO). */
 export const OBLIQUE_SINUS_BEHIND = 0.6;
 export const OBLIQUE_SINUS_FOOTPRINT_FROM = 0.6;
-export const OBLIQUE_SINUS_FOOTPRINT_TO = 1.4;
-/** Blend (cm) of the parietal layer against the descending aorta and the vertebral body (decision 383). */
-export const PARIETAL_COLUMN_BLEND_CM = 1;
+export const OBLIQUE_SINUS_FOOTPRINT_TO = 2.2;
+/** Blend (cm) of the parietal layer against the descending aorta, esophagus and vertebral body (decision 383). */
+export const PARIETAL_COLUMN_BLEND_CM = 0.2;
 
 /**
- * Signed distance (cm) to the inner face of the parietal pericardium over an effusion `eff` (decision 383), from the
- * distance to the sac the full effusion would fill (`dFull`: the smooth envelope of the heart pushed out by the
- * pericardium and `eff`, see `ParietalSac`), the point's place behind the left atrium (`behind`, in the atrium's
- * posterior semi-axis from its centre; `footprint`, its normalised lateral and vertical radius squared) and the distance
- * to the descending aorta and the vertebral body (`colDist`). Around the heart the fluid has its full thickness; behind
- * the left atrium the parietal pericardium reflects onto the atrial wall around the pulmonary veins and the oblique sinus
- * between them holds little fluid (decision 255); and it lies in front of the column (decision 273). The parietal layer
- * was the visceral surface pushed out by the effusion: 2.3 cm from the walls that surface showed the planes the atria
- * are built from, in straight faces meeting at corners, and its thinning over the left atrium, 2.2 to 0.3 cm within 1 cm
- * of the difference between two distances, drew steps. A smooth envelope pushed out by a thickness that changes
- * smoothly in space has neither.
- *
- * Over the oblique sinus the layer rests on the heart. Between the full sac and the same thinned over the atrium's
- * footprint, both held off the column, it lies no nearer the epicardium of the moment (`dEpi`, the visceral layer's
- * inner face) than the sinus' film beyond the visceral layer. The thinned sac alone did not know where the atrium is: its
- * thinning is laid on the envelope's anchor ellipsoid, while the atrium the blocks draw reaches back to the descending
- * aorta (decision 330), the more as the posture and the breath bring the column near, and the coronary sinus rides the
- * groove with the base. In the tamponade case its face ran through the heart. On a 0.5 mm grid over eight phases, the
- * coronary sinus and the visceral layer over it stood up to 0.57 cm past it in the resting posture (0.04-0.43 mL per
- * phase, from phase 0.875 to 0.375), 0.51-0.59 cm in four of the other hearts the app's postures and breathing build,
- * and supine in inspiration the left atrium's wall, its cavity and the fat up to 0.91 cm (2.6-3.9 mL in every phase), a
- * ray from the atrium crossing the face twice with a centimetre of fluid beyond the heart between the crossings. Now no
- * heart tissue lies against or past the face over the sinus, and the film is 0.30 in units of the epicardial distance:
- * that distance grows 1.5-2 times faster than the true one behind the atrium, so the film measures 0.16-0.30 cm (final
- * review of batch 3; a film set in true distance would divide by a local bound of its gradient). The real layer is reflected onto the atrium around the pulmonary veins and moves with it there: the face
- * takes 0.1-2.2 mL of the space past the thinned sac into the sac in each phase, up to 0.92 cm beyond it (5.8-8.1 mL, up
- * to 1.30 cm, supine in inspiration), over 1.1-1.9 % of the directions from the sac's centre (3.1 % supine in
- * inspiration). Resting it on the heart before holding it off the column would let the column's blend pull it back: the
- * film fell to 0.20 cm supine in expiration and to 0.10 cm in inspiration. Elsewhere, and wherever the heart stays
- * farther than the film from the thinned sac, the face is the still sac's, to the last bit.
+ * Signed distance (cm) to the inner face of the still parietal pericardium over an effusion (decision 383):
+ * the pre-tabulated still sac `dSac` (which already incorporates both the full effusion and the oblique-sinus
+ * thinning behind the left atrium, clearing the full beating+swinging heart envelope across the beat) held off
+ * the posterior column (`colDist`: descending aorta, esophagus and vertebral body). Because `dSac` and `colDist`
+ * are both fixed in the torso, the parietal sheet stays completely still over the oblique sinus as well as the
+ * ventricles, and its outer face (`par = PERICARDIUM_CM`) stays tangent to `colDist = 0` without cutting inside
+ * the posterior left atrial wall. Mirrored in `glslGenerated.ts`.
  */
-export function parietalSdf(
-  eff: number,
-  dFull: number,
-  dEpi: number,
-  behind: number,
-  footprint: number,
-  colDist: number,
-): number {
-  const thin = Math.min(eff, OBLIQUE_SINUS_EFFUSION_CM);
-  const tb = Math.min(1, Math.max(0, behind / OBLIQUE_SINUS_BEHIND));
-  const tf = Math.min(
-    1,
-    Math.max(
-      0,
-      (footprint - OBLIQUE_SINUS_FOOTPRINT_FROM) /
-        (OBLIQUE_SINUS_FOOTPRINT_TO - OBLIQUE_SINUS_FOOTPRINT_FROM),
-    ),
-  );
-  const w = tb * tb * (3 - 2 * tb) * (1 - tf * tf * (3 - 2 * tf));
-  // the still sac and the same thinned over the atrium's footprint, both held off the column
-  const col = 2 * PERICARDIUM_CM - colDist;
-  const full = smax(dFull, col, PARIETAL_COLUMN_BLEND_CM);
-  const thinned = smax(dFull + (eff - thin) * w, col, PARIETAL_COLUMN_BLEND_CM);
-  // between them the layer rests on the heart of the moment, the sinus' film beyond the visceral layer
-  return Math.max(full, Math.min(thinned, dEpi - PERICARDIUM_CM - thin));
+export function parietalSdf(dSac: number, colDist: number): number {
+  return smax(dSac, PERICARDIUM_CM - colDist, PARIETAL_COLUMN_BLEND_CM);
 }
 
 /**
@@ -282,18 +265,105 @@ function rvotEpiDistance(A: AnchorsCached, fw: number, x: number, y: number, z: 
 }
 
 /**
- * Tabulate the sac of the case's effusion around the heart at end-diastole `ed` with the appendages at end-systole (no
- * swing): along each direction from the centre, the first point where the envelope lies the pericardium and the
- * effusion away, found by stepping out by half the envelope's distance and halving the last step ten times (to 0.1 mm
- * or better). About 25 000 evaluations of the envelope, 13-15 ms (1 ms more with the appendages), once per heart model
- * with an effusion.
+ * Smooth thinning weight 0..1 of the oblique sinus and superior posterior pericardial reflection behind the left
+ * atrium along torso posterior (`A.laPostN`). Decomposing the transverse offset into superior (`A.colU`) and
+ * left-right components keeps the full effusion around the inferior/lateral ventricles and right atrium while
+ * tapering smoothly up behind the left atrial roof and aortic root where the pericardium reflects onto the
+ * pulmonary veins and great vessels.
  */
-export function buildParietalSac(m: HeartModel, A: AnchorsCached, ed: ChamberPose): ParietalSac {
-  const reach = PERICARDIUM_CM + m.anatomy.pericardium.effusionCm;
+export function obliqueSinusWeight(x0: number, y: number, z: number, A: AnchorsCached): number {
+  const lc = A.laCentroid;
+  const lr = A.laR;
+  const pn = A.laPostN;
+  const u = A.colU;
+  const dx = x0 - lc.x;
+  const dy = y - lc.y;
+  const dz = z - lc.z;
+  const post = dx * pn.x + dy * pn.y + dz * pn.z;
+  if (post <= 0) return 0;
+  const rPost = Math.hypot(pn.x * lr.x, pn.y * lr.y, pn.z * lr.z);
+  const behind = post / Math.max(0.5, rPost);
+  // Project transverse vector onto torso superior (u) and left-right (perpendicular to both pn and u).
+  // Keep thinning active superiorly behind the LA roof / arterial reflection, while tapering inferiorly at the AV groove.
+  const sup = dx * u.x + dy * u.y + dz * u.z;
+  const lat2 = Math.max(0, dx * dx + dy * dy + dz * dz - post * post - sup * sup);
+  const supNeg = Math.min(0, sup);
+  const supExcess = Math.max(0, sup - 2.6);
+  const rLat = Math.max(1.2, lr.x);
+  const rInf = Math.max(1.0, lr.z);
+  const footprint =
+    lat2 / (rLat * rLat) + (supNeg * supNeg + supExcess * supExcess) / (rInf * rInf);
+  const tb = Math.min(1, Math.max(0, behind / OBLIQUE_SINUS_BEHIND));
+  const tf = Math.min(
+    1,
+    Math.max(
+      0,
+      (footprint - OBLIQUE_SINUS_FOOTPRINT_FROM) /
+        (OBLIQUE_SINUS_FOOTPRINT_TO - OBLIQUE_SINUS_FOOTPRINT_FROM),
+    ),
+  );
+  return tb * tb * (3 - 2 * tb) * (1 - tf * tf * (3 - 2 * tf));
+}
+
+/**
+ * Tabulate the still parietal pericardial sac around the heart once per case with an effusion:
+ * around the ventricles and free walls it holds the full effusion (`heartEnvelope` at ED + effusion);
+ * over the posterior left atrium (oblique sinus, along `A.laPostN`) it blends the sac radius smoothly
+ * between the full effusion and the oblique-sinus radius (`OBLIQUE_SINUS_EFFUSION_CM`), staying clear
+ * of the beating and swinging heart across all `poses` (ED, ES, and swing extremes). Blending the radii
+ * directly with `obliqueSinusWeight` evaluated on the heart surface avoids any radial-cliff discontinuities
+ * in the 48×25 spherical table while keeping the parietal sheet 100% still over the beat.
+ */
+export function buildParietalSac(
+  m: HeartModel,
+  A: AnchorsCached,
+  ed: ChamberPose,
+  poses: readonly ChamberPose[] = [ed],
+  epicardiumAt?: (hp: ChamberPose, x0: number, y: number, z: number) => number,
+): ParietalSac {
+  const eff = m.anatomy.pericardium.effusionCm;
+  const thin = Math.min(eff, OBLIQUE_SINUS_EFFUSION_CM);
+  const reachFull = PERICARDIUM_CM + eff;
+  const reachThin = PERICARDIUM_CM + thin;
+  // Margin over the bilinear 48×25 table's cell slack so the interpolated still face keeps the full sinus film
+  const sinusFilm = PERICARDIUM_CM + thin + 0.12;
   const C = m.boundCenter;
   const r = new Float64Array(PARIETAL_AZ_BINS * PARIETAL_POLAR_BINS);
-  const full = (dx: number, dy: number, dz: number, t: number): number =>
-    heartEnvelope(m, A, ed, C.x + dx * t, C.y + dy * t, C.z + dz * t) - reach;
+  const envAt = (dx: number, dy: number, dz: number, t: number): number =>
+    heartEnvelope(m, A, ed, C.x + dx * t, C.y + dy * t, C.z + dz * t);
+  const heartAt = (dx: number, dy: number, dz: number, t: number): number => {
+    const px = C.x + dx * t,
+      py = C.y + dy * t,
+      pz = C.z + dz * t;
+    let dMin = Infinity;
+    for (let k = 0; k < poses.length; k++) {
+      const d = epicardiumAt!(poses[k]!, px, py, pz);
+      if (d < dMin) dMin = d;
+    }
+    return dMin;
+  };
+  const findRoot = (
+    fn: (t: number) => number,
+    tStart: number,
+    tMax: number,
+  ): number => {
+    let t = tStart,
+      step = 0,
+      f = fn(t);
+    while (f < 0 && t < tMax) {
+      step = Math.max(0.5 * -f, 0.02);
+      t += step;
+      f = fn(t);
+    }
+    let lo = Math.max(tStart, t - step),
+      hi = Math.min(tMax, t);
+    for (let k = 0; k < 10; k++) {
+      const mid = 0.5 * (lo + hi);
+      if (fn(mid) < 0) lo = mid;
+      else hi = mid;
+    }
+    return 0.5 * (lo + hi);
+  };
   for (let j = 0; j < PARIETAL_POLAR_BINS; j++) {
     const phi = (Math.PI * j) / (PARIETAL_POLAR_BINS - 1);
     const pole = j === 0 || j === PARIETAL_POLAR_BINS - 1;
@@ -307,22 +377,21 @@ export function buildParietalSac(m: HeartModel, A: AnchorsCached, ed: ChamberPos
       const dx = Math.sin(phi) * Math.cos(th),
         dy = Math.sin(phi) * Math.sin(th),
         dz = Math.cos(phi);
-      let t = 0,
-        step = 0,
-        f = full(dx, dy, dz, 0);
-      while (f < 0 && t < m.boundRadius) {
-        step = Math.max(0.5 * -f, 0.02);
-        t += step;
-        f = full(dx, dy, dz, t);
+      const rThinEnv = findRoot((t) => envAt(dx, dy, dz, t) - reachThin, 0, m.boundRadius);
+      const rFull = findRoot((t) => envAt(dx, dy, dz, t) - reachFull, rThinEnv, m.boundRadius);
+      const w = epicardiumAt
+        ? obliqueSinusWeight(C.x + dx * rThinEnv, C.y + dy * rThinEnv, C.z + dz * rThinEnv, A)
+        : 0;
+      if (w <= 0) {
+        r[j * PARIETAL_AZ_BINS + i] = rFull;
+        continue;
       }
-      let lo = t - step,
-        hi = t;
-      for (let k = 0; k < 10; k++) {
-        const mid = 0.5 * (lo + hi);
-        if (full(dx, dy, dz, mid) < 0) lo = mid;
-        else hi = mid;
-      }
-      r[j * PARIETAL_AZ_BINS + i] = 0.5 * (lo + hi);
+      const rSinus = findRoot(
+        (t) => heartAt(dx, dy, dz, t) - sinusFilm,
+        rThinEnv,
+        rFull,
+      );
+      r[j * PARIETAL_AZ_BINS + i] = rFull - (rFull - rSinus) * w;
     }
   }
   return { cx: C.x, cy: C.y, cz: C.z, r };
@@ -406,34 +475,20 @@ export function classifyPericardium(c: ClassifyCtx): boolean {
   const dPaEpi = pulmonaryTrunkEpiDistance(A, x, y, z);
   // the cardiac silhouette is the smooth union of the epicardial surfaces: the grooves between chambers and
   // the space between outflow and root are filled with epicardial fat, and one pericardium wraps the whole heart
-  // the sac lies against the descending aorta and the vertebral body and does not run into them (decision 273)
-  const dEpi = smax(
-    smin(
-      smin(smin(dLvSac, dRvEpi, 0.8), smin(dLaEpi, dRaEpi, 0.8), avGrooveBlend(c.zHinge - z)),
-      smin(dRvotEpi, dPaEpi, 0.8),
-      0.8,
-    ),
-    PERICARDIUM_CM - c.colDist,
-    0.2,
+  // the sac lies against the descending aorta, esophagus and vertebral body and does not run into them (decision 273)
+  const rawEpi = smin(
+    smin(smin(dLvSac, dRvEpi, 0.8), smin(dLaEpi, dRaEpi, 0.8), avGrooveBlend(c.zHinge - z)),
+    smin(dRvotEpi, dPaEpi, 0.8),
+    0.8,
   );
+  c.rawEpi = rawEpi;
+  const dEpi = smax(rawEpi, PERICARDIUM_CM - c.colDist, 0.2);
   // the parietal layer over an effusion is the fixed sac (ParietalSac), read at the point before the tamponade swing: the
-  // heart beats and swings inside it, but over the oblique sinus, where the layer rests on the heart (parietalSdf). While
-  // the anchors are being fitted it is not built yet, and no effusion is drawn.
+  // heart beats and swings inside it, including over the oblique sinus where the still sac clears all cycle extremes.
   const sac = A.parietal;
-  const la = A.laCenter,
-    lr = A.laR;
   const x0 = x + hp.swingX;
   const par =
-    hp.effusion > 0 && sac
-      ? parietalSdf(
-          hp.effusion,
-          parietalSacDistance(sac, x0, y, z),
-          dEpi,
-          (la.y - y) / lr.y,
-          ((x0 - la.x) / lr.x) ** 2 + ((z - la.z) / lr.z) ** 2,
-          c.colDist,
-        )
-      : 1e3;
+    hp.effusion > 0 && sac ? parietalSdf(parietalSacDistance(sac, x0, y, z), c.colDist) : 1e3;
   c.parietal = par;
   if (dEpi < 0) {
     setSample(out, Tissue.Fat, dEpi, nx0, ny0, nz0, x, y, z, 0, Structure.EpicardialFat);

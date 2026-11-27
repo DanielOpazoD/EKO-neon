@@ -33,7 +33,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
   vec3 bd = p - vec3(BOUND_CX, BOUND_CY, BOUND_CZ);
   if (dot(bd, bd) > BOUND_R * BOUND_R) { s.sdf = vascularDistance; return false; }
   // the descending aorta and the vertebral body, which the heart yields to (decision 273)
-  float colDist = posteriorColumnDistance(p0.x, p0.y, p0.z, COL_UX, COL_UY, COL_UZ, COL_AX, COL_AY, COL_AZ, COL_SX, COL_SY, COL_SZ);
+  float colDist = posteriorColumnDistance(p0.x, p0.y, p0.z, COL_UX, COL_UY, COL_UZ, COL_AX, COL_AY, COL_AZ, COL_SX, COL_SY, COL_SZ, LA_PNX, LA_PNY, LA_PNZ);
   float zAnn = ZANN;
   // end of classifyChambers
 
@@ -643,8 +643,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // decision 387: the atrioventricular groove's blend narrows above the groove
     float dEpi = smax(smin(smin(smin(dLvSac, dRvEpi, 0.8), smin(dLaEpi, dRaEpi, 0.8), avGrooveBlend(zHinge - z)), smin(dRvotEpi, dPaEpi, 0.8), 0.8), PERICARDIUM_CM - colDist, 0.2);
     // over an effusion the parietal layer is the fixed sac (pericardium.ts ParietalSac), read before the swing, thin
-    // behind the left atrium (decision 255), where it rests on the heart of the moment (parietalSdf)
-    float par = EFFUSION > 0.0 ? parietalSdf(EFFUSION, parietalSacDistance(p0.x, p0.y, p0.z), dEpi, (la.y - y) / lr.y, ((p0.x - la.x) / lr.x) * ((p0.x - la.x) / lr.x) + ((z - la.z) / lr.z) * ((z - la.z) / lr.z), colDist) : 1e3;
+    // still parietal sac (ParietalSac already incorporates oblique sinus thinning and motion clearance)
+    float par = EFFUSION > 0.0 ? parietalSdf(parietalSacDistance(p0.x, p0.y, p0.z), colDist) : 1e3;
     vec3 nEpi = n0;
     if (dEpi < 0.0) {
       setSample(s, T_FAT, dEpi, nEpi, p, 0.0, S_EPI_FAT);

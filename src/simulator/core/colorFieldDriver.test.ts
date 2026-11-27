@@ -259,3 +259,44 @@ test('the GPU field is not taken for a frame it was not shaded for', () => {
   assert.equal(sameField(cf.colorVel!, fake.shown.vel), 0);
   core.dispose();
 });
+
+test('Color Doppler updates on every acquired frame on both CPU and GPU deferred paths (no half-rate skip)', () => {
+  const live = apicalColourInput('normal-excellent');
+  const core = new SimulatorCore(loadCaseById('normal-excellent'), live);
+
+  // 1. CPU path: every newly acquired cine frame must advance the Color field version (not skip odd frames)
+  const versions: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    nextFrame(core);
+    versions.push(core.lastColorField.version);
+  }
+  for (let i = 1; i < versions.length; i++) {
+    assert.equal(
+      versions[i],
+      versions[i - 1]! + 1,
+      `CPU Color Doppler skipped frame ${i}: versions=${versions.join(',')}`,
+    );
+  }
+
+  // 2. GPU deferred path: consecutive calls to stepDeferredGpu with unchanged probe/settings must shade every frame
+  const cf = cineOf(core).newest!;
+  let shadeCalls = 0;
+  const countingGpu = {
+    hasDeferredDoppler: true,
+    shadeDoppler: () => {
+      shadeCalls++;
+      return true;
+    },
+  } as unknown as Webgl2Renderer;
+  const driver = new ColorFieldDriver();
+  const baseCtx = updateContextOf(cf, core);
+  for (let i = 0; i < 4; i++) {
+    assert.equal(
+      driver.stepDeferredGpu({ ...baseCtx, timeS: baseCtx.timeS + i * 0.05 }, countingGpu),
+      true,
+    );
+  }
+  assert.equal(shadeCalls, 4, `GPU deferred Doppler should shade every acquired frame, got ${shadeCalls}/4`);
+  assert.equal(driver.version, 4);
+  core.dispose();
+});
