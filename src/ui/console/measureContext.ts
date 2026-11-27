@@ -1,4 +1,9 @@
-import { fractionalAreaChange } from '@/clinical/formulas';
+import {
+  fractionalAreaChange,
+  fractionalShorteningPct,
+  lvMassDevereuxG,
+  relativeWallThickness,
+} from '@/clinical/formulas';
 import { biplaneVolume } from '@/education/report';
 import {
   MEASUREMENT_SPECS,
@@ -148,8 +153,55 @@ export interface PlaneSimpsonSummary {
   esTimeS: number;
 }
 
+export interface PlaneLaSummary {
+  volumeMl: number;
+  areaCm2: number | null;
+  longAxisCm: number | null;
+  frameId: number;
+  timeS: number;
+}
+
+export interface AutoLaSummary {
+  hasResult: boolean;
+  volumeMl: number | null;
+  biplane: boolean;
+  a4cDone: boolean;
+  a2cDone: boolean;
+  a4c: PlaneLaSummary | null;
+  a2c: PlaneLaSummary | null;
+  /** True when A4C and A2C LA long axes differ by > 0.5 cm (ASE/EACVI 2015 guideline). */
+  lengthMismatch: boolean;
+  esFrameId: number | null;
+  esTimeS: number | null;
+  /** Ready on the current 2D apical view (always null in exam mode so view identity stays hidden). */
+  viewReady: boolean | null;
+}
+
+export interface AutoPlaxSummary {
+  hasResult: boolean;
+  ivsdCm: number | null;
+  lvEddCm: number | null;
+  lvpwdCm: number | null;
+  lvEsdCm: number | null;
+  lvotCm: number | null;
+  aoRootCm: number | null;
+  laApCm: number | null;
+  fsPct: number | null;
+  rwt: number | null;
+  massG: number | null;
+  edFrameId: number | null;
+  edTimeS: number | null;
+  midSysFrameId: number | null;
+  midSysTimeS: number | null;
+  esFrameId: number | null;
+  esTimeS: number | null;
+  /** Ready on the current 2D PLAX view (always null in exam mode so view identity stays hidden). */
+  viewReady: boolean | null;
+}
+
 export interface AutoEfPanelState {
   is2dReady: boolean;
+  plax: AutoPlaxSummary;
   lv: AutoEfChamberSummary & {
     a4cDone: boolean;
     a2cDone: boolean;
@@ -159,6 +211,7 @@ export interface AutoEfPanelState {
     /** True when A4C and A2C ED long axes differ by >10% (ASE/EACVI foreshortening alert). */
     lengthMismatch: boolean;
   };
+  la: AutoLaSummary;
   rv: AutoEfChamberSummary & {
     facPct: number | null;
     edAreaCm2: number | null;
@@ -205,7 +258,22 @@ function planeSimpsonSummary(
   };
 }
 
-/** Structured summary for the Auto-FE VI/VD workspace, respecting exam privacy when `showViewFeedback` is false. */
+function planeLaSummary(
+  ms: readonly Measurement[],
+  view: 'a4c' | 'a2c',
+): PlaneLaSummary | null {
+  const m = latestByIdAndView(ms, 'la-volume', view);
+  if (!m || !(m.value > 0)) return null;
+  return {
+    volumeMl: m.value,
+    areaCm2: m.derived?.areaCm2 ?? null,
+    longAxisCm: m.derived?.longAxisCm ?? null,
+    frameId: m.frameId,
+    timeS: m.timeS,
+  };
+}
+
+/** Structured summary for the 2D automatic measurements workspace (PLAX, LV, LA, RV), respecting exam privacy when `showViewFeedback` is false. */
 export function summarizeAutoEf(
   measurements: readonly Measurement[],
   currentViewId: string | null,
@@ -213,6 +281,31 @@ export function summarizeAutoEf(
   showViewFeedback: boolean,
 ): AutoEfPanelState {
   const is2dReady = modality === '2d' || modality === 'color';
+
+  const ivsdM = latestByMeasurementId(measurements, 'ivsd');
+  const lvEddM = latestByMeasurementId(measurements, 'lv-edd');
+  const lvpwdM = latestByMeasurementId(measurements, 'lvpwd');
+  const lvEsdM = latestByMeasurementId(measurements, 'lv-esd');
+  const lvotM = latestByMeasurementId(measurements, 'lvot-diameter');
+  const aoRootM = latestByMeasurementId(measurements, 'aortic-root');
+  const laApM = latestByMeasurementId(measurements, 'la-ap');
+  const plaxEdM = lvEddM ?? ivsdM ?? lvpwdM ?? aoRootM;
+  const plaxEsM = lvEsdM ?? laApM;
+  const fsPct =
+    lvEddM && lvEsdM && lvEddM.value > 0
+      ? fractionalShorteningPct(lvEddM.value, lvEsdM.value)
+      : null;
+  const rwt =
+    lvEddM && lvpwdM && lvEddM.value > 0
+      ? relativeWallThickness(lvEddM.value, lvpwdM.value)
+      : null;
+  const massG =
+    lvEddM && ivsdM && lvpwdM && lvEddM.value > 0 && ivsdM.value > 0 && lvpwdM.value > 0
+      ? lvMassDevereuxG(lvEddM.value, ivsdM.value, lvpwdM.value)
+      : null;
+  const plaxHasResult = Boolean(
+    ivsdM || lvEddM || lvpwdM || lvEsdM || lvotM || aoRootM || laApM,
+  );
 
   const lvEdvM = latestByMeasurementId(measurements, 'lv-edv-simpson');
   const lvEsvM = latestByMeasurementId(measurements, 'lv-esv-simpson');
@@ -232,6 +325,16 @@ export function summarizeAutoEf(
         0.1 * Math.max(lvEdvBi.a4cLongAxisCm, lvEdvBi.a2cLongAxisCm),
   );
 
+  const laLatest = latestByMeasurementId(measurements, 'la-volume');
+  const laBi = biplaneVolume(measurements as Measurement[], 'la-volume');
+  const laBiplane = Boolean(laBi && laBi.volumeMl > 0);
+  const laVolMl = laBiplane ? laBi!.volumeMl : (laLatest?.value ?? null);
+  const laA4c = planeLaSummary(measurements, 'a4c');
+  const laA2c = planeLaSummary(measurements, 'a2c');
+  const laLengthMismatch = Boolean(
+    laBi && Math.abs(laBi.a4cLongAxisCm - laBi.a2cLongAxisCm) > 0.5,
+  );
+
   const rvEdvM = latestByMeasurementId(measurements, 'rv-edv');
   const rvEsvM = latestByMeasurementId(measurements, 'rv-esv');
   const rvEdv = rvEdvM?.value ?? null;
@@ -244,7 +347,11 @@ export function summarizeAutoEf(
       ? fractionalAreaChange(rvEdArea, rvEsArea)
       : null;
 
+  const plaxViewReady = showViewFeedback ? is2dReady && currentViewId === 'plax' : null;
   const lvViewReady = showViewFeedback
+    ? is2dReady && (currentViewId === 'a4c' || currentViewId === 'a2c')
+    : null;
+  const laViewReady = showViewFeedback
     ? is2dReady && (currentViewId === 'a4c' || currentViewId === 'a2c')
     : null;
   const rvViewReady = showViewFeedback
@@ -253,6 +360,26 @@ export function summarizeAutoEf(
 
   return {
     is2dReady,
+    plax: {
+      hasResult: plaxHasResult,
+      ivsdCm: ivsdM?.value ?? null,
+      lvEddCm: lvEddM?.value ?? null,
+      lvpwdCm: lvpwdM?.value ?? null,
+      lvEsdCm: lvEsdM?.value ?? null,
+      lvotCm: lvotM?.value ?? null,
+      aoRootCm: aoRootM?.value ?? null,
+      laApCm: laApM?.value ?? null,
+      fsPct,
+      rwt,
+      massG,
+      edFrameId: plaxEdM?.frameId ?? null,
+      edTimeS: plaxEdM?.timeS ?? null,
+      midSysFrameId: lvotM?.frameId ?? null,
+      midSysTimeS: lvotM?.timeS ?? null,
+      esFrameId: plaxEsM?.frameId ?? null,
+      esTimeS: plaxEsM?.timeS ?? null,
+      viewReady: plaxViewReady,
+    },
     lv: {
       hasResult: lvEf !== null && lvEdv !== null && lvEsv !== null,
       edvMl: lvEdv,
@@ -270,6 +397,19 @@ export function summarizeAutoEf(
       a4c,
       a2c,
       lengthMismatch,
+    },
+    la: {
+      hasResult: laVolMl !== null && laVolMl > 0,
+      volumeMl: laVolMl,
+      biplane: laBiplane,
+      a4cDone: laA4c !== null,
+      a2cDone: laA2c !== null,
+      a4c: laA4c,
+      a2c: laA2c,
+      lengthMismatch: laLengthMismatch,
+      esFrameId: laLatest?.frameId ?? null,
+      esTimeS: laLatest?.timeS ?? null,
+      viewReady: laViewReady,
     },
     rv: {
       hasResult: rvEf !== null && rvEdv !== null && rvEsv !== null,
@@ -351,7 +491,7 @@ export function computeQuickStudySteps(
       status: plaxDone ? 'done' : 'pending',
       detail: null,
       active: currentViewId === 'plax',
-      tip: 'PLAX: mide DTDVI o diámetro del TSVI',
+      tip: 'PLAX: Auto-PLAX (DTDVI, paredes, raíz Ao, TSVI ⌀ y AI)',
     },
     {
       id: 'lv-ef',

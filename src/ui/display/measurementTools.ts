@@ -1,4 +1,4 @@
-import { rvVolumeFromAreaMl } from '@/clinical/formulas';
+import { circularArea, rvVolumeFromAreaMl } from '@/clinical/formulas';
 import { evaluateTechnique } from '@/education/technique';
 import { frameBus } from '@/app/frameBus';
 import { evaluateCapture, specFor, type CaptureExtras } from '@/app/measurementCapture';
@@ -13,7 +13,12 @@ import type {
   AutoDopplerTargetResult,
   DopplerTargetId,
 } from '@/simulator/measurements/autoDopplerTarget';
+import type {
+  AutoLaVolumeResult,
+  AutoLaVolumeSuccess,
+} from '@/simulator/measurements/autoLaVolume';
 import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
+import type { AutoPlaxResult, AutoPlaxSuccess } from '@/simulator/measurements/autoPlax';
 import {
   polygonAreaCm2,
   type AutoChamberFrameSnapshot,
@@ -727,6 +732,149 @@ export async function runAutoChamberVolume(chamber: ChamberId): Promise<AutoCham
     };
   }
   if (res.result.ok) commitAutoChamberVolume(res.result);
+  return res.result;
+}
+
+/**
+ * Commit an automatic end-systolic LA Simpson volume measurement to the store and freeze on the
+ * ES frame so the traced atrial contour is immediately visible and drag-editable.
+ */
+export function commitAutoLaVolume(res: AutoLaVolumeSuccess): void {
+  const st = useSimStore.getState();
+  const spec = specFor('la-volume');
+  const acquiredMode = res.acquisition.modality;
+  const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+  const technique = spec
+    ? evaluateTechnique(spec, {
+        modality: acquiredMode,
+        viewId: res.viewId,
+        viewScore: res.viewScore,
+        phase: res.phase,
+        phaseMarks: res.acquisition.phaseMarks ?? st.phaseMarks,
+        gate: null,
+        segmentStructures: res.interiorStructures,
+        cutByDepth: res.cutByDepth,
+        userAssisted: true,
+      })
+    : null;
+
+  if (!st.frozen) st.toggleFreeze();
+  st.addMeasurement({
+    id: `m${Date.now().toString(36)}la${Math.floor(Math.random() * 1e3)}`,
+    kind: 'volume',
+    measurementId: spec ? spec.id : 'la-volume',
+    technique,
+    label: spec ? spec.label : 'Volumen de AI',
+    value: res.volumeMl,
+    units: 'mL',
+    modality,
+    sourceViewId: res.viewId,
+    viewScore: res.viewScore,
+    frameId: res.frameId,
+    phase: res.phase,
+    timeS: res.timeS,
+    geometry: res.contourPx,
+    captureSector: { ...res.sector },
+    acquisition: res.acquisition,
+    beatIndex: res.beatIndex,
+    rrS: res.rrS,
+    derived: {
+      areaCm2: res.areaCm2,
+      longAxisCm: res.longAxisCm,
+    },
+    imageQualityScore: res.gainScore,
+    userAssisted: true,
+    referenceGuidelineIds: spec ? spec.referenceIds : ['ase-eacvi-chamber-2015'],
+    createdAt: new Date().toISOString(),
+  });
+  useSimStore.getState().jumpCinePhase('es', res.frameId);
+}
+
+/** Request automatic 2D end-systolic LA volume tracing (A4C / A2C) over the current cine loop. */
+export async function runAutoLaVolume(): Promise<AutoLaVolumeResult> {
+  const res = await frameBus.request({ kind: 'autoLaVolume' });
+  if (!res || res.kind !== 'autoLaVolume') {
+    return {
+      ok: false,
+      reason: 'no-frame',
+      message: 'El simulador no respondió al cálculo automático del volumen de AI.',
+    };
+  }
+  if (res.result.ok) commitAutoLaVolume(res.result);
+  return res.result;
+}
+
+/**
+ * Commit the automatic PLAX linear caliper batch (ED: IVSd/LVEDD/LVPWd/Ao root, mid-systole: LVOT,
+ * ES: LVESD/LA AP) and freeze on the ED frame so the calipers are immediately visible and editable.
+ */
+export function commitAutoPlax(res: AutoPlaxSuccess): void {
+  const st = useSimStore.getState();
+  const now = new Date().toISOString();
+  const baseId = Date.now().toString(36);
+
+  if (!st.frozen) st.toggleFreeze();
+  res.calipers.forEach((c, idx) => {
+    const spec = specFor(c.measurementId);
+    const acquiredMode = c.acquisition.modality;
+    const modality = acquiredMode === 'color' ? '2d' : acquiredMode;
+    const technique = spec
+      ? evaluateTechnique(spec, {
+          modality: acquiredMode,
+          viewId: c.viewId,
+          viewScore: c.viewScore,
+          phase: c.phase,
+          phaseMarks: c.acquisition.phaseMarks ?? st.phaseMarks,
+          gate: null,
+          segmentStructures: c.segmentStructures,
+          segmentEndsOutside: c.segmentEndsOutside,
+          userAssisted: true,
+        })
+      : null;
+
+    st.addMeasurement({
+      id: `m${baseId}p${idx}${Math.floor(Math.random() * 1e3)}`,
+      kind: 'linear',
+      measurementId: spec ? spec.id : c.measurementId,
+      technique,
+      label: spec ? spec.label : c.measurementId,
+      value: c.valueCm,
+      units: 'cm',
+      modality,
+      sourceViewId: c.viewId,
+      viewScore: c.viewScore,
+      frameId: c.frameId,
+      phase: c.phase,
+      timeS: c.timeS,
+      geometry: [c.aPx, c.bPx],
+      captureSector: { ...c.sector },
+      acquisition: c.acquisition,
+      beatIndex: c.beatIndex,
+      rrS: c.rrS,
+      ...(c.measurementId === 'lvot-diameter'
+        ? { derived: { areaCm2: circularArea(c.valueCm) } }
+        : {}),
+      imageQualityScore: c.gainScore,
+      userAssisted: true,
+      referenceGuidelineIds: spec ? spec.referenceIds : ['ase-eacvi-chamber-2015'],
+      createdAt: now,
+    });
+  });
+
+  useSimStore.getState().jumpCinePhase('ed', res.edFrameId);
+}
+
+/** Request automatic 2D PLAX linear dimensions across ED, mid-systole, and ES over the cine loop. */
+export async function runAutoPlax(): Promise<AutoPlaxResult> {
+  const res = await frameBus.request({ kind: 'autoPlax' });
+  if (!res || res.kind !== 'autoPlax') {
+    return {
+      ok: false,
+      reason: 'no-frame',
+      message: 'El simulador no respondió a las mediciones automáticas en PLAX.',
+    };
+  }
+  if (res.result.ok) commitAutoPlax(res.result);
   return res.result;
 }
 

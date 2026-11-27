@@ -24,8 +24,11 @@ import { truthFor } from './scoring/scoring';
 export { aggregateProtocolMeasurement, multiBeatAverages, type MeasurementAggregate };
 import {
   fractionalAreaChange,
+  fractionalShorteningPct,
+  lvMassDevereuxG,
   mvaFromPht,
   pisaEroaCm2,
+  relativeWallThickness,
   rvspFromTr,
   simpsonBiplaneVolume,
 } from '@/clinical/formulas';
@@ -271,6 +274,52 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       formula: `V / SC (normal ≤ ${LA_VOLUME_INDEX_MAX} mL/m²)`,
       inputs: `${laBi ? 'biplano' : 'monoplano'} ${laVolume.toFixed(0)} mL / ${bsaM2.toFixed(2)} m²`,
     });
+  }
+  const lvEddAgg = agg('lv-edd'),
+    lvEsdAgg = agg('lv-esd'),
+    ivsdAgg = agg('ivsd'),
+    lvpwdAgg = agg('lvpwd');
+  const lvEdd = lvEddAgg?.value ?? null,
+    lvEsd = lvEsdAgg?.value ?? null,
+    ivsd = ivsdAgg?.value ?? null,
+    lvpwd = lvpwdAgg?.value ?? null;
+  if (lvEdd !== null && lvEsd !== null && lvEdd > 0) {
+    rows.push({
+      id: 'lv-fs',
+      label: 'Fracción de acortamiento (VI)',
+      value: `${fractionalShorteningPct(lvEdd, lvEsd).toFixed(0)} %`,
+      formula: '(DTDVI − DTSVI) / DTDVI',
+      inputs: `DTDVI ${lvEdd.toFixed(2)} cm${beatNote(lvEddAgg)}, DTSVI ${lvEsd.toFixed(2)} cm${beatNote(lvEsdAgg)}`,
+    });
+  }
+  if (lvEdd !== null && lvpwd !== null && lvEdd > 0 && lvpwd > 0) {
+    const rwt = relativeWallThickness(lvEdd, lvpwd);
+    rows.push({
+      id: 'lv-rwt',
+      label: 'Grosor parietal relativo (GPR)',
+      value: `${rwt.toFixed(2)}${rwt > 0.42 ? ' (concéntrico)' : ''}`,
+      formula: '2·PPd / DTDVI (normal ≤ 0,42)',
+      inputs: `PPd ${lvpwd.toFixed(2)} cm${beatNote(lvpwdAgg)}, DTDVI ${lvEdd.toFixed(2)} cm${beatNote(lvEddAgg)}`,
+    });
+  }
+  if (lvEdd !== null && ivsd !== null && lvpwd !== null && lvEdd > 0 && ivsd > 0 && lvpwd > 0) {
+    const massG = lvMassDevereuxG(lvEdd, ivsd, lvpwd);
+    rows.push({
+      id: 'lv-mass',
+      label: 'Masa del VI (Devereux)',
+      value: `${massG.toFixed(0)} g`,
+      formula: '0,8·1,04·[(DTD + SIV + PP)³ − DTD³] + 0,6',
+      inputs: `DTD ${lvEdd.toFixed(2)}, SIV ${ivsd.toFixed(2)}, PP ${lvpwd.toFixed(2)} cm`,
+    });
+    if (bsaM2 !== null && bsaM2 > 0) {
+      rows.push({
+        id: 'lv-mass-index',
+        label: 'Índice de masa del VI (IMVI)',
+        value: `${(massG / bsaM2).toFixed(0)} g/m²`,
+        formula: 'Masa VI / SC',
+        inputs: `${massG.toFixed(0)} g / ${bsaM2.toFixed(2)} m²`,
+      });
+    }
   }
   const lvotDAgg = agg('lvot-diameter'),
     lvotVtiAgg = agg('lvot-vti');

@@ -3,6 +3,8 @@ import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { computeAutoChamberVolume } from '@/simulator/measurements/autoVolume';
+import { computeAutoLaVolume } from '@/simulator/measurements/autoLaVolume';
+import { computeAutoPlaxMeasurements } from '@/simulator/measurements/autoPlax';
 import { findLvotGateFromPolar } from '@/simulator/measurements/autoLvotGate';
 import { findDopplerTargetFromPolar } from '@/simulator/measurements/autoDopplerTarget';
 import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
@@ -105,6 +107,28 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
       req.chamber,
     );
     return { kind: 'autoChamberVolume', result };
+  }
+  if (req.kind === 'autoLaVolume') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    const result = computeAutoLaVolume(
+      ctx.cine,
+      refFrame,
+      ctx.phaseMarks(),
+      ctx.input.display,
+      ctx.input.settings,
+    );
+    return { kind: 'autoLaVolume', result };
+  }
+  if (req.kind === 'autoPlax') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    const result = computeAutoPlaxMeasurements(
+      ctx.cine,
+      refFrame,
+      ctx.phaseMarks(),
+      ctx.input.display,
+      ctx.input.settings,
+    );
+    return { kind: 'autoPlax', result };
   }
   if (req.kind === 'autoLvotGate') {
     const refFrame = ctx.displayedFrame ?? ctx.cine.newest;

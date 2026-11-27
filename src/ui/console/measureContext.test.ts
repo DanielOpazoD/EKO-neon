@@ -171,6 +171,80 @@ describe('measurement context & compatibility helpers', () => {
     const sExam = summarizeAutoEf(withA2c, 'a4c', '2d', false);
     assert.equal(sExam.lv.viewReady, null);
     assert.equal(sExam.rv.viewReady, null);
+    assert.equal(sExam.plax.viewReady, null);
+    assert.equal(sExam.la.viewReady, null);
+  });
+
+  it('summarizes PLAX linear dimensions (with Devereux mass/RWT/FS) and LA monoplane/biplane progression', () => {
+    const mkLin = (
+      id: string,
+      value: number,
+      frameId: number,
+      phase: number,
+    ): Measurement => ({
+      ...makeSimp('lv-edv-simpson', 'plax', value, frameId),
+      kind: 'linear',
+      measurementId: id,
+      units: 'cm',
+      phase,
+      geometry: [
+        { x: 120, y: 120 },
+        { x: 120, y: 200 },
+      ],
+    });
+    const mkLa = (view: 'a4c' | 'a2c', val: number, frameId: number, lenPx = 100): Measurement => ({
+      ...makeSimp('lv-esv-simpson', view, val, frameId),
+      measurementId: 'la-volume',
+      geometry: [
+        { x: 170, y: 200 },
+        { x: 165, y: 200 + lenPx * 0.5 },
+        { x: 190, y: 200 + lenPx },
+        { x: 215, y: 200 + lenPx * 0.5 },
+        { x: 210, y: 200 },
+      ],
+      derived: { areaCm2: 18.5, longAxisCm: lenPx / 20 },
+    });
+
+    const ms = [
+      mkLin('ivsd', 1.0, 11, 0),
+      mkLin('lv-edd', 4.8, 11, 0),
+      mkLin('lvpwd', 0.9, 11, 0),
+      mkLin('lvot-diameter', 2.1, 15, 0.2),
+      mkLin('lv-esd', 3.1, 19, 0.42),
+      mkLin('aortic-root', 3.2, 11, 0),
+      mkLin('la-ap', 3.6, 19, 0.42),
+      mkLa('a4c', 52, 25, 100),
+    ];
+    const sPlax = summarizeAutoEf(ms, 'plax', '2d', true);
+    assert.equal(sPlax.plax.viewReady, true);
+    assert.equal(sPlax.plax.hasResult, true);
+    assert.equal(sPlax.plax.lvEddCm, 4.8);
+    assert.equal(sPlax.plax.lvotCm, 2.1);
+    assert.equal(sPlax.plax.edFrameId, 11);
+    assert.equal(sPlax.plax.midSysFrameId, 15);
+    assert.equal(sPlax.plax.esFrameId, 19);
+    assert.ok((sPlax.plax.massG ?? 0) > 140 && (sPlax.plax.massG ?? 0) < 170);
+    assert.ok(Math.abs((sPlax.plax.rwt ?? 0) - 0.375) < 0.005);
+    assert.ok(Math.abs((sPlax.plax.fsPct ?? 0) - 35.4) < 0.5);
+
+    // Monoplane LA before A2C
+    assert.equal(sPlax.la.hasResult, true);
+    assert.equal(sPlax.la.a4cDone, true);
+    assert.equal(sPlax.la.a2cDone, false);
+    assert.equal(sPlax.la.biplane, false);
+    assert.equal(sPlax.la.volumeMl, 52);
+
+    // Add A2C LA with matching length -> biplane LA
+    const sLaBi = summarizeAutoEf([...ms, mkLa('a2c', 48, 35, 104)], 'a2c', '2d', true);
+    assert.equal(sLaBi.la.viewReady, true);
+    assert.equal(sLaBi.la.biplane, true);
+    assert.equal(sLaBi.la.a4cDone, true);
+    assert.equal(sLaBi.la.a2cDone, true);
+    assert.equal(sLaBi.la.lengthMismatch, false);
+
+    // Add foreshortened A2C LA (>0.5 cm shorter -> ASE lengthMismatch warning)
+    const sLaShort = summarizeAutoEf([...ms, mkLa('a2c', 40, 40, 80)], 'a2c', '2d', true);
+    assert.equal(sLaShort.la.lengthMismatch, true);
   });
 
   it('formats phase tags concisely in Spanish and checks rolling cine window membership', () => {
