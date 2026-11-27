@@ -6,6 +6,10 @@ import { useHudStore, useSimStore } from '@/app/store';
 import type { SimOutput, StripInfo } from '@/simulator/core/protocol';
 import type { AutoTraceBeatResult } from '@/simulator/core/strip/autoTrace';
 import type {
+  AutoStripMeasureResult,
+  AutoStripMeasureTarget,
+} from '@/simulator/core/strip/autoMeasureStrip';
+import type {
   AutoDopplerTargetResult,
   DopplerTargetId,
 } from '@/simulator/measurements/autoDopplerTarget';
@@ -902,4 +906,182 @@ export async function runAutoSpectralVti(
     });
   }
   return traced;
+}
+
+/**
+ * Freeze the active Doppler or M-mode strip and automatically measure Mitral E/A/TD, TDI e′,
+ * TR Vmax, or M-mode TAPSE purely from the rendered strip signal, committing drag-editable
+ * protocol measurements with full technique evaluation.
+ */
+export async function runAutoStripMeasure(
+  target: AutoStripMeasureTarget,
+  opts?: { tdiSite?: 'septal' | 'lateral' },
+): Promise<AutoStripMeasureResult> {
+  const st = useSimStore.getState();
+  const initialHud = useHudStore.getState().hud;
+  const acquiredMod = initialHud?.acquisition?.modality ?? st.modality;
+  const modOk =
+    target === 'tapse'
+      ? acquiredMod === 'm-mode' || acquiredMod === 'cmm'
+      : target === 'tdi-e-prime'
+        ? acquiredMod === 'tdi'
+        : target === 'tr-vmax'
+          ? acquiredMod === 'cw'
+          : acquiredMod === 'pw' || acquiredMod === 'cw';
+  if (!modOk) {
+    return {
+      ok: false,
+      target,
+      reason: 'wrong-modality',
+      message:
+        target === 'tapse'
+          ? 'Activa Modo M sobre el anillo tricuspídeo lateral para medir TAPSE automáticamente.'
+          : target === 'tdi-e-prime'
+            ? 'Activa Doppler tisular (TDI) sobre el anillo mitral para medir e′ automáticamente.'
+            : target === 'tr-vmax'
+              ? 'Activa Doppler continuo (CW) sobre la válvula tricúspide para medir Vmax IT.'
+              : 'Activa Doppler pulsado (PW) sobre las puntas mitrales para medir E / A / TD.',
+    };
+  }
+
+  if (!st.frozen) {
+    st.toggleFreeze();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      } else {
+        setTimeout(resolve, 25);
+      }
+    });
+  }
+
+  const res = await frameBus.request({ kind: 'autoMeasureStrip', target });
+  if (!res || res.kind !== 'autoMeasureStrip') {
+    return {
+      ok: false,
+      target,
+      reason: 'incomplete-beat',
+      message: 'El simulador no respondió a la medición automática de la tira.',
+    };
+  }
+  if (!res.result.ok) return res.result;
+
+  const hud = useHudStore.getState().hud;
+  const expectedKind = target === 'tapse' ? 'm-mode' : 'spectral';
+  if (!hud || hud.strip.kind !== expectedKind) {
+    return {
+      ok: false,
+      target,
+      reason: 'wrong-modality',
+      message: 'No hay una tira compatible visible para registrar la medición.',
+    };
+  }
+
+  const strip = hud.strip;
+  const stateNow = useSimStore.getState();
+  const modeNow = hud.acquisition?.modality ?? stateNow.modality;
+  const pm = hud.acquisition?.phaseMarks ?? stateNow.phaseMarks;
+  const baseId = Date.now().toString(36);
+  const nowIso = new Date().toISOString();
+
+  const yForStripVal = (val: number): number =>
+    strip.y + ((val - strip.topValue) / (strip.bottomValue - strip.topValue)) * strip.height;
+
+  const pushRecord = (
+    suffix: string,
+    specId: string,
+    kind: Measurement['kind'],
+    value: number,
+    units: string,
+    geometry: { x: number; y: number }[],
+    beatIndex: number,
+    derived?: Record<string, number>,
+  ) => {
+    const spec = specFor(specId);
+    stateNow.addMeasurement({
+      id: `m${baseId}${suffix}${Math.floor(Math.random() * 1e3)}`,
+      kind,
+      label: spec ? spec.label : specId,
+      measurementId: spec ? spec.id : specId,
+      technique: evaluateCapture(spec, hud, modeNow, pm, { userAssisted: true }),
+      value,
+      units,
+      modality: modeNow,
+      geometry,
+      captureStrip: { ...strip },
+      acquisition: hud.acquisition,
+      beatIndex,
+      rrS: hud.rrS,
+      ...(derived ? { derived } : {}),
+      frameId: hud.frameId,
+      phase: hud.phase,
+      timeS: hud.timeS,
+      sourceViewId: hud.view?.bestViewId ?? null,
+      viewScore: hud.view?.score ?? null,
+      imageQualityScore: hud.view ? Math.round(hud.view.components.gain * 100) : null,
+      userAssisted: true,
+      referenceGuidelineIds: spec ? spec.referenceIds : ['ase-tte-2019'],
+      createdAt: nowIso,
+    });
+  };
+
+  const out = res.result;
+  if (out.target === 'mitral-inflow') {
+    const ePt = { x: strip.x + out.e.xPx, y: yForStripVal(out.e.velocityMps) };
+    const eAbs = Math.abs(out.e.velocityMps);
+    pushRecord('e', 'mitral-e', 'velocity', eAbs, 'm/s', [ePt], out.beatIndex, {
+      gradientMmHg: 4 * eAbs * eAbs,
+    });
+    if (out.a) {
+      const aPt = { x: strip.x + out.a.xPx, y: yForStripVal(out.a.velocityMps) };
+      const aAbs = Math.abs(out.a.velocityMps);
+      pushRecord('a', 'mitral-a', 'velocity', aAbs, 'm/s', [aPt], out.beatIndex, {
+        gradientMmHg: 4 * aAbs * aAbs,
+      });
+    }
+    if (out.dt) {
+      const p0 = { x: strip.x + out.dt.peakXPx, y: yForStripVal(out.dt.peakVelocityMps) };
+      const p1 = { x: strip.x + out.dt.slopeXPx, y: yForStripVal(out.dt.slopeVelocityMps) };
+      const dtCalc = computeDecelerationTime(p0, p1, strip);
+      if (dtCalc) {
+        pushRecord(
+          'dt',
+          'mitral-dt',
+          'time',
+          dtCalc.dtMs,
+          'ms',
+          [p0, p1, dtCalc.intercept],
+          out.beatIndex,
+          { peakMps: dtCalc.peakMps },
+        );
+      }
+    }
+    return out;
+  }
+
+  if (out.target === 'tdi-e-prime') {
+    const site = opts?.tdiSite ?? 'septal';
+    const specId = site === 'lateral' ? 'e-prime-lateral' : 'e-prime-septal';
+    const pt = { x: strip.x + out.ePrime.xPx, y: yForStripVal(out.ePrime.velocityMps) };
+    const vMps = Math.abs(out.ePrime.velocityMps);
+    pushRecord('ep', specId, 'velocity', vMps * 100, 'cm/s', [pt], out.beatIndex, {
+      gradientMmHg: 4 * vMps * vMps,
+    });
+    return out;
+  }
+
+  if (out.target === 'tr-vmax') {
+    const pt = { x: strip.x + out.vmax.xPx, y: yForStripVal(out.vmax.velocityMps) };
+    const vMps = Math.abs(out.vmax.velocityMps);
+    pushRecord('tr', 'tr-vmax', 'velocity', vMps, 'm/s', [pt], out.beatIndex, {
+      gradientMmHg: out.vmax.peakGradientMmHg,
+    });
+    return out;
+  }
+
+  // target === 'tapse'
+  const edPt = { x: strip.x + out.ed.xPx, y: yForStripVal(out.ed.depthCm) };
+  const esPt = { x: strip.x + out.es.xPx, y: yForStripVal(out.es.depthCm) };
+  pushRecord('tp', 'tapse', 'linear', out.tapseCm, 'cm', [edPt, esPt], out.beatIndex);
+  return out;
 }

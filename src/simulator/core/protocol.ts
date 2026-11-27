@@ -16,6 +16,10 @@ import type {
   DopplerTargetId,
 } from '@/simulator/measurements/autoDopplerTarget';
 import type { AutoTraceBeatResult } from './strip/autoTrace';
+import type {
+  AutoStripMeasureResult,
+  AutoStripMeasureTarget,
+} from './strip/autoMeasureStrip';
 
 /**
  * The backend the user selects (Dev panel). `atlas` wraps the GPU port when available and the CPU tracer
@@ -276,6 +280,8 @@ export type SimRequest =
   | { kind: 'autoDopplerTarget'; target: DopplerTargetId }
   /** Automatically locate the newest complete systolic beat on the spectral strip and trace its envelope. */
   | { kind: 'autoTraceBeat' }
+  /** Automatically measure Mitral E/A/TD, TDI e′, TR Vmax, or M-mode TAPSE from the acquired strip. */
+  | { kind: 'autoMeasureStrip'; target: AutoStripMeasureTarget }
   /**
    * Dev hook (`__echotwin.frameBus.request`): lose the GPU port's WebGL context, or restore the one so lost, through
    * WEBGL_lose_context, to check the recovery in a browser (`core/gpuRecovery.ts`).
@@ -299,6 +305,7 @@ export type SimResponse =
   | { kind: 'autoLvotGate'; result: AutoLvotGateResult }
   | { kind: 'autoDopplerTarget'; result: AutoDopplerTargetResult }
   | { kind: 'autoTraceBeat'; result: AutoTraceBeatResult }
+  | { kind: 'autoMeasureStrip'; result: AutoStripMeasureResult }
   /** Whether there was a live context to lose, or a context lost by the hook to restore. */
   | { kind: 'gpuContext'; ok: boolean };
 

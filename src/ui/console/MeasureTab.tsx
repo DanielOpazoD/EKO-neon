@@ -20,7 +20,9 @@ import {
   runAutoDopplerTarget,
   runAutoLvotGate,
   runAutoSpectralVti,
+  runAutoStripMeasure,
 } from '../display/measurementTools';
+import type { AutoStripMeasureTarget } from '@/simulator/core/strip/autoMeasureStrip';
 import type { DopplerTargetId } from '@/simulator/measurements/autoDopplerTarget';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
@@ -1320,41 +1322,45 @@ function AutoLvotVtiPanel({
   const gateState = useHudStore(
     useShallow((h) => {
       const g = h.hud?.gate;
-      if (!g) return { inLvot: false, angleDeg: null as number | null };
+      if (!g) return { inLvot: false, angleDeg: null as number | null, tdiLateral: false };
       return {
         inLvot: g.structure === Structure.Lvot || g.peakFlowStructure === Structure.Lvot,
         angleDeg: g.flowAngleDeg !== null ? Math.round(g.flowAngleDeg) : null,
+        tdiLateral:
+          g.structure === Structure.LvWallLateral || g.peakFlowStructure === Structure.LvWallLateral,
       };
     }),
   );
-  const [busy, setBusy] = useState<'gate' | 'vti' | 'av-vti' | DopplerTargetId | null>(null);
+  const [busy, setBusy] = useState<
+    'gate' | 'vti' | 'av-vti' | DopplerTargetId | AutoStripMeasureTarget | 'tdi-lat-m' | null
+  >(null);
+  const [tdiSiteHint, setTdiSiteHint] = useState<'septal' | 'lateral'>('septal');
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const isPw = s.modality === 'pw';
   const isCw = s.modality === 'cw';
+  const isTdi = s.modality === 'tdi';
+  const isMmode = s.modality === 'm-mode' || s.modality === 'cmm';
   const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
   const viewTargets =
     presetsEnabled && showViewFeedback && currentViewId
       ? (VIEW_DOPPLER_TARGETS[currentViewId] ?? [])
       : [];
-  const latestVti = useMemo(() => {
+  const latestOfId = (id: string) => {
     for (let i = s.measurements.length - 1; i >= 0; i--) {
-      if (s.measurements[i]!.measurementId === 'lvot-vti') return s.measurements[i]!;
+      if (s.measurements[i]!.measurementId === id) return s.measurements[i]!;
     }
     return null;
-  }, [s.measurements]);
-  const latestAvVti = useMemo(() => {
-    for (let i = s.measurements.length - 1; i >= 0; i--) {
-      if (s.measurements[i]!.measurementId === 'av-vti') return s.measurements[i]!;
-    }
-    return null;
-  }, [s.measurements]);
-  const latestLvotDiam = useMemo(() => {
-    for (let i = s.measurements.length - 1; i >= 0; i--) {
-      if (s.measurements[i]!.measurementId === 'lvot-diameter') return s.measurements[i]!;
-    }
-    return null;
-  }, [s.measurements]);
+  };
+  const latestVti = useMemo(() => latestOfId('lvot-vti'), [s.measurements]);
+  const latestAvVti = useMemo(() => latestOfId('av-vti'), [s.measurements]);
+  const latestLvotDiam = useMemo(() => latestOfId('lvot-diameter'), [s.measurements]);
+  const latestE = useMemo(() => latestOfId('mitral-e'), [s.measurements]);
+  const latestA = useMemo(() => latestOfId('mitral-a'), [s.measurements]);
+  const latestEpSept = useMemo(() => latestOfId('e-prime-septal'), [s.measurements]);
+  const latestEpLat = useMemo(() => latestOfId('e-prime-lateral'), [s.measurements]);
+  const latestTr = useMemo(() => latestOfId('tr-vmax'), [s.measurements]);
+  const latestTapse = useMemo(() => latestOfId('tapse'), [s.measurements]);
   const dopplerSvMl =
     latestVti && latestLvotDiam && latestLvotDiam.value > 0
       ? strokeVolume(latestLvotDiam.value, latestVti.value)
@@ -1365,9 +1371,12 @@ function AutoLvotVtiPanel({
       : null;
   const velocityRatio =
     latestVti && latestAvVti && latestAvVti.value > 0 ? latestVti.value / latestAvVti.value : null;
+  const activeTdiSite: 'septal' | 'lateral' = gateState.tdiLateral ? 'lateral' : tdiSiteHint;
 
   const placeTarget = async (target: Exclude<DopplerTargetId, 'lvot'>) => {
     if (busy || s.closed || !presetsEnabled) return;
+    if (target === 'tdi-septal') setTdiSiteHint('septal');
+    else if (target === 'tdi-lateral') setTdiSiteHint('lateral');
     setBusy(target);
     setNotice(null);
     try {
@@ -1381,6 +1390,46 @@ function AutoLvotVtiPanel({
       setNotice({
         kind: 'err',
         text: e instanceof Error ? e.message : 'Error al posicionar el cursor.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const measureStrip = async (
+    target: AutoStripMeasureTarget,
+    tdiSite?: 'septal' | 'lateral',
+  ) => {
+    if (busy || s.closed) return;
+    setBusy(target === 'tdi-e-prime' && tdiSite === 'lateral' ? 'tdi-lat-m' : target);
+    setNotice(null);
+    try {
+      const res = await runAutoStripMeasure(target, tdiSite ? { tdiSite } : undefined);
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else if (res.target === 'mitral-inflow') {
+        const parts = [`E ${Math.abs(res.e.velocityMps).toFixed(2)} m/s`];
+        if (res.a) parts.push(`A ${Math.abs(res.a.velocityMps).toFixed(2)} m/s`);
+        if (res.dt) parts.push(`TD ${Math.round(res.dt.dtMs)} ms`);
+        setNotice({ kind: 'ok', text: `Llenado mitral: ${parts.join(' · ')}.` });
+      } else if (res.target === 'tdi-e-prime') {
+        const siteLabel = tdiSite === 'lateral' ? 'lateral' : 'septal';
+        setNotice({
+          kind: 'ok',
+          text: `e′ ${siteLabel}: ${(Math.abs(res.ePrime.velocityMps) * 100).toFixed(1)} cm/s.`,
+        });
+      } else if (res.target === 'tr-vmax') {
+        setNotice({
+          kind: 'ok',
+          text: `Vmax IT ${Math.abs(res.vmax.velocityMps).toFixed(2)} m/s (ΔP ${res.vmax.peakGradientMmHg.toFixed(0)} mmHg).`,
+        });
+      } else {
+        setNotice({ kind: 'ok', text: `TAPSE ${res.tapseCm.toFixed(2)} cm.` });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al medir automáticamente sobre la tira.',
       });
     } finally {
       setBusy(null);
@@ -1447,28 +1496,109 @@ function AutoLvotVtiPanel({
     s.startPresetView('a5c');
   };
 
+  const showStripAutoCard = isPw || isTdi || isCw || isMmode;
+  const hasStripSummary = Boolean(
+    latestE || latestEpSept || latestEpLat || latestTr || latestTapse,
+  );
   const viewTargetsCard =
-    viewTargets.length > 0 ? (
+    viewTargets.length > 0 || showStripAutoCard || hasStripSummary ? (
       <div className="auto-ef-card" data-auto-doppler="view-targets">
-        <div className="auto-ef-row-head">
-          <span className="auto-ef-title">
-            Alineación rápida · {currentViewId ? viewLabel(currentViewId) : ''}
-          </span>
-        </div>
-        <div className="doppler-assist-grid">
-          {viewTargets.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className="ghost"
-              disabled={s.closed || busy !== null}
-              onClick={() => void placeTarget(t.id)}
-              data-tip={t.tip}
-            >
-              {busy === t.id ? 'Buscando…' : t.label}
-            </button>
-          ))}
-        </div>
+        {viewTargets.length > 0 && (
+          <>
+            <div className="auto-ef-row-head">
+              <span className="auto-ef-title">
+                Alineación rápida · {currentViewId ? viewLabel(currentViewId) : ''}
+              </span>
+            </div>
+            <div className="doppler-assist-grid">
+              {viewTargets.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className="ghost"
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void placeTarget(t.id)}
+                  data-tip={t.tip}
+                >
+                  {busy === t.id ? 'Buscando…' : t.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+        {showStripAutoCard && (
+          <div className="auto-lvot-actions" data-auto-strip="actions">
+            {isPw && (
+              <button
+                type="button"
+                className={!onOutflowView ? 'btn-primary-soft' : 'ghost'}
+                disabled={s.closed || busy !== null}
+                onClick={() => void measureStrip('mitral-inflow')}
+                data-tip="Congela la tira PW y mide automáticamente onda E, onda A y tiempo de desaceleración (TD E)"
+              >
+                {busy === 'mitral-inflow' ? 'Midiendo…' : 'Auto E / A / TD'}
+              </button>
+            )}
+            {isTdi && (
+              <>
+                <button
+                  type="button"
+                  className={activeTdiSite === 'septal' ? 'btn-primary-soft' : 'ghost'}
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void measureStrip('tdi-e-prime', 'septal')}
+                  data-tip="Congela la tira TDI y detecta automáticamente el pico e′ septal"
+                >
+                  {busy === 'tdi-e-prime' ? 'Midiendo…' : 'Auto e′ sept'}
+                </button>
+                <button
+                  type="button"
+                  className={activeTdiSite === 'lateral' ? 'btn-primary-soft' : 'ghost'}
+                  disabled={s.closed || busy !== null}
+                  onClick={() => void measureStrip('tdi-e-prime', 'lateral')}
+                  data-tip="Congela la tira TDI y detecta automáticamente el pico e′ lateral"
+                >
+                  {busy === 'tdi-lat-m' ? 'Midiendo…' : 'Auto e′ lat'}
+                </button>
+              </>
+            )}
+            {isCw && (
+              <button
+                type="button"
+                className={!onOutflowView ? 'btn-primary-soft' : 'ghost'}
+                disabled={s.closed || busy !== null}
+                onClick={() => void measureStrip('tr-vmax')}
+                data-tip="Congela la tira CW y detecta automáticamente la Vmax de la insuficiencia tricuspídea"
+              >
+                {busy === 'tr-vmax' ? 'Midiendo…' : 'Auto Vmáx IT'}
+              </button>
+            )}
+            {isMmode && (
+              <button
+                type="button"
+                className="btn-primary-soft"
+                disabled={s.closed || busy !== null}
+                onClick={() => void measureStrip('tapse')}
+                data-tip="Congela la tira Modo M y mide automáticamente la excursión sistólica del anillo tricuspídeo (TAPSE)"
+              >
+                {busy === 'tapse' ? 'Midiendo…' : 'Auto TAPSE'}
+              </button>
+            )}
+          </div>
+        )}
+        {hasStripSummary && (
+          <div className="auto-ef-metrics">
+            {latestE && (
+              <span>
+                E {latestE.value.toFixed(2)}
+                {latestA ? ` / A ${latestA.value.toFixed(2)}` : ''} m/s
+              </span>
+            )}
+            {latestEpSept && <span>e′s {latestEpSept.value.toFixed(1)}</span>}
+            {latestEpLat && <span>e′l {latestEpLat.value.toFixed(1)}</span>}
+            {latestTr && <span>IT {latestTr.value.toFixed(2)} m/s</span>}
+            {latestTapse && <span>TAPSE {latestTapse.value.toFixed(2)} cm</span>}
+          </div>
+        )}
       </div>
     ) : null;
 
