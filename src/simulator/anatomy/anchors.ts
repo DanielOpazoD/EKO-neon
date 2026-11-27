@@ -9,7 +9,7 @@ import {
 import { buildAorticArch, type AorticArchGeometry } from './aorticArch';
 import type { CycleState } from '@/simulator/cardiac-cycle/cycleModel';
 import { fitOccupiedAtrium } from './laNormalization';
-import { Structure } from './tissue';
+import { makeSample, Structure } from './tissue';
 import type { TissueSample } from './tissue';
 import { lvCavityRadius, lvProfileG } from './lvShape';
 import { RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD } from './lvSegments';
@@ -24,8 +24,9 @@ import {
 } from './heartFrame';
 import { DESC_AORTA_MAX_OUTER_R, DESC_AORTA_X, DESC_AORTA_Z, SPINE_Z } from './thoraxModel';
 import { buildParietalSac, LA_WALL_CM, PERICARDIUM_CM, type ParietalSac } from './classify/pericardium';
+import { ctx as classifyCtx } from './classify/context';
 import { placeVascularNeighbours } from './vascularPlacement';
-import { computeChamberPose } from './heartPose';
+import { computeChamberPose, type ChamberPose } from './heartPose';
 import { classifyChambers } from './classify';
 import type { HeartModel } from './heartModel';
 import type { Vec3 } from '@/core/vec3';
@@ -603,17 +604,36 @@ export function anchorsCached(m: HeartModel): AnchorsCached {
     fitOccupiedAtrium(m, a, extremeState(m, true));
     placePulmonaryRoot(m, a);
     // Bound root descent and both directions of the tamponade swing independently.
-    placeVascularNeighbours(
-      m,
-      a,
-      [false, true].flatMap((systole) =>
-        [0, 0.25, 0.75].map((phase) =>
-          computeChamberPose(m, { ...extremeState(m, systole), phase }),
-        ),
+    const extremePoses = [false, true].flatMap((systole) =>
+      [0, 0.25, 0.75].map((phase) =>
+        computeChamberPose(m, { ...extremeState(m, systole), phase }),
       ),
     );
-    if (m.anatomy.pericardium.effusionCm > 0)
-      a.parietal = buildParietalSac(m, a, computeChamberPose(m, extremeState(m, false)));
+    placeVascularNeighbours(m, a, extremePoses);
+    if (m.anatomy.pericardium.effusionCm > 0) {
+      const leaveSac = new Set<number>([
+        Structure.AscendingAorta,
+        Structure.AorticArch,
+        Structure.BrachiocephalicArtery,
+        Structure.LeftCommonCarotid,
+        Structure.LeftSubclavian,
+        Structure.PulmonaryArtery,
+        Structure.PulmonaryVein,
+        Structure.Svc,
+        Structure.Ivc,
+        Structure.HepaticVein,
+        Structure.DescendingAorta,
+      ]);
+      const sacTmp = makeSample();
+      const epicardiumAt = (hp: ChamberPose, x0: number, y: number, z: number): number => {
+        classifyCtx.rawEpi = NaN;
+        const hit = classifyChambers(m, hp, x0, y, z, sacTmp);
+        if (!Number.isNaN(classifyCtx.rawEpi)) return classifyCtx.rawEpi;
+        if (hit && !leaveSac.has(sacTmp.structure)) return -0.5;
+        return Infinity;
+      };
+      a.parietal = buildParietalSac(m, a, extremePoses[0]!, extremePoses, epicardiumAt);
+    }
   }
   return a;
 }

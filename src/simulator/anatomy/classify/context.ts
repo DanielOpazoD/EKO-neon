@@ -93,6 +93,8 @@ export interface ClassifyCtx {
    * the heart of the moment. Nothing after the block reads it; pericardium.test.ts does, to find the face in each phase.
    */
   parietal: number;
+  /** Unclipped epicardial distance computed by `classifyPericardium` (used by `buildParietalSac`). */
+  rawEpi: number;
   /** Scratch of the sleeve's end-diastolic radii. */
   sleeveRad: Float64Array;
 }
@@ -140,6 +142,7 @@ export const ctx: ClassifyCtx = {
   aaOuter: 99,
   raColumn: 1e3,
   parietal: 1e3,
+  rawEpi: 1e3,
   sleeveRad: new Float64Array(4),
 };
 

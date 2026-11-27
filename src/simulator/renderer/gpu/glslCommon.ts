@@ -43,6 +43,11 @@ import {
   DESC_AORTA_WALL,
   DESC_AORTA_X,
   DESC_AORTA_Z,
+  ESOPHAGUS_MUCOSA,
+  ESOPHAGUS_RX,
+  ESOPHAGUS_RZ,
+  ESOPHAGUS_X,
+  ESOPHAGUS_Z,
   POSTERIOR_MEDIASTINUM_Z,
   SUPERIOR_MEDIASTINUM_FROM_Y,
   SUPERIOR_MEDIASTINUM_RISE_CM,
@@ -64,10 +69,6 @@ import { RAA_BOOSTER_GAIN, RAA_PASSIVE_SHARE } from '@/simulator/anatomy/classif
 import {
   LA_WALL_CM,
   LAA_WALL_CM,
-  OBLIQUE_SINUS_EFFUSION_CM,
-  OBLIQUE_SINUS_BEHIND,
-  OBLIQUE_SINUS_FOOTPRINT_FROM,
-  OBLIQUE_SINUS_FOOTPRINT_TO,
   PARIETAL_COLUMN_BLEND_CM,
   PERICARDIUM_CM,
   PA_ANTERIOR_FAT_CM,
@@ -213,9 +214,14 @@ const float AV_GROOVE_BLEND_CM = ${gf(AV_GROOVE_BLEND_CM)};
 const float AV_GROOVE_BLEND_TOP_CM = ${gf(AV_GROOVE_BLEND_TOP_CM)};
 const float AV_GROOVE_BLEND_FADE_CM = ${gf(AV_GROOVE_BLEND_FADE_CM)};
 const float AV_GROOVE_BLEND_MIN_CM = ${gf(AV_GROOVE_BLEND_MIN_CM)};
-// vertebral body and posterior mediastinum (thoraxModel.ts)
+// vertebral body, esophagus and posterior mediastinum (thoraxModel.ts)
 const float SPINE_Z = ${gf(SPINE_Z)};
 const float SPINE_R = ${gf(SPINE_R)};
+const float ESOPHAGUS_X = ${gf(ESOPHAGUS_X)};
+const float ESOPHAGUS_Z = ${gf(ESOPHAGUS_Z)};
+const float ESOPHAGUS_RX = ${gf(ESOPHAGUS_RX)};
+const float ESOPHAGUS_RZ = ${gf(ESOPHAGUS_RZ)};
+const float ESOPHAGUS_MUCOSA = ${gf(ESOPHAGUS_MUCOSA)};
 const float POSTERIOR_MEDIASTINUM_Z = ${gf(POSTERIOR_MEDIASTINUM_Z)};
 const float SUPERIOR_MEDIASTINUM_FROM_Y = ${gf(SUPERIOR_MEDIASTINUM_FROM_Y)};
 const float SUPERIOR_MEDIASTINUM_RISE_CM = ${gf(SUPERIOR_MEDIASTINUM_RISE_CM)};
@@ -228,11 +234,6 @@ const float RV_HINGE_PLATEAU_CM = ${gf(RV_HINGE_PLATEAU_CM)};
 const float RV_HINGE_CM = ${gf(RV_HINGE_CM)};
 const float RV_HINGE_FADE_RAD = ${gf(RV_HINGE_FADE_RAD)};
 const float TV_SYSTOLIC_SHORTENING = ${gf(TV_SYSTOLIC_SHORTENING)};
-// the effusion over the left atrium (pericardium.ts, decision 255)
-const float OBLIQUE_SINUS_EFFUSION_CM = ${gf(OBLIQUE_SINUS_EFFUSION_CM)};
-const float OBLIQUE_SINUS_BEHIND = ${gf(OBLIQUE_SINUS_BEHIND)};
-const float OBLIQUE_SINUS_FOOTPRINT_FROM = ${gf(OBLIQUE_SINUS_FOOTPRINT_FROM)};
-const float OBLIQUE_SINUS_FOOTPRINT_TO = ${gf(OBLIQUE_SINUS_FOOTPRINT_TO)};
 const float PARIETAL_COLUMN_BLEND_CM = ${gf(PARIETAL_COLUMN_BLEND_CM)};
 const float LA_SEPTAL_TAPER_CM = ${gf(LA_SEPTAL_TAPER_CM)};
 const float LA_BASE_FLARE = ${gf(LA_BASE_FLARE)};
