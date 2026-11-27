@@ -287,6 +287,49 @@ const HALF_NORMAL_QUANTILES = [
 const MICROSCATTERERS = HALF_NORMAL_QUANTILES.length;
 const re = new Float64Array(PACKET),
   im = new Float64Array(PACKET);
+const cwReBySize = new Map<number, Float64Array>();
+const cwImBySize = new Map<number, Float64Array>();
+function cwBuffersFor(fftSize: number): { re: Float64Array; im: Float64Array } {
+  let r = cwReBySize.get(fftSize);
+  let i = cwImBySize.get(fftSize);
+  if (!r || !i) {
+    r = new Float64Array(fftSize);
+    i = new Float64Array(fftSize);
+    cwReBySize.set(fftSize, r);
+    cwImBySize.set(fftSize, i);
+  }
+  return { re: r, im: i };
+}
+const CW_STRATA = 128;
+// Potential-core (q=0) plus 6-point midpoint quadrature of |N(0,1)| for the turbulent shear layer:
+// erythrocytes traversing a stenotic/regurgitant vena contracta potential core remain at peak
+// Bernoulli velocity (crisp outer spectral rim) while the surrounding shear layer fills toward zero.
+const CW_SHEAR_QUANTILES = [
+  0,
+  0.10463261332245658,
+  0.31863936396437514,
+  0.5485222845934818,
+  0.8122178056006126,
+  1.1503493803760079,
+  1.731664400668443,
+] as const;
+const CW_CORE_POWER_SHARE = 0.32;
+const CW_SHEAR_POWER_SHARE = (1 - CW_CORE_POWER_SHARE) / (CW_SHEAR_QUANTILES.length - 1);
+const cwStrataW = new Float64Array(CW_STRATA);
+const cwStrataV = new Float64Array(CW_STRATA);
+const cwStrataDisp = new Float64Array(CW_STRATA);
+const cwStrataVPerp = new Float64Array(CW_STRATA);
+const cwStrataDepth = new Float64Array(CW_STRATA);
+const cwStrataFocus = new Float64Array(CW_STRATA);
+const cwMergedPool: VelocitySample[] = Array.from({ length: CW_STRATA }, () => ({
+  v: 0,
+  weight: 0,
+  dispersion: 0,
+  vPerp: 0,
+  depthCm: 8,
+  focusCm: 9,
+  gateLengthCm: null,
+}));
 const tonePool: IqTone[] = [];
 const hannCache = new Map<number, { win: Float64Array; power: number }>();
 function hannWindowFor(len: number): { win: Float64Array; power: number } {
@@ -423,6 +466,216 @@ export function accumulatePulsedSpectrum(
         b1 = (b0 + 1) % PACKET;
       out[b0] = out[b0]! + power * (1 - frac);
       out[b1] = out[b1]! + power * frac;
+    }
+  }
+}
+
+/**
+ * Unaliased continuous-wave baseband ADC timing covering [-vNyqMps, +vNyqMps] without PRF ceiling.
+ * Because CW transmits and receives continuously, there is no round-trip pulse-echo Nyquist limit;
+ * the baseband digitizer simply runs fast enough that scatterers inside and beyond the displayed
+ * scale do not wrap back onto the opposite channel.
+ */
+export function continuousWavePacketTiming(
+  vNyqMps: number,
+  frequencyMHz: number,
+  fftSize: number,
+): { fsHz: number; vNyqMps: number; durationS: number } {
+  const safeVNyq = Math.max(0.1, vNyqMps);
+  const fsHz = (4 * frequencyMHz * 1e6 * safeVNyq) / SPEED_OF_SOUND_MPS;
+  if (!(fsHz > 0) || !Number.isFinite(fsHz)) throw new Error('Invalid continuous-wave acquisition');
+  return { fsHz, vNyqMps: safeVNyq, durationS: fftSize / fsHz };
+}
+
+/**
+ * Continuous-wave baseband I/Q -> Hann window -> complex FFT -> per-bin clutter filter -> display bins.
+ * Shares the same coherent I/Q synthesis, transit-time envelope, aperture broadening, and smooth
+ * high-pass clutter filter response as `accumulatePulsedSpectrum`, while sampling baseband I/Q fast
+ * enough to prevent aliasing and discarding out-of-range velocity bins instead of wrapping them.
+ */
+export function accumulateContinuousWaveSpectrum(
+  samples: readonly VelocitySample[],
+  s: SpectralSettings,
+  frequencyMHz: number,
+  seed: number,
+  timeS: number,
+  out: Float32Array,
+  focusCm = 9,
+): void {
+  out.fill(0);
+  const { vMin, vMax } = spectralRange(s);
+  const span = vMax - vMin;
+  if (!(span > 0) || samples.length === 0) return;
+
+  let maxSampleAbs = 0;
+  let totalWeight = 0;
+  for (let j = 0; j < samples.length; j++) {
+    const p = samples[j]!;
+    if (!(p.weight > 0)) continue;
+    totalWeight += p.weight;
+    const depth = p.depthCm ?? 8;
+    const apHalf = p.vPerp && depth > 0 ? (0.5 * Math.abs(p.vPerp) * (APERTURE_MM / 10)) / depth : 0;
+    const reach = Math.abs(p.v) + apHalf;
+    if (reach > maxSampleAbs) maxSampleAbs = reach;
+  }
+  if (!(totalWeight > 0)) return;
+
+  const dispMaxAbs = Math.max(Math.abs(vMin), Math.abs(vMax));
+  const vNyq = Math.max(0.1, dispMaxAbs * 1.05, maxSampleAbs * 1.15);
+  // Keep FFT velocity bin spacing <= display bin width even when fast jets exceed a zoomed CW scale.
+  const targetBins = Math.ceil((2 * vNyq * SPECTRAL_BINS) / Math.max(1e-3, span));
+  let fftSize = 256;
+  while (fftSize < targetBins && fftSize < 1024) fftSize <<= 1;
+
+  const { fsHz } = continuousWavePacketTiming(vNyq, frequencyMHz, fftSize);
+  const activeSamples = Math.max(
+    MIN_ACTIVE_PULSES,
+    Math.min(fftSize, Math.round(fsHz * MAX_SLOW_TIME_WINDOW_S)),
+  );
+  const activeDurationS = activeSamples / fsHz;
+  const { win, power: activeWinPower } = hannWindowFor(activeSamples);
+  const { re: cwRe, im: cwIm } = cwBuffersFor(fftSize);
+  const activeRe = activeSamples === fftSize ? cwRe : cwRe.subarray(0, activeSamples);
+  const activeIm = activeSamples === fftSize ? cwIm : cwIm.subarray(0, activeSamples);
+
+  // Along a 16 cm CW beam, adjacent spatial stations share near-identical velocities; merge large
+  // spatial lists into fine velocity strata (exact incoherent power sum) to keep hot-path < 2 ms.
+  let source: readonly VelocitySample[] = samples;
+  let sourceCount = samples.length;
+  if (samples.length > CW_STRATA) {
+    cwStrataW.fill(0);
+    cwStrataV.fill(0);
+    cwStrataDisp.fill(0);
+    cwStrataVPerp.fill(0);
+    cwStrataDepth.fill(0);
+    cwStrataFocus.fill(0);
+    const invTwoNyq = 1 / (2 * vNyq);
+    for (let j = 0; j < samples.length; j++) {
+      const p = samples[j]!;
+      const w = p.weight;
+      if (!(w > 0)) continue;
+      const idx = Math.max(
+        0,
+        Math.min(CW_STRATA - 1, Math.floor(((p.v + vNyq) * invTwoNyq) * CW_STRATA)),
+      );
+      cwStrataW[idx] = cwStrataW[idx]! + w;
+      cwStrataV[idx] = cwStrataV[idx]! + w * p.v;
+      cwStrataDisp[idx] = cwStrataDisp[idx]! + w * p.dispersion;
+      cwStrataVPerp[idx] = cwStrataVPerp[idx]! + w * (p.vPerp ?? 0);
+      cwStrataDepth[idx] = cwStrataDepth[idx]! + w * (p.depthCm ?? 8);
+      cwStrataFocus[idx] = cwStrataFocus[idx]! + w * (p.focusCm ?? focusCm);
+    }
+    sourceCount = 0;
+    for (let i = 0; i < CW_STRATA; i++) {
+      const w = cwStrataW[i]!;
+      if (!(w > 0)) continue;
+      const invW = 1 / w;
+      const dst = cwMergedPool[sourceCount++]!;
+      dst.weight = w;
+      dst.v = cwStrataV[i]! * invW;
+      dst.dispersion = cwStrataDisp[i]! * invW;
+      dst.vPerp = cwStrataVPerp[i]! * invW;
+      dst.depthCm = cwStrataDepth[i]! * invW;
+      dst.focusCm = cwStrataFocus[i]! * invW;
+      dst.gateLengthCm = null;
+    }
+    source = cwMergedPool;
+  }
+
+  const tCell = Math.floor(timeS / Math.max(1e-4, activeDurationS * 0.5));
+  const packetSeed = (seed ^ Math.imul(tCell, 0x9e3779b1) ^ 0x517cc1b7) | 0;
+  const f0Hz = frequencyMHz * 1e6;
+  const normDenom = activeSamples * activeWinPower * REALIZATIONS;
+
+  for (let ensemble = 0; ensemble < REALIZATIONS; ensemble++) {
+    let toneCount = 0;
+    for (let j = 0; j < sourceCount; j++) {
+      const p = source[j]!;
+      if (!(p.weight > 0)) continue;
+      const depth = p.depthCm ?? 8;
+      const aperture =
+        p.vPerp && depth > 0 ? (Math.abs(p.vPerp) * (APERTURE_MM / 10)) / depth : 0;
+      const tau = scattererTransitTimeS(p.v, p.vPerp ?? 0, depth, p.focusCm ?? focusCm, null);
+      const absV = Math.abs(p.v);
+      const signV = Math.sign(p.v);
+      // Laminar blood strata (dispersion < 0.04) stay narrow within one FFT bin; synthesizing a
+      // single scatterer per stratum eliminates unphysical multi-tone self-interference across
+      // identical frequencies while turbulent strata expand across the potential-core + shear law.
+      const nSub = p.dispersion < 0.04 ? 1 : CW_SHEAR_QUANTILES.length;
+      for (let k = 0; k < nSub; k++) {
+        const q = nSub === 1 ? 0 : CW_SHEAR_QUANTILES[k]!;
+        const turbulent = Math.min(absV, 0.9 * p.dispersion * absV * q);
+        const geometric = aperture * (hash3(j, k, ensemble + 103, packetSeed) - 0.5);
+        const v = p.v - signV * turbulent + geometric;
+        const kPower =
+          nSub === 1 ? p.weight : p.weight * (k === 0 ? CW_CORE_POWER_SHARE : CW_SHEAR_POWER_SHARE);
+        let slot = tonePool[toneCount];
+        if (!slot) {
+          slot = {
+            velocityMps: 0,
+            power: 0,
+            phaseRad: 0,
+            transitTimeS: undefined,
+            transitCenterFrac: 0.5,
+            accelMps2: 0,
+          };
+          tonePool[toneCount] = slot;
+        }
+        slot.velocityMps = v;
+        slot.power = kPower;
+        slot.phaseRad = 2 * Math.PI * hash3(j, k, ensemble + 211, packetSeed);
+        slot.transitTimeS = tau;
+        slot.transitCenterFrac = 0.25 + 0.5 * hash3(j, k, ensemble + 307, packetSeed);
+        slot.accelMps2 = 0;
+        toneCount++;
+      }
+    }
+    synthesizeIqRange(
+      tonePool,
+      toneCount,
+      frequencyMHz,
+      fsHz,
+      timeS - activeDurationS / 2,
+      activeRe,
+      activeIm,
+    );
+    for (let i = 0; i < activeSamples; i++) {
+      cwRe[i] = cwRe[i]! * win[i]!;
+      cwIm[i] = cwIm[i]! * win[i]!;
+    }
+    if (activeSamples < fftSize) {
+      cwRe.fill(0, activeSamples);
+      cwIm.fill(0, activeSamples);
+    }
+    complexFft(cwRe, cwIm);
+    for (let k = 0; k < fftSize; k++) {
+      const signed = k < fftSize / 2 ? k : k - fftSize;
+      const fdHz = (signed / fftSize) * fsHz;
+      const sampledVelocity = dopplerVelocityFromShiftHz(fdHz, f0Hz, 1, SPEED_OF_SOUND_MPS);
+      const wfGain = clutterFilterPowerResponse(sampledVelocity, s.wallFilterMps);
+      if (wfGain <= 0) continue;
+      const v = s.invert ? -sampledVelocity : sampledVelocity;
+      const b = ((vMax - v) / span) * SPECTRAL_BINS - 0.5;
+      if (b <= -1 || b >= SPECTRAL_BINS) continue;
+      const floor = Math.floor(b);
+      const frac = b - floor;
+      const power = ((cwRe[k]! ** 2 + cwIm[k]! ** 2) * wfGain) / normDenom;
+      if (floor >= 0 && floor < SPECTRAL_BINS) {
+        out[floor] = out[floor]! + power * (1 - frac);
+      }
+      const b1 = floor + 1;
+      if (b1 >= 0 && b1 < SPECTRAL_BINS) {
+        out[b1] = out[b1]! + power * frac;
+      }
+    }
+  }
+  // Enforce exact stop-band floor on display bins after linear FFT-to-display resampling so
+  // passband edge splatting cannot bleed residual 1e-11 power into |v| < 0.8 * wallFilterMps.
+  if (s.wallFilterMps > 0) {
+    const stopCut = 0.8 * s.wallFilterMps;
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      if (Math.abs(vBin) < stopCut) out[b] = 0;
     }
   }
 }

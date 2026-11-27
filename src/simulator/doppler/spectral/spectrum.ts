@@ -280,11 +280,13 @@ export const CW_OUTER_EDGE_FRAC = 0.32;
  * brightest the noise can draw at this gain, so a column without flow has no envelope. A floor of 0.12 sat under the
  * noise ceiling (0.123 at 0 dB), and an auto-trace starting from the brightest bin read noise as velocities up to 1.1 m/s.
  */
+function envelopeNoiseCeiling(s: SpectralSettings): number {
+  const envGain = Math.min(1, Math.pow(10, s.gainDb / 20));
+  return Math.pow(SPECTRAL_NOISE * envGain, 0.7);
+}
+
 export function envelopeThreshold(columnMax: number, s: SpectralSettings): number {
-  return Math.max(
-    1.5 * Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7),
-    0.35 * columnMax,
-  );
+  return Math.max(1.5 * envelopeNoiseCeiling(s), 0.35 * columnMax);
 }
 
 /**
@@ -293,8 +295,7 @@ export function envelopeThreshold(columnMax: number, s: SpectralSettings): numbe
  * gain-invariant from -8 dB to +8 dB.
  */
 export function cwEnvelopeThreshold(columnMax: number, s: SpectralSettings): number {
-  const noiseCeil = Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7);
-  return Math.max(1.25 * noiseCeil, CW_OUTER_EDGE_FRAC * columnMax);
+  return Math.max(1.25 * envelopeNoiseCeiling(s), CW_OUTER_EDGE_FRAC * columnMax);
 }
 
 /**
@@ -308,7 +309,7 @@ export function cwJetEnvelopeThreshold(
   s: SpectralSettings,
 ): number {
   const fullThr = cwEnvelopeThreshold(columnMax, s);
-  const noiseCeil = Math.pow(SPECTRAL_NOISE * Math.pow(10, s.gainDb / 20), 0.7);
+  const noiseCeil = envelopeNoiseCeiling(s);
   if (highVelMax > 1.35 * noiseCeil) {
     return Math.min(fullThr, Math.max(1.25 * noiseCeil, CW_OUTER_EDGE_FRAC * highVelMax));
   }
@@ -572,13 +573,12 @@ export function presentSpectralColumn(
   const gainLin = Math.pow(10, s.gainDb / 20);
   const { vMin, vMax } = spectralRange(s);
   // Normalise softly against an attenuation-aware knee (0.03) without clipping the modal peak at 0 dB,
-  // and cap positive-gain envelope amplification at the column peak so high gain never flattens the
-  // modal ridge into a 1.0 plateau (preserving ASE gain-invariant PW VTI tracing).
+  // and keep positive display gain out of the envelope buffer (displaySpectrum already applies full
+  // gainDb to the rendered strip) so neither the ridge nor noise ceiling shifts above 0 dB.
   let max = 0;
   for (let b = 0; b < SPECTRAL_BINS; b++) max = Math.max(max, out[b] ?? 0);
   const norm = max > 0 ? 0.9 / (max + 0.03) : 0;
-  const peakPreGain = max * norm + SPECTRAL_NOISE;
-  const envGain = gainLin > 1 && peakPreGain > 0 ? Math.min(gainLin, 1 / peakPreGain) : gainLin;
+  const envGain = Math.min(1, gainLin);
   for (let b = 0; b < SPECTRAL_BINS; b++) {
     const noise = SPECTRAL_NOISE * hash3(b, columnIndex, 3, seed);
     const v = vMax - ((b + 0.5) / SPECTRAL_BINS) * (vMax - vMin);
