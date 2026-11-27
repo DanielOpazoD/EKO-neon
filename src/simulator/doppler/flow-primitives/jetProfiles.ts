@@ -225,6 +225,101 @@ export function inflowJet(
 }
 
 /**
+ * Physiological LV diastolic apical vortex & outflow-tract redirection (Pedrizzetti / Sengupta):
+ * during E-wave deceleration, transmitral inflow turns anteriorly in the mid-apical LV and returns
+ * smoothly along the anteroseptal/LVOT corridor toward the aortic valve (`avAxis`), priming the
+ * outflow tract while keeping the mitral leaflet-tip PW plane and CMM Vp centerline strictly untouched.
+ */
+export function sampleLvDiastolicVortex(
+  tables: BeatTables,
+  phase: number,
+  x: number,
+  y: number,
+  z: number,
+  zAnn: number,
+  lengthNow: number,
+  mvCenter: { x: number; y: number; z: number },
+  avCenter: { x: number; y: number; z: number },
+  avAxis: { x: number; y: number; z: number },
+  ePeakMps: number,
+  ePrimeSeptalCmps: number,
+  out: FlowSample,
+): void {
+  const zr = z - zAnn;
+  if (zr < 0.1 || zr > lengthNow - 0.25) return;
+
+  const tm = tables.timings;
+  const rr = tables.rrS;
+  const t = (((phase % 1) + 1) % 1) * rr;
+  const tStart = tm.mitralOpenS + 0.6 * tm.eAccelS;
+  const tEnd = Math.min(rr, tm.eEndS - 0.005);
+  if (tEnd <= tStart + 0.02 || t <= tStart || t >= tEnd) return;
+
+  const uT = (t - tStart) / (tEnd - tStart);
+  const timeAmp = Math.sin(Math.PI * uT) * Math.pow(uT, 0.35);
+  if (timeAmp < 0.02) return;
+
+  // Unit horizontal axis from mitral inflow center toward the anterior/septal LVOT (PLAX / A3C / A5C plane)
+  const ox = avCenter.x - mvCenter.x;
+  const oy = avCenter.y - mvCenter.y;
+  const oLen = Math.hypot(ox, oy) || 1;
+  const ux = ox / oLen;
+  const uy = oy / oLen;
+
+  const dx = x - mvCenter.x;
+  const dy = y - mvCenter.y;
+  const sOut = dx * ux + dy * uy;
+  if (sOut <= -0.15 || sOut >= 3.4) return;
+
+  const sPerp = -dx * uy + dy * ux;
+  const wPerp = Math.exp(-(sPerp * sPerp) / (2 * 1.35 * 1.35));
+  if (wPerp < 0.04) return;
+
+  const zeta = zr / Math.max(4, lengthNow);
+  const vPeak =
+    Math.min(0.44, 0.36 * (ePeakMps / 0.8)) *
+    Math.min(1.15, Math.max(0.45, ePrimeSeptalCmps / 9));
+
+  let added = false;
+
+  // 1. Anteroseptal / LVOT basal return limb (strictly anterior to the open anterior mitral leaflet, sOut > 0.85 cm)
+  if (sOut > 0.85 && zeta > 0.03 && zeta < 0.86) {
+    const wSide = smoothstep(0.85, 1.45, sOut) * fadeOut(sOut, 2.4, 3.4);
+    const wZ = smoothstep(0.03, 0.15, zeta) * fadeOut(zeta, 0.62, 0.86);
+    const revBlend = timeAmp * wSide * wZ * wPerp;
+    const vRet = vPeak * revBlend;
+    if (vRet > 0.015) {
+      // Anterior mitral leaflet separates the LVOT corridor from transmitral inflow:
+      // smoothly redirect anteroseptal outflow streamlines along avAxis toward the aortic valve.
+      const keep = 1 - Math.min(0.92, revBlend * 1.15);
+      out.vz *= keep;
+      out.vx += avAxis.x * vRet;
+      out.vy += avAxis.y * vRet;
+      out.vz += avAxis.z * vRet;
+      out.dispersion = Math.min(out.dispersion, 0.09);
+      added = true;
+    }
+  }
+
+  // 2. Mid-apical anterior turning limb sweeping inflow toward the anteroseptal wall (purely horizontal +uOut)
+  if (zeta > 0.42 && zeta < 0.86 && sOut > -0.15 && sOut < 2.2) {
+    const wTurnSide = smoothstep(-0.15, 0.45, sOut) * fadeOut(sOut, 1.3, 2.2);
+    const wTurnZ = smoothstep(0.42, 0.58, zeta) * fadeOut(zeta, 0.7, 0.86);
+    const vTurn = 0.65 * vPeak * timeAmp * wTurnSide * wTurnZ * wPerp;
+    if (vTurn > 0.015) {
+      out.vx += ux * vTurn;
+      out.vy += uy * vTurn;
+      added = true;
+    }
+  }
+
+  if (added) {
+    out.dispersion = Math.max(out.dispersion, 0.06);
+    out.present = 1;
+  }
+}
+
+/**
  * Conventional colour M-mode slope (cm/s) of an inflow wave travelling at `waveCmps`, on the inflow axis at a fixed
  * position as an M-mode line sees it: from the leaflet tips at valve opening to 4 cm beyond them, the first time the
  * velocity reaches half the early-filling maximum at the tips, fitted against depth.

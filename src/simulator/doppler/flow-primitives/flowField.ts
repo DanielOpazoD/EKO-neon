@@ -46,6 +46,7 @@ import {
   LVOT_OBSTRUCTION_SIGMA_CM,
   LVOT_OBSTRUCTION_T,
   pulmonaryVeinPeaks,
+  sampleLvDiastolicVortex,
   SLOW_SHEAR,
   solveInflowWave,
   type FlowSample,
@@ -313,7 +314,7 @@ export function sampleFlow(
     p.enabled['mitral-inflow'] !== false &&
     zrMv > -FUNNEL_FADE_TO_CM &&
     zrMv < hp.lengthNow - 0.2
-  )
+  ) {
     inflowJet(
       tables,
       tables.mitralFlowMlps,
@@ -328,6 +329,27 @@ export function sampleFlow(
       p.turbulence['mitral-inflow'] ?? 0.04,
       out,
     );
+    if (
+      zrMv > 0.1 &&
+      (structure === undefined || structure === Structure.LvCavity || structure === Structure.Lvot)
+    ) {
+      sampleLvDiastolicVortex(
+        tables,
+        phase,
+        x,
+        y,
+        z,
+        zAnn,
+        hp.lengthNow,
+        p.mvCenter,
+        p.avCenter,
+        p.avAxis,
+        p.heart.physiology.ePeakMps,
+        p.heart.physiology.ePrimeSeptalCmps,
+        out,
+      );
+    }
+  }
 
   // ---- LVOT → aortic valve → proximal ascending aorta ----
   if (aortaEnabled && allowLvotAv && qao > 1) {
