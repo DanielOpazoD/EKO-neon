@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSlidingPill } from './useSlidingPill';
-import { useHudStore, useSimStore } from '@/app/store';
+import { isClassModeOn, nextClassModeUi, useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
 import { examClosed, exportCaseTag, modePolicy } from '@/app/modePolicy';
 import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
 import { captureCurrentStudyStill } from '@/app/studyCapture';
-import { IconCamera, IconPause, IconPlay, IconSliders, IconTorso } from './icons';
+import {
+  IconCamera,
+  IconPause,
+  IconPlay,
+  IconPresentation,
+  IconSliders,
+  IconTorso,
+} from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
 import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
 
@@ -28,9 +35,11 @@ export function ModeBar() {
       toggleFreeze: st.toggleFreeze,
       showTorso: st.ui.showTorso,
       minimal: st.ui.minimal,
+      roomMode: st.ui.roomMode,
       workerMode: st.workerMode,
     })),
   );
+  const classMode = isClassModeOn({ minimal: s.minimal, roomMode: s.roomMode });
   const [savedFlash, setSavedFlash] = useState(false);
   const flashTimer = useRef<number | null>(null);
   useEffect(() => () => window.clearTimeout(flashTimer.current ?? undefined), []);
@@ -103,6 +112,22 @@ export function ModeBar() {
       </button>
       {s.frozen && <CineControls />}
       <span className="spacer" style={{ flex: 1 }} />
+      {/* 1-click classroom / projector presentation mode: clean maximized image + dark room chrome */}
+      <button
+        type="button"
+        onClick={() => s.setUi(nextClassModeUi({ minimal: s.minimal, roomMode: s.roomMode }))}
+        className={`icon-btn${classMode ? ' active' : ''}`}
+        aria-label="Modo clase (proyector)"
+        data-tip={
+          classMode
+            ? 'Salir del modo clase (restaurar panel izquierdo y brillo normal)'
+            : 'Modo clase / proyector: maximiza la imagen y oscurece la interfaz para proyectar'
+        }
+        data-tip-key="F"
+        aria-pressed={classMode}
+      >
+        <IconPresentation />
+      </button>
       {/* no label (decision 244): the button is an icon, its name stays «Torso 3D» for assistive technology */}
       <button
         onClick={() => s.setUi({ showTorso: !s.showTorso })}

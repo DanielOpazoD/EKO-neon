@@ -8,6 +8,7 @@ import { isStripModality } from '@/simulator/renderer/modality';
 import type { ProductMode } from '@/app/modePolicy';
 import { formatMHz } from './format';
 import { gpuNotice } from './gpuNotice';
+import { CaseQuickMenu } from './CaseQuickMenu';
 import { ViewQuickMenu } from './ViewQuickMenu';
 
 const RHYTHM_LABEL: Record<string, string> = {
@@ -84,9 +85,11 @@ export function ImageHud() {
   return (
     <div className="img-hud">
       <div className="hud-box hud-tl" ref={titleBoxRef}>
-        <span className="hud-title" title={title}>
-          {title}
-        </span>
+        <CaseQuickMenu titleAttr={title}>
+          <span className="hud-title" title={title}>
+            {title}
+          </span>
+        </CaseQuickMenu>
       </div>
       <div className="hud-box hud-tr">
         <span>

@@ -1,5 +1,10 @@
 import { markerLabel, structureLabel, type ReviewMarker } from '@/app/review';
-import { imageSegmentsOn, useSegmentOrientation, type SimStore } from '@/app/store';
+import {
+  imageAnatomyLabelsOn,
+  imageSegmentsOn,
+  useSegmentOrientation,
+  type SimStore,
+} from '@/app/store';
 import { classifyDopplerAngle } from '@/education/technique';
 import { resolveFrozenColorSettings } from '@/simulator/core/acquisitionKeys';
 import type { SimOutput } from '@/simulator/core/protocol';
@@ -17,7 +22,12 @@ import { ecgLayoutOf, ecgTracePoints, ecgX } from '../ecgTrace';
 import { drawColorBar } from './colorBarOverlay';
 import { measurementGeometryOn } from './measurementPlacement';
 import type { LivePreview } from './measurementPreview';
-import { drawPickedRegion, drawSegmentLayer, drawStructureOutline } from './rasterLayers';
+import {
+  drawAnatomyLabelsLayer,
+  drawPickedRegion,
+  drawSegmentLayer,
+  drawStructureOutline,
+} from './rasterLayers';
 
 /** Where an image marker sits on the current display: strip markers keep their pixel, sector markers reproject. */
 export function markerScreenPosition(
@@ -143,6 +153,7 @@ export function drawOverlay(
   ctx.clearRect(0, 0, W, H);
   if (imageSegmentsOn(st)) drawSegmentLayer(ctx, hud, st);
   else useSegmentOrientation.getState().set(null, false);
+  if (imageAnatomyLabelsOn(st)) drawAnatomyLabelsLayer(ctx, hud, st);
   drawStructureOutline(ctx, hud);
   const m = hud.sector;
   ctx.font = canvasFont(11);

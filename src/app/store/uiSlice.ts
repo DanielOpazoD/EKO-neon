@@ -89,6 +89,7 @@ export const createUiSlice: SimSliceCreator<UiSlice> = (set) => {
       navLabels: true,
       navSegments: false,
       imageSegments: false,
+      imageAnatomyLabels: false,
       segmentsOpen: false,
       segmentModel: 'LV_AHA17',
       selectedSegment: null,
