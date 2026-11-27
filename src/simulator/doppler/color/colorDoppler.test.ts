@@ -26,7 +26,7 @@ import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
 import { aorticVelocityProfile } from '@/simulator/doppler/flow-primitives/aorticNetwork';
 import { COLOR_MAP } from '@/simulator/renderer/postprocess/colorMap';
 import { colorWallFilterRangeMps } from './kasaiEstimator';
-import { computeHeartPose } from '@/simulator/anatomy/heartModel';
+import { computeHeartPose, heartAnchors } from '@/simulator/anatomy/heartModel';
 import { regionalMeanFraction } from '@/simulator/anatomy/lvGeometry';
 import { cycleStateAt, sampleTable } from '@/simulator/cardiac-cycle/cycleModel';
 
@@ -1271,5 +1271,55 @@ test('sampleFlow anatomical chamber containment blocks cross-septal and cross-wa
   assert.ok(
     fs.dispersion < 0.15,
     `TR jet must never bleed into LaCavity, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+});
+
+test('pulmonary trunk, RPA, and LPA carry continuous mass-conserving systolic flow', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const c = loadCaseById('normal-excellent');
+  const models = buildCaseModels(c, REST_PATIENT);
+  const flow = buildFlowParams(c, models.heart, models.tables, models.thorax);
+  const A = heartAnchors(models.heart);
+  const phase = 0.16;
+  const hp = computeHeartPose(models.heart, cycleStateAt(models.tables, phase, flow.flowPeaks));
+  const qpv = sampleTable(models.tables.pulmonaryFlowMlps, phase);
+  assert.ok(qpv > 150, `Expected brisk peak pulmonary flow at phase=${phase}, got ${qpv}`);
+
+  const mid = (p0: { x: number; y: number; z: number }, p1: { x: number; y: number; z: number }, z0Off = 0) => ({
+    x: 0.5 * (p0.x + p1.x),
+    y: 0.5 * (p0.y + p1.y),
+    z: 0.5 * (p0.z + z0Off + p1.z),
+  });
+  const mpaPt = mid(A.paStj, A.paEnd, hp.pvZ);
+  const rpaPt = mid(A.paEnd, A.rpaEnd);
+  const lpaPt = mid(A.paEnd, A.lpaEnd);
+
+  sampleFlow(flow, models.tables, hp, phase, mpaPt.x, mpaPt.y, mpaPt.z, fs, Structure.PulmonaryArtery);
+  const vMpa = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(fs.present === 1 && vMpa > 0.6 && vMpa < 1.8, `Expected physiological MPA velocity, got ${vMpa.toFixed(2)} m/s`);
+  assert.ok(fs.dispersion < 0.15, `Normal MPA flow should remain laminar, got disp=${fs.dispersion.toFixed(2)}`);
+
+  sampleFlow(flow, models.tables, hp, phase, rpaPt.x, rpaPt.y, rpaPt.z, fs, Structure.PulmonaryArtery);
+  const vRpa = Math.hypot(fs.vx, fs.vy, fs.vz);
+  // Direction check: velocity must align with paEnd -> rpaEnd
+  const rpaDx = A.rpaEnd.x - A.paEnd.x, rpaDy = A.rpaEnd.y - A.paEnd.y, rpaDz = A.rpaEnd.z - A.paEnd.z;
+  const rpaCos = (fs.vx * rpaDx + fs.vy * rpaDy + fs.vz * rpaDz) / (vRpa * Math.hypot(rpaDx, rpaDy, rpaDz));
+  assert.ok(fs.present === 1 && vRpa > 0.5, `Expected brisk RPA flow beneath aortic arch, got ${vRpa.toFixed(2)} m/s`);
+  assert.ok(rpaCos > 0.95, `Expected RPA velocity aligned with RPA lumen, got cos=${rpaCos.toFixed(3)}`);
+
+  sampleFlow(flow, models.tables, hp, phase, lpaPt.x, lpaPt.y, lpaPt.z, fs, Structure.PulmonaryArtery);
+  const vLpa = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(fs.present === 1 && vLpa > 0.5, `Expected brisk LPA flow, got ${vLpa.toFixed(2)} m/s`);
+
+  // Mass conservation across the bifurcation: Q_mpa = Q_rpa + Q_lpa (centerline scales by 4/3 identically)
+  const qMpa = (vMpa / (4 / 3)) * Math.PI * A.paR * A.paR * 100;
+  const qBranches = (vRpa / (4 / 3)) * Math.PI * A.rpaR * A.rpaR * 100 + (vLpa / (4 / 3)) * Math.PI * A.lpaR * A.lpaR * 100;
+  assert.ok(
+    Math.abs(qMpa - qpv) / qpv < 0.08,
+    `Expected MPA flux (${qMpa.toFixed(1)} mL/s) to match Q_pv (${qpv.toFixed(1)} mL/s)`,
+  );
+  assert.ok(
+    Math.abs(qBranches - qpv) / qpv < 0.08,
+    `Expected RPA+LPA flux (${qBranches.toFixed(1)} mL/s) to conserve Q_pv (${qpv.toFixed(1)} mL/s)`,
   );
 });

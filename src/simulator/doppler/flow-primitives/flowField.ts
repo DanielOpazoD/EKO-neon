@@ -1,4 +1,5 @@
 import { sampleAorticNetwork } from './aorticNetwork';
+import { samplePulmonarySystolicFlow } from './pulmonaryFlow';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import {
   caseLvotObstruction,
@@ -519,43 +520,9 @@ export function sampleFlow(
       out,
     );
 
-  // ---- RVOT / pulmonary ----
+  // ---- RVOT / pulmonary trunk & branches (mass-conserving 6-segment tree) ----
   if ((mask & FLOW_MASK_RVOT_PA) !== 0 && p.enabled['rvot'] !== false) {
-    const qpv = sampleTable(tables.pulmonaryFlowMlps, phase);
-    if (qpv > 1) {
-      const axR = p.rvotB.x - p.rvotA.x,
-        ayR = p.rvotB.y - p.rvotA.y,
-        azR = p.rvotB.z - p.rvotA.z;
-      const L = Math.hypot(axR, ayR, azR);
-      const ux = axR / L,
-        uy = ayR / L,
-        uz = azR / L;
-      const dx = x - p.rvotA.x,
-        dy = y - p.rvotA.y,
-        dz = z - hp.pvZ - p.rvotA.z;
-      const t = dx * ux + dy * uy + dz * uz;
-      if (t > -1 && t < L + 1) {
-        const qx = dx - ux * t,
-          qy = dy - uy * t,
-          qz = dz - uz * t;
-        const rho = Math.sqrt(qx * qx + qy * qy + qz * qz);
-        if (rho < jetReach(0.89 * 1.05, 0)) {
-          const v = qpv / p.rvotAreaCm2 / 100;
-          const rNorm = Math.min(1.4, rho / 1.05);
-          const radialCore = 1 / (1 + 0.38 * rNorm * rNorm);
-          const prof =
-            radialCore *
-            jetProfile(rho, 0.89 * 1.05, 0) *
-            smoothstep(-1, 0, t) *
-            fadeOut(t, L, L + 1);
-          out.vx += ux * v * prof;
-          out.vy += uy * v * prof;
-          out.vz += uz * v * prof;
-          out.dispersion = Math.max(out.dispersion, p.turbulence['rvot'] ?? 0.04);
-          out.present = 1;
-        }
-      }
-    }
+    samplePulmonarySystolicFlow(p, tables, hp, phase, x, y, z, out);
   }
 
   // ---- TR jet (systole) ----
