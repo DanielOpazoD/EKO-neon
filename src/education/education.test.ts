@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { loadCaseById } from '@/cases';
+import { Structure } from '@/simulator/anatomy/tissue';
 import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
+import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import type { Measurement } from '@/simulator/measurements/types';
 import { allTasks, isUnlocked } from './curriculum';
 import { expectedFindings, scoreImpression } from './impression';
 import { loadProgress, PROGRESS_KEY, summarizeProgress } from './progress';
-import { biplaneVolume, pathologyImpressions, rightAtrialPressure } from './report';
+import { biplaneVolume, deriveCalculations, pathologyImpressions, rightAtrialPressure } from './report';
+import { truthFor } from './scoring/scoring';
+import { evaluateTechnique, structureName } from './technique';
 
 function ellipseContour(cx: number, cy: number, rx: number, ry: number, n = 48) {
   return Array.from({ length: n }, (_, i) => {
@@ -163,5 +167,118 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     assert.equal(summary.measurementsCount, 1);
     assert.equal(summary.exams.length, 1);
     assert.equal(summary.completedTasks, 1);
+  });
+
+  it('enforces Color-only modality, jet caliper rules, aortic blood-pool structures, and regurgitation protocol truths', () => {
+    const marks = {
+      ejectionStart: 0.08,
+      ejectionEnd: 0.38,
+      mitralOpen: 0.45,
+      eEnd: 0.68,
+      aStart: 0.82,
+      aEnd: 0.96,
+      hasAWave: true,
+    };
+
+    // 1. Color-only vena contracta rejects plain 2D and passes on systolic Color over the mitral coaptation zone
+    const vcSpec = getMeasurementSpec('mr-vena-contracta')!;
+    assert.ok(vcSpec);
+    const vcOn2d = evaluateTechnique(vcSpec, {
+      modality: '2d',
+      viewId: 'plax',
+      viewScore: 90,
+      phase: 0.2,
+      phaseMarks: marks,
+      gate: null,
+      segmentStructures: [Structure.LaCavity, Structure.MitralAnterior, Structure.LaCavity, Structure.MitralPosterior],
+      segmentEndsOutside: [Structure.LaCavity, Structure.LaCavity],
+    });
+    assert.ok(
+      vcOn2d.findings.some((f) => f.code === 'modality' && f.level === 'invalid'),
+      'Color-only vena contracta must reject plain 2D',
+    );
+
+    const vcOnColor = evaluateTechnique(vcSpec, {
+      modality: 'color',
+      viewId: 'plax',
+      viewScore: 90,
+      phase: 0.2,
+      phaseMarks: marks,
+      gate: null,
+      segmentStructures: [Structure.LaCavity, Structure.MitralAnterior, Structure.LaCavity, Structure.MitralPosterior],
+      segmentEndsOutside: [Structure.LaCavity, Structure.LaCavity],
+    });
+    assert.equal(vcOnColor.score, 1, `Expected perfect technique score on systolic Color VC, got ${JSON.stringify(vcOnColor.findings)}`);
+
+    // 2. 2D caliper measurements still accept Color mode and recognise AscendingAorta/AorticArch as blood pool
+    const rootSpec = getMeasurementSpec('aortic-root')!;
+    const rootInColor = evaluateTechnique(rootSpec, {
+      modality: 'color',
+      viewId: 'plax',
+      viewScore: 88,
+      phase: 0.0,
+      phaseMarks: marks,
+      gate: null,
+      segmentStructures: [
+        Structure.AorticRoot,
+        Structure.AorticRoot,
+        Structure.AorticRoot,
+        Structure.AscendingAorta,
+        Structure.AorticRoot,
+      ],
+      segmentEndsOutside: [Structure.Pericardium, Structure.LaWall],
+    });
+    assert.equal(
+      rootInColor.score,
+      1,
+      `AscendingAorta blood samples should not trigger wall warning: ${JSON.stringify(rootInColor.findings)}`,
+    );
+    assert.equal(structureName(Structure.AscendingAorta), 'aorta ascendente');
+    assert.equal(structureName(Structure.AorticArch), 'arco aórtico');
+    assert.equal(structureName(Structure.BrachiocephalicArtery), 'tronco braquiocefálico');
+
+    // 3. Expanded clinical views & structures: subcostal-4c for TR Vmax and AscendingAorta for AV CW
+    const trSpec = getMeasurementSpec('tr-vmax')!;
+    assert.ok(trSpec.views.includes('subcostal-4c'));
+    const avSpec = getMeasurementSpec('av-vmax')!;
+    assert.ok(avSpec.placement?.structures.includes(Structure.AscendingAorta));
+
+    // 4. Regurgitation specs resolve cleanly from StructuredEchoTruth (non-null on MVP, null on normal)
+    const mrTruth = computeGroundTruth(loadCaseById('mvp-primary-mr'));
+    const normTruth = computeGroundTruth(loadCaseById('normal-excellent-window'));
+    const mrVmaxT = truthFor('mr-vmax', mrTruth);
+    const mrVtiT = truthFor('mr-vti', mrTruth);
+    const mrVcT = truthFor('mr-vena-contracta', mrTruth);
+    assert.ok(mrVmaxT && mrVmaxT.value > 4.0, `Expected MVP MR Vmax > 4 m/s, got ${mrVmaxT?.value}`);
+    assert.ok(mrVtiT && mrVtiT.value > 80, `Expected MVP MR VTI > 80 cm, got ${mrVtiT?.value}`);
+    assert.ok(mrVcT && mrVcT.value >= 0.6, `Expected MVP MR VC >= 0.6 cm, got ${mrVcT?.value}`);
+    assert.equal(truthFor('mr-vmax', normTruth), null);
+    assert.equal(truthFor('mr-vena-contracta', normTruth), null);
+    assert.equal(truthFor('ar-vmax', normTruth), null);
+
+    // 5. Derived MR peak gradient (4 * Vmax^2)
+    const derived = deriveCalculations([
+      {
+        id: 'm-mr',
+        measurementId: 'mr-vmax',
+        kind: 'velocity',
+        label: 'Vmax IM',
+        value: 5.0,
+        units: 'm/s',
+        modality: 'cw',
+        createdAt: '2026-01-01T00:00:00Z',
+        frameId: 1,
+        phase: 0.2,
+        timeS: 0.2,
+        sourceViewId: 'a4c',
+        viewScore: 92,
+        imageQualityScore: 90,
+        userAssisted: false,
+        referenceGuidelineIds: ['ase-scmr-regurgitation-2017'],
+        geometry: [],
+      },
+    ]);
+    const mrGrad = derived.find((d) => d.id === 'mr-peak-gradient');
+    assert.ok(mrGrad && mrGrad.value === '100 mmHg', `Expected 100 mmHg MR gradient, got ${mrGrad?.value}`);
   });
 });

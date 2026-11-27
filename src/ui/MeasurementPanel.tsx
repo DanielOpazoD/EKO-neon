@@ -8,6 +8,7 @@ const GROUP_LABEL: Record<MeasurementSpec['group'], string> = {
   lv: 'Ventrículo izquierdo',
   'lvot-av': 'TSVI y válvula aórtica',
   diastole: 'Función diastólica',
+  valves: 'Insuficiencias valvulares',
   right: 'Corazón derecho',
   atria: 'Aurículas',
 };
@@ -88,7 +89,7 @@ export function MeasurementPanel() {
     );
   };
   const required = MEASUREMENT_SPECS.filter((m) => requiredIds.includes(m.id));
-  const groups = (['lv', 'lvot-av', 'diastole', 'right', 'atria'] as const).map((g) => ({
+  const groups = (['lv', 'lvot-av', 'diastole', 'valves', 'right', 'atria'] as const).map((g) => ({
     g,
     items: MEASUREMENT_SPECS.filter((m) => m.group === g && !requiredIds.includes(m.id)),
   }));
