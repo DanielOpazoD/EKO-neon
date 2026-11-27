@@ -116,6 +116,8 @@ export interface AcquisitionSlice {
   /** Playback speed multiplier for frozen cine loops (0.25×, 0.5×, 1×). */
   cineSpeed: 0.25 | 0.5 | 1;
   color: ColorSettings;
+  /** Whether the learner manually moved or resized the Color ROI box since the last preset/reset. */
+  colorBoxCustom: boolean;
   /** The spectral settings of the mode on screen; each spectral mode keeps its own velocity window (decision 230). */
   spectral: SpectralSettings;
   /** The velocity settings each spectral mode had when the learner left it, restored on return (decision 230). */
@@ -148,6 +150,8 @@ export interface AcquisitionSlice {
   setCineSpeed: (sp: 0.25 | 0.5 | 1) => void;
   jumpCinePhase: (target: 'ed' | 'es') => void;
   setColor: (c: Partial<ColorSettings>) => void;
+  /** Re-frame the Color ROI box to the active view's anatomical preset and clear manual override. */
+  resetColorBox: () => void;
   setSpectral: (s: Partial<SpectralSettings>) => void;
   setCursor: (theta: number, depth?: number) => void;
   setQuality: (q: QualityChoice) => void;

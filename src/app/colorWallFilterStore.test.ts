@@ -5,7 +5,7 @@ import { parseReviewReport } from './review';
 import { buildInput } from './useSimulation';
 import { acquisitionLimits } from '@/simulator/core/acquisitionInput';
 import { baseInput } from '@/simulator/core/baseInput';
-import { DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
+import { colorBoxForView, DEFAULT_COLOR } from '@/simulator/doppler/color/colorDoppler';
 import {
   colorWallFilterCutoffMps,
   WF_MAX_NYQUIST,
@@ -199,5 +199,39 @@ describe('the colour wall filter the learner asks for survives the changes of Ny
     get().loadCase('af-diastolic');
     get().setModality('color');
     assert.ok(Math.abs(effective() - 0.204) < 1e-4, `and after another case at ${effective()}`);
+  });
+
+  it('frames the Color ROI box for the active view while respecting manual user placement and exam privacy', () => {
+    // Fresh session clears custom box override: entering Color on a target view frames its anatomical ROI
+    get().loadCase('normal-excellent-window');
+    get().setTargetView('subcostal-ivc');
+    get().setModality('color');
+    const ivcBox = colorBoxForView('subcostal-ivc', 16, (80 * Math.PI) / 180);
+    assert.equal(get().color.boxRMinCm, ivcBox.boxRMinCm);
+    assert.equal(get().color.boxRMaxCm, ivcBox.boxRMaxCm);
+    assert.equal(get().color.boxThetaMinRad, ivcBox.boxThetaMinRad);
+    assert.equal(get().color.boxThetaMaxRad, ivcBox.boxThetaMaxRad);
+    assert.equal(get().color.scaleMps, DEFAULT_COLOR.scaleMps);
+    assert.equal(get().colorBoxCustom, false);
+
+    // Manually resizing the box sets colorBoxCustom and survives toggling 2D -> Color
+    get().setColor({ boxRMinCm: 3.0, boxRMaxCm: 9.0, boxThetaMinRad: -0.2, boxThetaMaxRad: 0.2 });
+    assert.equal(get().colorBoxCustom, true);
+    get().setModality('2d');
+    get().setTargetView('a4c');
+    get().setModality('color');
+    assert.equal(get().color.boxRMaxCm, 9.0, 'Manual Color ROI must not be overwritten on modality toggle');
+
+    // Explicit resetColorBox snaps back to the active view's ROI
+    get().resetColorBox();
+    const a4cBox = colorBoxForView('a4c', 16, (80 * Math.PI) / 180);
+    assert.equal(get().color.boxRMaxCm, a4cBox.boxRMaxCm);
+    assert.equal(get().colorBoxCustom, false);
+
+    // Exam mode never auto-frames the Color box to a view
+    get().setMode('exam', 'normal-excellent-window');
+    get().setColor({ boxRMinCm: 4.5, boxRMaxCm: 10.5 });
+    get().resetColorBox();
+    assert.equal(get().color.boxRMaxCm, DEFAULT_COLOR.boxRMaxCm, 'Exam mode reset uses neutral DEFAULT_COLOR');
   });
 });

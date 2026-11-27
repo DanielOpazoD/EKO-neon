@@ -2,14 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allocColorField,
+  colorBoxForView,
   colorSpectralWidthMps,
   computeColorField,
   DEFAULT_COLOR,
   DOPPLER_SHADOW_TRANSMISSION,
   overlayColorField,
+  VIEW_COLOR_BOX_PRESETS,
   type ColorAcquisition,
   type ColorSettings,
 } from './colorDoppler';
+import { pulsedAcquisition } from '@/simulator/renderer/pulseTiming';
+import { VIEW_LABELS } from '@/simulator/windows/viewLabels';
 import type { ScanLut } from '@/simulator/renderer/scanConvert';
 import {
   buildFlowParams,
@@ -1998,4 +2002,43 @@ test('competent aortic arch & descending aorta sustain antegrade Windkessel dias
     Math.abs(netEarly.inflowMlps - totalStorage - totalOutlets) < 1e-6,
     'Aortic network must strictly conserve mass during Windkessel diastolic runoff',
   );
+});
+
+test('view-aware Color ROI presets cover all canonical views, clamp safely, and preserve 0.68 m/s Nyquist', () => {
+  const canonicalIds = Object.keys(VIEW_LABELS);
+  assert.equal(canonicalIds.length, 13);
+  const defaultSectorRad = (80 * Math.PI) / 180;
+  for (const id of canonicalIds) {
+    assert.ok(id in VIEW_COLOR_BOX_PRESETS, `Missing Color ROI preset for canonical view "${id}"`);
+    const box = colorBoxForView(id, 16, defaultSectorRad);
+    assert.ok(box.boxRMinCm >= 1.2 && box.boxRMaxCm <= 15.5, `${id}: depth out of bounds [${box.boxRMinCm}, ${box.boxRMaxCm}]`);
+    assert.ok(box.boxRMaxCm - box.boxRMinCm >= 2.0, `${id}: depth span too narrow`);
+    assert.ok(
+      box.boxThetaMinRad >= -defaultSectorRad / 2 && box.boxThetaMaxRad <= defaultSectorRad / 2,
+      `${id}: theta out of sector bounds`,
+    );
+    assert.ok(box.boxThetaMaxRad - box.boxThetaMinRad >= 0.24, `${id}: angular span too narrow`);
+    const acq = pulsedAcquisition(box.boxRMaxCm, 2.5, DEFAULT_COLOR.scaleMps);
+    assert.equal(
+      acq.scaleMps,
+      DEFAULT_COLOR.scaleMps,
+      `${id}: boxRMaxCm=${box.boxRMaxCm} lowered 2.5 MHz Nyquist below ${DEFAULT_COLOR.scaleMps} m/s (${acq.scaleMps.toFixed(3)})`,
+    );
+  }
+
+  // Narrow sector & shallow depth clamp gracefully without inverting min/max
+  const narrow = colorBoxForView('subcostal-ivc', 10, (40 * Math.PI) / 180);
+  assert.ok(narrow.boxRMaxCm <= 9.5 && narrow.boxRMinCm < narrow.boxRMaxCm);
+  assert.ok(
+    narrow.boxThetaMinRad >= -(20 * Math.PI) / 180 &&
+      narrow.boxThetaMaxRad <= (20 * Math.PI) / 180 &&
+      narrow.boxThetaMaxRad > narrow.boxThetaMinRad,
+  );
+
+  // Unknown or null view falls back to DEFAULT_COLOR bounds
+  const fb = colorBoxForView(null, 16, defaultSectorRad);
+  assert.equal(fb.boxRMinCm, DEFAULT_COLOR.boxRMinCm);
+  assert.equal(fb.boxRMaxCm, DEFAULT_COLOR.boxRMaxCm);
+  assert.equal(fb.boxThetaMinRad, DEFAULT_COLOR.boxThetaMinRad);
+  assert.equal(fb.boxThetaMaxRad, DEFAULT_COLOR.boxThetaMaxRad);
 });

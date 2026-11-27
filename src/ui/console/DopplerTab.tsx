@@ -58,10 +58,12 @@ export function DopplerTab() {
   const s = useSimStore(
     useShallow((st) => ({
       color: st.color,
+      colorBoxCustom: st.colorBoxCustom,
       frozen: st.frozen,
       cursorThetaRad: st.cursorThetaRad,
       gateDepthCm: st.gateDepthCm,
       modality: st.modality,
+      resetColorBox: st.resetColorBox,
       setColor: st.setColor,
       setCursor: st.setCursor,
       setModality: st.setModality,
@@ -205,6 +207,16 @@ export function DopplerTab() {
                 'Velocidad de corte a −3 dB. Con 8 pulsos va de 0,11 a 0,32 × Nyquist: para ver flujo más lento, baja la escala.',
               )}
             />
+            {s.colorBoxCustom && (
+              <button
+                className="ghost"
+                onClick={() => s.resetColorBox()}
+                disabled={s.closed}
+                data-tip={tip('Encuadra de nuevo la caja de color sobre las estructuras de la vista actual.')}
+              >
+                Ajustar caja a la vista
+              </button>
+            )}
           </details>
         </Section>
       )}
