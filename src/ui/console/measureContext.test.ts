@@ -1,0 +1,160 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { MEASUREMENT_SPECS } from '@/simulator/measurements/protocol';
+import type { Measurement } from '@/simulator/measurements/types';
+import {
+  captureModalityCheck,
+  isFreeToolCompatible,
+  isTimeInCineWindow,
+  phaseTag,
+  specsForView,
+  summarizeAutoEf,
+} from './measureContext';
+
+function makeSimp(
+  measurementId: 'lv-edv-simpson' | 'lv-esv-simpson' | 'rv-edv' | 'rv-esv',
+  viewId: string,
+  value: number,
+  frameId: number,
+  areaCm2?: number,
+): Measurement {
+  // Simple symmetric LV/RV contour around a 7 cm long axis so biplaneVolume() computes real discs.
+  const pxPerCm = 20;
+  const contour = [
+    { x: 160, y: 200 },
+    { x: 150, y: 150 },
+    { x: 160, y: 100 },
+    { x: 190, y: 60 },
+    { x: 220, y: 100 },
+    { x: 230, y: 150 },
+    { x: 220, y: 200 },
+  ];
+  return {
+    id: `${measurementId}-${viewId}-${frameId}`,
+    kind: 'volume',
+    measurementId,
+    technique: null,
+    label: measurementId,
+    value,
+    units: 'mL',
+    modality: '2d',
+    sourceViewId: viewId,
+    viewScore: 92,
+    frameId,
+    phase: measurementId.includes('edv') ? 0 : 0.42,
+    timeS: 1,
+    geometry: contour,
+    captureSector: {
+      apexX: 200,
+      apexY: 10,
+      pxPerCm,
+      depthCm: 16,
+      sectorRad: 1.4,
+      width: 400,
+      height: 360,
+      invertLR: false,
+    },
+    derived: areaCm2 !== undefined ? { areaCm2 } : undefined,
+    imageQualityScore: 90,
+    userAssisted: true,
+    referenceGuidelineIds: [],
+    createdAt: '2026-01-01T00:00:00Z',
+  };
+}
+
+describe('measurement context & compatibility helpers', () => {
+  it('detects modality compatibility for protocol specs and free tools with 1-click switch targets', () => {
+    const lvotVti = MEASUREMENT_SPECS.find((m) => m.id === 'lvot-vti')!;
+    const lvEdd = MEASUREMENT_SPECS.find((m) => m.id === 'lv-edd')!;
+
+    assert.deepEqual(captureModalityCheck(lvotVti, 'auto-vti', '2d'), {
+      ok: false,
+      suggestedModality: 'pw',
+    });
+    assert.deepEqual(captureModalityCheck(lvotVti, 'auto-vti', 'pw'), {
+      ok: true,
+      suggestedModality: null,
+    });
+    assert.deepEqual(captureModalityCheck(lvEdd, 'caliper', '2d'), {
+      ok: true,
+      suggestedModality: null,
+    });
+    assert.deepEqual(captureModalityCheck(undefined, 'velocity', '2d'), {
+      ok: false,
+      suggestedModality: 'pw',
+    });
+    assert.deepEqual(captureModalityCheck(undefined, 'tapse', '2d'), {
+      ok: false,
+      suggestedModality: 'm-mode',
+    });
+    assert.equal(isFreeToolCompatible('caliper', '2d'), true);
+    assert.equal(isFreeToolCompatible('velocity', 'cw'), true);
+    assert.equal(isFreeToolCompatible('velocity', '2d'), false);
+    assert.equal(isFreeToolCompatible('tapse', 'm-mode'), true);
+    assert.equal(isFreeToolCompatible('time', 'pw'), true);
+    assert.equal(isFreeToolCompatible('time', '2d'), false);
+  });
+
+  it('orders view-matched measurements with active-modality specs first and required specs prioritized', () => {
+    const plax2d = specsForView('plax', '2d', ['lv-edd', 'lvot-diameter']);
+    assert.ok(plax2d.length >= 6);
+    assert.ok(plax2d.every((s) => s.views.includes('plax')));
+    // Required 2D specs come ahead of non-required 2D specs, and Color-only specs (VC IM) go after 2D specs.
+    const idxEdd = plax2d.findIndex((s) => s.id === 'lv-edd');
+    const idxRoot = plax2d.findIndex((s) => s.id === 'aortic-root');
+    const idxVc = plax2d.findIndex((s) => s.id === 'mr-vena-contracta');
+    assert.ok(idxEdd < idxRoot, 'required 2D PLAX spec precedes optional 2D spec');
+    assert.ok(idxRoot < idxVc, '2D specs precede Color-only spec while in 2D');
+
+    // Switching to Color promotes Color specs in PLAX to the top.
+    const plaxColor = specsForView('plax', 'color', ['lv-edd']);
+    assert.equal(plaxColor[0]!.modalities.includes('color'), true);
+  });
+
+  it('tracks Auto-FE single-plane -> biplane progression, RV FAC, and hides view readiness in exam mode', () => {
+    const a4cOnly = [
+      makeSimp('lv-edv-simpson', 'a4c', 122, 10),
+      makeSimp('lv-esv-simpson', 'a4c', 45, 22),
+      makeSimp('rv-edv', 'rv-focused', 115, 30, 17.2),
+      makeSimp('rv-esv', 'rv-focused', 36, 42, 7.9),
+    ];
+    const s1 = summarizeAutoEf(a4cOnly, 'a4c', '2d', true);
+    assert.equal(s1.is2dReady, true);
+    assert.equal(s1.lv.a4cDone, true);
+    assert.equal(s1.lv.a2cDone, false);
+    assert.equal(s1.lv.biplane, false);
+    assert.equal(s1.lv.viewReady, true);
+    assert.equal(s1.lv.edFrameId, 10);
+    assert.equal(s1.lv.esFrameId, 22);
+    assert.ok(Math.abs((s1.lv.efPct ?? 0) - 63.1) < 0.5);
+    assert.equal(s1.rv.hasResult, true);
+    assert.ok((s1.rv.facPct ?? 0) > 50 && (s1.rv.facPct ?? 0) < 58);
+
+    // Adding A2C upgrades automatically to biplane.
+    const withA2c = [
+      ...a4cOnly,
+      makeSimp('lv-edv-simpson', 'a2c', 118, 50),
+      makeSimp('lv-esv-simpson', 'a2c', 44, 62),
+    ];
+    const sBi = summarizeAutoEf(withA2c, 'plax', '2d', true);
+    assert.equal(sBi.lv.a4cDone, true);
+    assert.equal(sBi.lv.a2cDone, true);
+    assert.equal(sBi.lv.biplane, true);
+    assert.equal(sBi.lv.viewReady, false);
+
+    // In exam mode (`showViewFeedback = false`), view readiness stays strictly null.
+    const sExam = summarizeAutoEf(withA2c, 'a4c', '2d', false);
+    assert.equal(sExam.lv.viewReady, null);
+    assert.equal(sExam.rv.viewReady, null);
+  });
+
+  it('formats phase tags concisely in Spanish and checks rolling cine window membership', () => {
+    assert.equal(phaseTag('ed'), 'TD');
+    assert.equal(phaseTag('es'), 'TS');
+    assert.equal(phaseTag('mid-systole'), 'Mesosíst.');
+    assert.equal(phaseTag('any'), null);
+    assert.equal(isTimeInCineWindow(10.5, { startS: 9.0, endS: 12.0 }), true);
+    assert.equal(isTimeInCineWindow(7.2, { startS: 9.0, endS: 12.0 }), false);
+    assert.equal(isTimeInCineWindow(null, { startS: 9.0, endS: 12.0 }), false);
+  });
+});

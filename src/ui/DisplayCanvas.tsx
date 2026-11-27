@@ -17,10 +17,17 @@ import { ImageQuickBar } from './ImageQuickBar';
 import { SegmentImageToggle } from './SegmentImageToggle';
 import { sampleIndexAt, segmentCss, segmentIdOf, segmentNames } from './segmentMap';
 import { coverageText } from './segmentCoverage';
-import { handleMeasurementToolClick, type PendingMeasurement } from './display/measurementTools';
+import {
+  finalizePendingMeasurement,
+  handleMeasurementToolClick,
+  type PendingMeasurement,
+} from './display/measurementTools';
+import { CaptureBar } from './display/CaptureBar';
+import { computeLivePreview } from './display/measurementPreview';
 import { drawOverlay } from './display/overlayDraw';
 import { frameSizeForBox } from './display/frameSize';
 import { pendingAcquisitionKey } from './display/measurementPlacement';
+import { pendingSession } from './display/pendingSession';
 import {
   commitReviewLasso,
   identifyReviewMarker,
@@ -44,6 +51,8 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
   const ovRef = useRef<HTMLCanvasElement>(null);
   const lastSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingRef = useRef<PendingMeasurement>({ points: [] });
+  /** Pointer coordinates over the canvas while a measurement tool is armed (ref-only: zero React re-renders). */
+  const hoverPtRef = useRef<{ x: number; y: number } | null>(null);
   const lastOutRef = useRef<SimOutput | null>(null);
   /** the overlay redraw of the drawing effect, so tool clicks refresh the overlay without waiting for a frame */
   const redrawOverlayRef = useRef<() => void>(() => {});
@@ -127,12 +136,23 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         pending.captureSector = undefined;
         pending.context = context;
       }
+      pendingSession.setCount(pending.points.length);
+      const pendingReproj = reprojectGeometry(pending.points, pending.captureSector, out.sector);
+      const livePreview = computeLivePreview(
+        state.activeTool,
+        state.activeMeasurementId,
+        pendingReproj,
+        hoverPtRef.current,
+        out,
+        state.modality,
+      );
       drawOverlay(
         canvas,
         out,
         state,
-        reprojectGeometry(pending.points, pending.captureSector, out.sector),
+        pendingReproj,
         lassoRef.current.map((q) => polarToPixel(out.sector, q.rCm, q.thetaRad)),
+        livePreview,
       );
     };
     const unsubFrame = frameBus.subscribe((out) => {
@@ -148,6 +168,21 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       frameBus.diag.frames++;
     });
     redrawOverlayRef.current = redrawOverlay;
+    pendingSession.register({
+      undo: () => {
+        if (pendingRef.current.points.length > 0) {
+          pendingRef.current.points.pop();
+          pendingSession.setCount(pendingRef.current.points.length);
+          redrawOverlay();
+        }
+      },
+      finish: () => {
+        const out = lastOutRef.current;
+        if (!out) return;
+        finalizePendingMeasurement(out, pendingRef.current, redrawOverlay);
+        pendingSession.setCount(pendingRef.current.points.length);
+      },
+    });
     const unsubStore = useSimStore.subscribe((next, prev) => {
       if (
         next.caseId === prev.caseId &&
@@ -175,6 +210,8 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     // the structure under the pointer on the cut map is outlined here (decision 202)
     const unsubStructHover = useStructureHover.subscribe(redrawOverlay);
     return () => {
+      pendingSession.register(null);
+      pendingSession.setCount(0);
       unsubFrame();
       unsubStore();
       unsubHover();
@@ -228,6 +265,7 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
       handleMeasurementToolClick(p, e.detail, hud, pendingRef.current, () =>
         redrawOverlayRef.current(),
       );
+      pendingSession.setCount(pendingRef.current.points.length);
       return;
     }
     // frozen, a press on the ECG strip picks the cine frame at that instant and a drag scrubs (decision 190)
@@ -316,10 +354,17 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
     const hud = lastOutRef.current;
     if (dragRef.current.kind === 'none') {
       updateSegmentTip(e);
+      const st = useSimStore.getState();
+      if (hud && st.activeTool !== 'none') {
+        hoverPtRef.current = toLocal(e);
+        if (hud.frozen) redrawOverlayRef.current();
+      } else if (hoverPtRef.current !== null) {
+        hoverPtRef.current = null;
+      }
       // the strip says it can be scrubbed; an armed tool keeps its crosshair from the stylesheet
       if (hud && ovRef.current)
         ovRef.current.style.cursor =
-          cineOffsetOnEcg(toLocal(e), hud, useSimStore.getState()) !== null ? 'ew-resize' : '';
+          cineOffsetOnEcg(toLocal(e), hud, st) !== null ? 'ew-resize' : '';
       return;
     }
     if (!hud) return;
@@ -413,10 +458,15 @@ export function DisplayCanvas(props: { onSize: (s: { width: number; height: numb
         onMouseLeave={() => {
           onMouseUp();
           updateSegmentTip(null);
+          if (hoverPtRef.current !== null) {
+            hoverPtRef.current = null;
+            if (useSimStore.getState().activeTool !== 'none') redrawOverlayRef.current();
+          }
         }}
         aria-label="Superposiciones y herramientas de medición"
       />
       <ImageHud />
+      <CaptureBar />
       <SegmentImageToggle />
       <ImageQuickBar />
       <div className="seg-tip" ref={segTipRef} role="status" aria-live="polite">

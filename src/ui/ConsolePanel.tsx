@@ -36,11 +36,17 @@ export function ConsolePanel() {
   const policy = modePolicy(s.mode);
 
   // Follow the modality: enabling a Doppler mode surfaces its controls; returning to 2D
-  // leaves the Doppler tab so the user is never left on an empty panel.
+  // leaves the Doppler tab so the user is never left on an empty panel. Stay in Measure or
+  // Review so switching 2D ↔ PW ↔ CW ↔ M while taking measurements never interrupts workflow.
   useEffect(() => {
     const st = useSimStore.getState();
-    if (mod !== '2d') st.setUi({ consoleTab: 'doppler' });
-    else if (st.ui.consoleTab === 'doppler') st.setUi({ consoleTab: 'imagen' });
+    if (mod !== '2d') {
+      if (st.ui.consoleTab !== 'medir' && st.ui.consoleTab !== 'revisar') {
+        st.setUi({ consoleTab: 'doppler' });
+      }
+    } else if (st.ui.consoleTab === 'doppler') {
+      st.setUi({ consoleTab: 'imagen' });
+    }
   }, [mod]);
 
   const tabs: {
