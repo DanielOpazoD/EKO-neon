@@ -89,7 +89,8 @@ import { StripEngine, type StripCtx } from './stripEngine';
  */
 export class SimulatorCore {
   readonly caseDef: CaseDefinition;
-  readonly truth: StructuredEchoTruth;
+  truth: StructuredEchoTruth;
+  truthVersion = 0;
   private thorax: ThoraxModel;
   private heart: HeartModel;
   private tables: BeatTables;
@@ -205,7 +206,10 @@ export class SimulatorCore {
     this.artifactKey = artifactOverridesKey(input.artifactOverrides);
     this.nominalTables = this.tables;
     this.clock = new CardiacClock(caseDef.rhythm, caseDef.seed);
-    this.truth = computeGroundTruth(caseDef, this.tables);
+    this.truth = computeGroundTruth(caseDef, this.tables, {
+      breathing: input.patient.respiration === 'free-breathing',
+      heart: this.heart,
+    });
     this.syncBeatTables(false);
     this.consoleState = createConsoleState(caseDef.seed);
     this.caseArtifacts = caseArtifactLevels(caseDef);
@@ -331,6 +335,8 @@ export class SimulatorCore {
       const models = buildCaseModels(this.caseDef, input.patient);
       this.thorax = models.thorax;
       this.heart = models.heart;
+      const wasBreathing = this.input.patient.respiration === 'free-breathing';
+      const nowBreathing = input.patient.respiration === 'free-breathing';
       if (
         input.patient.respiration !== this.input.patient.respiration &&
         this.caseDef.rhythm.type !== 'atrial-fibrillation'
@@ -338,6 +344,13 @@ export class SimulatorCore {
         this.tables = this.nominalTables;
         this.tablesBeat = -1;
         this.tablesVersion++;
+      }
+      if (wasBreathing !== nowBreathing) {
+        this.truth = computeGroundTruth(this.caseDef, this.nominalTables, {
+          breathing: nowBreathing,
+          heart: this.heart,
+        });
+        this.truthVersion++;
       }
       this.flow = this.buildFlow();
       this.atlas.invalidate();

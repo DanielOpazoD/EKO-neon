@@ -25,6 +25,7 @@ export interface SimClientHandlers {
     phaseMarks: PhaseMarks,
     lvLengthCm: number,
   ) => void;
+  onTruth?: (truth: StructuredEchoTruth, caseId: string) => void;
   onError: (message: string) => void;
 }
 
@@ -75,6 +76,8 @@ export class SimClient {
       // the worker builds every core it is asked for, in order: one a later load superseded is not announced
       if (msg.generation !== undefined && msg.generation !== this.loadGeneration) return;
       this.handlers.onReady(msg.truth, msg.caseId, msg.phaseMarks, msg.lvLengthCm);
+    } else if (msg.type === 'truth') {
+      this.handlers.onTruth?.(msg.truth, msg.caseId);
     } else if (msg.type === 'response') {
       const p = this.pending.get(msg.id);
       if (p) {
@@ -182,7 +185,13 @@ export class SimClient {
     // inline, the timer keeps running but steps nothing while paused; waking restarts the clock where it stood
     if (this.inlinePaused && !input.paused) this.inlineLast = performance.now();
     this.inlinePaused = input.paused === true;
-    this.inline?.setInput(input);
+    if (this.inline) {
+      const prevTruthVersion = this.inline.truthVersion;
+      this.inline.setInput(input);
+      if (this.inline.truthVersion !== prevTruthVersion) {
+        this.handlers.onTruth?.(this.inline.truth, this.inline.caseDef.id);
+      }
+    }
   }
 
   recycle(buffer: ArrayBuffer): void {
