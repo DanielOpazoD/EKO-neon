@@ -76,6 +76,47 @@ test('PW wraps velocities above Nyquist while CW does not alias and suppresses o
   assert.equal(sumOutOfRange, 0);
 });
 
+test('CW wall filter applies per velocity bin so high-velocity turbulent tails never fill the baseline stopband', () => {
+  // Previously, accumulateSpectrum only checked |smp.v| >= wallFilterMps on the sample center, leaving a bright
+  // ~10% peak band right across |vBin| < 0.8 * wallFilterMps whenever a fast turbulent jet broadened toward baseline.
+  for (const [wf, baselineShiftMps] of [
+    [0.2, 0],
+    [0.5, 0],
+    [0.5, -2.0],
+  ] as const) {
+    const sCw = { ...spectralDefaultsFor('cw'), wallFilterMps: wf, baselineShiftMps };
+    const out = new Float32Array(SPECTRAL_BINS);
+    accumulateSpectrum([{ v: -4.5, weight: 1, dispersion: 0.55 }], sCw, false, out);
+    const { vMin, vMax } = spectralRange(sCw);
+    const span = vMax - vMin;
+    let peak = 0;
+    let peakV = 0;
+    let stopbandBins = 0;
+    let stopbandMax = 0;
+    for (let b = 0; b < SPECTRAL_BINS; b++) {
+      const vBin = vMax - ((b + 0.5) / SPECTRAL_BINS) * span;
+      if (out[b]! > peak) {
+        peak = out[b]!;
+        peakV = vBin;
+      }
+      if (Math.abs(vBin) < 0.8 * wf) {
+        stopbandBins++;
+        stopbandMax = Math.max(stopbandMax, out[b]!);
+      }
+    }
+    assert.ok(stopbandBins >= 2, `expected at least 2 stopband bins for WF=${wf}`);
+    assert.equal(
+      stopbandMax,
+      0,
+      `CW WF=${wf} shift=${baselineShiftMps}: turbulent tail leaked ${stopbandMax.toFixed(4)} into |v| < 0.8*WF stopband`,
+    );
+    assert.ok(
+      Math.abs(peakV - -4.5) < 0.25 && peak > 0.9,
+      `CW WF=${wf}: jet peak should stay intact near -4.5 m/s, got ${peakV.toFixed(2)} m/s (${peak.toFixed(3)})`,
+    );
+  }
+});
+
 test('isClickColumn distinguishes valve clicks (including CW & shifted baseline) from laminar and aliased PW flow', () => {
   const s = spectralDefaultsFor('pw');
   const flowCol = new Float32Array(SPECTRAL_BINS);
