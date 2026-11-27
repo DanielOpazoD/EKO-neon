@@ -11,6 +11,10 @@ import type { CaseDefinition } from '@/cases/schema';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
 import type { AutoChamberVolumeResult, ChamberId } from '@/simulator/measurements/autoVolume';
 import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
+import type {
+  AutoDopplerTargetResult,
+  DopplerTargetId,
+} from '@/simulator/measurements/autoDopplerTarget';
 import type { AutoTraceBeatResult } from './strip/autoTrace';
 
 /**
@@ -268,6 +272,8 @@ export type SimRequest =
   | { kind: 'autoChamberVolume'; chamber: ChamberId }
   /** Locate the optimal ASE LVOT PW gate position from the rendered 2D polar structure map. */
   | { kind: 'autoLvotGate' }
+  /** Locate a clinical Doppler/M-mode gate or cursor target from the rendered 2D polar structure map. */
+  | { kind: 'autoDopplerTarget'; target: DopplerTargetId }
   /** Automatically locate the newest complete systolic beat on the spectral strip and trace its envelope. */
   | { kind: 'autoTraceBeat' }
   /**
@@ -291,6 +297,7 @@ export type SimResponse =
   | { kind: 'cinePhaseJump'; offset: number; phase: number }
   | { kind: 'autoChamberVolume'; result: AutoChamberVolumeResult }
   | { kind: 'autoLvotGate'; result: AutoLvotGateResult }
+  | { kind: 'autoDopplerTarget'; result: AutoDopplerTargetResult }
   | { kind: 'autoTraceBeat'; result: AutoTraceBeatResult }
   /** Whether there was a live context to lose, or a context lost by the hook to restore. */
   | { kind: 'gpuContext'; ok: boolean };

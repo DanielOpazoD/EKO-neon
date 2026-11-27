@@ -5,6 +5,10 @@ import { evaluateCapture, specFor, type CaptureExtras } from '@/app/measurementC
 import { useHudStore, useSimStore } from '@/app/store';
 import type { SimOutput, StripInfo } from '@/simulator/core/protocol';
 import type { AutoTraceBeatResult } from '@/simulator/core/strip/autoTrace';
+import type {
+  AutoDopplerTargetResult,
+  DopplerTargetId,
+} from '@/simulator/measurements/autoDopplerTarget';
 import type { AutoLvotGateResult } from '@/simulator/measurements/autoLvotGate';
 import {
   polygonAreaCm2,
@@ -17,7 +21,7 @@ import { reprojectGeometry } from '@/simulator/measurements/geometry';
 import { discProfileFromContour, volumeFromProfileMl } from '@/simulator/measurements/simpson';
 import type { Measurement } from '@/simulator/measurements/types';
 import { summarizeEnvelope, type VtiSummary } from '@/simulator/measurements/vti';
-import { MODALITIES } from '@/simulator/renderer/modality';
+import { isSpectralModality, MODALITIES } from '@/simulator/renderer/modality';
 import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 
 export interface PendingMeasurement {
@@ -710,8 +714,43 @@ export async function runAutoLvotGate(): Promise<AutoLvotGateResult> {
     // Shift the PW velocity window downward (`baselineShiftMps = -0.25`, raising the zero line)
     // so negative apical LVOT ejection (~1.0–1.2 m/s away from probe) clears Nyquist without aliasing.
     const after = useSimStore.getState();
-    if (after.spectral.baselineShiftMps >= -0.05) {
-      after.setSpectral({ baselineShiftMps: -0.25 });
+    const maxShift = Math.round(after.spectral.scaleMps * 80) / 100;
+    const shift = Math.max(-maxShift, Math.min(maxShift, -0.25));
+    if (after.spectral.baselineShiftMps > shift + 0.02) {
+      after.setSpectral({ baselineShiftMps: shift });
+    }
+  }
+  return res.result;
+}
+
+/**
+ * Pure-2D guided placement for clinical Doppler and M-mode targets (LVOT PW, Mitral E/A PW,
+ * TDI septal/lateral e′, TAPSE M-mode, TR CW): snaps cursor/gate from the rendered 2D polar frame,
+ * activates the target modality live, and sets a sensible baseline shift for aliasing headroom.
+ */
+export async function runAutoDopplerTarget(
+  target: DopplerTargetId,
+): Promise<AutoDopplerTargetResult> {
+  const res = await frameBus.request({ kind: 'autoDopplerTarget', target });
+  if (!res || res.kind !== 'autoDopplerTarget') {
+    return {
+      ok: false,
+      target,
+      reason: 'no-frame',
+      message: 'El simulador no respondió al intento de posicionar el cursor.',
+    };
+  }
+  if (res.result.ok) {
+    const r = res.result;
+    const st = useSimStore.getState();
+    st.setCursor(r.thetaRad, r.rCm);
+    if (st.modality !== r.modality) st.setModality(r.modality);
+    else if (st.frozen) st.toggleFreeze();
+    if (r.recommendedBaselineShiftMps !== undefined && isSpectralModality(r.modality)) {
+      const after = useSimStore.getState();
+      const maxShift = Math.round(after.spectral.scaleMps * 80) / 100;
+      const shift = Math.max(-maxShift, Math.min(maxShift, r.recommendedBaselineShiftMps));
+      after.setSpectral({ baselineShiftMps: shift });
     }
   }
   return res.result;

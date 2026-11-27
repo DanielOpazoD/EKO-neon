@@ -4,6 +4,7 @@ import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
 import { computeAutoChamberVolume } from '@/simulator/measurements/autoVolume';
 import { findLvotGateFromPolar } from '@/simulator/measurements/autoLvotGate';
+import { findDopplerTargetFromPolar } from '@/simulator/measurements/autoDopplerTarget';
 import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import type { PolarFrame } from '@/simulator/renderer/types';
@@ -142,6 +143,46 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
       systolicFrame: isSystolic,
     });
     return { kind: 'autoLvotGate', result };
+  }
+  if (req.kind === 'autoDopplerTarget') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    if (!refFrame) {
+      return {
+        kind: 'autoDopplerTarget',
+        result: {
+          ok: false,
+          target: req.target,
+          reason: 'no-frame',
+          message: 'No hay un cuadro 2D disponible para posicionar el cursor.',
+        },
+      };
+    }
+    const pm = ctx.phaseMarks();
+    const samePose = (f: CineFrame) =>
+      Math.abs(f.acquisition.probe.u - refFrame.acquisition.probe.u) < 0.2 &&
+      Math.abs(f.acquisition.probe.v - refFrame.acquisition.probe.v) < 0.2 &&
+      Math.abs(f.acquisition.probe.rotationDeg - refFrame.acquisition.probe.rotationDeg) < 3 &&
+      Math.abs(f.acquisition.probe.tiltDeg - refFrame.acquisition.probe.tiltDeg) < 3 &&
+      Math.abs(f.acquisition.probe.rockDeg - refFrame.acquisition.probe.rockDeg) < 3;
+    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT, early-diastole for mitral/TDI, ED for TAPSE/TR)
+    const desiredPhase =
+      req.target === 'lvot'
+        ? pm.ejectionStart + 0.5 * (pm.ejectionEnd - pm.ejectionStart)
+        : req.target === 'mitral-inflow' || req.target === 'tdi-septal' || req.target === 'tdi-lateral'
+          ? 0.5 * (pm.mitralOpen + pm.eEnd)
+          : 0;
+    const found = ctx.cine.findNearestPhaseOffsetMatching(desiredPhase, samePose);
+    const cand = found ? ctx.cine.select(found.offset) : undefined;
+    const dist = cand
+      ? Math.min(Math.abs(cand.phase - desiredPhase), 1 - Math.abs(cand.phase - desiredPhase))
+      : 1;
+    const chosen = cand && dist <= 0.14 ? cand : refFrame;
+    const isSystolic =
+      chosen.phase >= pm.ejectionStart && chosen.phase <= pm.ejectionEnd + 0.05;
+    const result = findDopplerTargetFromPolar(chosen.structure, chosen.spec, req.target, {
+      systolicFrame: isSystolic,
+    });
+    return { kind: 'autoDopplerTarget', result };
   }
   if (
     ctx.input.frozen &&
