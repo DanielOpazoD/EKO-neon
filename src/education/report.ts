@@ -304,6 +304,15 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       formula: '4·Vmax²',
       inputs: `Vmax ${avVmax.toFixed(2)} m/s`,
     });
+  const mrVmax = v('mr-vmax');
+  if (mrVmax !== null)
+    rows.push({
+      id: 'mr-peak-gradient',
+      label: 'Gradiente pico IM (VI–AI)',
+      value: `${(4 * mrVmax * mrVmax).toFixed(0)} mmHg`,
+      formula: '4·Vmax²',
+      inputs: `Vmax IM ${mrVmax.toFixed(2)} m/s`,
+    });
   const e = v('mitral-e'),
     a = v('mitral-a');
   if (e !== null && a !== null && a > 0)

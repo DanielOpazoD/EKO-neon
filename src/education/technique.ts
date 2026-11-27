@@ -91,6 +91,11 @@ const BLOOD_STRUCTURES = new Set<number>([
   Structure.RaCavity,
   Structure.Lvot,
   Structure.AorticRoot,
+  Structure.AscendingAorta,
+  Structure.AorticArch,
+  Structure.BrachiocephalicArtery,
+  Structure.LeftCommonCarotid,
+  Structure.LeftSubclavian,
   Structure.Rvot,
   Structure.LaAppendage,
   Structure.RaAppendage,
@@ -148,9 +153,12 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
   const add = (code: string, level: FindingLevel, message: string) =>
     findings.push({ code, level, message });
 
-  // modality
+  // modality: Color overlays 2D, so 2D specs accept Color, while Color-only specs (e.g. vena contracta) require Color
+  const modalityAllowed =
+    spec.modalities.includes(ctx.modality as MeasurementSpec['modalities'][number]) ||
+    (ctx.modality === 'color' && spec.modalities.includes('2d'));
   const modalityFamily = ctx.modality === 'color' ? '2d' : ctx.modality;
-  if (!spec.modalities.includes(modalityFamily as MeasurementSpec['modalities'][number]))
+  if (!modalityAllowed)
     add(
       'modality',
       'invalid',
@@ -270,6 +278,14 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
             );
           else add('edges', 'ok', 'Extremos sobre los bordes endocárdicos.');
         }
+      } else if (pl.segment === 'jet') {
+        if (inTarget < 0.5)
+          add(
+            'placement',
+            'invalid',
+            `El caliper no está sobre ${pl.label} (${(inTarget * 100).toFixed(0)} % del segmento en la zona esperada).`,
+          );
+        else add('placement', 'ok', `Caliper sobre ${pl.label}.`);
       } else {
         if (inTarget < 0.6)
           add(
@@ -404,6 +420,11 @@ export function structureName(id: number): string {
     [Structure.TricuspidValve]: 'válvula tricúspide',
     [Structure.AorticValve]: 'válvula aórtica',
     [Structure.AorticRoot]: 'raíz aórtica',
+    [Structure.AscendingAorta]: 'aorta ascendente',
+    [Structure.AorticArch]: 'arco aórtico',
+    [Structure.BrachiocephalicArtery]: 'tronco braquiocefálico',
+    [Structure.LeftCommonCarotid]: 'arteria carótida común izquierda',
+    [Structure.LeftSubclavian]: 'arteria subclavia izquierda',
     [Structure.Lvot]: 'TSVI',
     [Structure.PulmonaryValve]: 'válvula pulmonar',
     [Structure.InteratrialSeptum]: 'septo interauricular',
@@ -411,6 +432,7 @@ export function structureName(id: number): string {
     [Structure.TricuspidAnnulus]: 'anillo tricuspídeo',
     [Structure.Chordae]: 'cuerdas tendinosas',
     [Structure.Pericardium]: 'pericardio',
+    [Structure.PericardialEffusion]: 'derrame pericárdico',
     [Structure.ModeratorBand]: 'banda moderadora',
     [Structure.LaAppendage]: 'orejuela izquierda',
     [Structure.RaAppendage]: 'orejuela derecha',
@@ -423,6 +445,10 @@ export function structureName(id: number): string {
     [Structure.CoronarySinus]: 'seno coronario',
     [Structure.Lung]: 'pulmón',
     [Structure.Rib]: 'costilla',
+    [Structure.Sternum]: 'esternón',
+    [Structure.Liver]: 'hígado',
+    [Structure.Spine]: 'columna vertebral',
+    [Structure.Stomach]: 'estómago',
     [Structure.ChestWall]: 'pared torácica',
     [Structure.DescendingAorta]: 'aorta descendente',
   };

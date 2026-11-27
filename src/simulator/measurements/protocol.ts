@@ -18,8 +18,8 @@ export type PhaseRequirement =
 export interface PlacementRule {
   /** Structures the gate / segment midpoint / cursor line must touch. */
   structures: number[];
-  /** For caliper measurements: 'cavity' = segment inside the cavity with tissue at both ends (inner edge); 'wall' = segment inside the wall. */
-  segment?: 'cavity' | 'wall';
+  /** For caliper measurements: 'cavity' = inner-edge cavity with tissue at both ends; 'wall' = wall thickness; 'jet' = Color Doppler jet neck (e.g. vena contracta). */
+  segment?: 'cavity' | 'wall' | 'jet';
   label: string;
 }
 
@@ -41,7 +41,7 @@ export interface MeasurementSpec {
   tolerancePct: number;
   referenceIds: string[];
   /** Group in the panel. */
-  group: 'lv' | 'lvot-av' | 'diastole' | 'right' | 'atria';
+  group: 'lv' | 'lvot-av' | 'diastole' | 'valves' | 'right' | 'atria';
 }
 
 const LV_CAVITY = [Structure.LvCavity];
@@ -292,7 +292,12 @@ export const MEASUREMENT_SPECS: MeasurementSpec[] = [
     views: ['a5c', 'a3c'],
     phase: 'systole',
     placement: {
-      structures: [Structure.AorticValve, Structure.AorticRoot, Structure.Lvot],
+      structures: [
+        Structure.AorticValve,
+        Structure.AorticRoot,
+        Structure.AscendingAorta,
+        Structure.Lvot,
+      ],
       label: 'línea de Doppler continuo a través de la válvula aórtica',
     },
     maxAngleDeg: 20,
@@ -314,7 +319,12 @@ export const MEASUREMENT_SPECS: MeasurementSpec[] = [
     views: ['a5c', 'a3c'],
     phase: 'systole',
     placement: {
-      structures: [Structure.AorticValve, Structure.AorticRoot, Structure.Lvot],
+      structures: [
+        Structure.AorticValve,
+        Structure.AorticRoot,
+        Structure.AscendingAorta,
+        Structure.Lvot,
+      ],
       label: 'línea de Doppler continuo a través de la válvula aórtica',
     },
     maxAngleDeg: 20,
@@ -621,7 +631,7 @@ export const MEASUREMENT_SPECS: MeasurementSpec[] = [
     units: 'm/s',
     tool: 'velocity',
     modalities: ['cw'],
-    views: ['a4c', 'rv-focused', 'psax-av'],
+    views: ['a4c', 'rv-focused', 'psax-av', 'subcostal-4c'],
     phase: 'systole',
     placement: {
       structures: [
@@ -634,11 +644,122 @@ export const MEASUREMENT_SPECS: MeasurementSpec[] = [
     },
     maxAngleDeg: 20,
     instruction:
-      'A4C (o enfocada en VD), Doppler continuo alineado con el chorro de IT: marca el pico de la envolvente sistólica.',
+      'A4C (o enfocada en VD / subcostal 4C), Doppler continuo alineado con el chorro de IT: marca el pico de la envolvente sistólica.',
     truth: (t) => t.rightHeart.trVmaxMps,
     tolerancePct: 8,
     referenceIds: ['ase-right-heart-2025'],
     group: 'right',
+  },
+  {
+    id: 'mr-vena-contracta',
+    label: 'Vena contracta de la insuficiencia mitral',
+    shortLabel: 'VC IM',
+    kind: 'linear',
+    units: 'cm',
+    tool: 'caliper',
+    modalities: ['color'],
+    views: ['plax', 'a4c', 'a3c'],
+    phase: 'systole',
+    placement: {
+      structures: [
+        Structure.LaCavity,
+        Structure.LvCavity,
+        Structure.MitralAnterior,
+        Structure.MitralPosterior,
+        Structure.MitralAnnulus,
+      ],
+      segment: 'jet',
+      label: 'cuello del chorro de IM en la zona de coaptación mitral',
+    },
+    instruction:
+      'PLAX (o A4C/A3C) con Doppler color y zoom sobre la válvula mitral, cuadro sistólico: mide con el caliper el ancho más estrecho del cuello del chorro justo distal al orificio regurgitante.',
+    truth: (t) => t.regurgitation.mr?.expectedVenaContractaCm ?? null,
+    tolerancePct: 20,
+    referenceIds: ['ase-scmr-regurgitation-2017'],
+    group: 'valves',
+  },
+  {
+    id: 'mr-vmax',
+    label: 'Velocidad máxima de la insuficiencia mitral',
+    shortLabel: 'Vmax IM',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['cw'],
+    views: ['a4c', 'a3c', 'a2c'],
+    phase: 'systole',
+    placement: {
+      structures: [
+        Structure.LaCavity,
+        Structure.LvCavity,
+        Structure.MitralAnterior,
+        Structure.MitralPosterior,
+        Structure.MitralAnnulus,
+      ],
+      label: 'línea de Doppler continuo a través del orificio mitral',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C/A3C/A2C, Doppler continuo alineado con el chorro regurgitante mitral (guiado por color): marca el pico de la envolvente holosistólica.',
+    truth: (t) => t.regurgitation.mr?.vmaxMps ?? null,
+    tolerancePct: 8,
+    referenceIds: ['ase-scmr-regurgitation-2017'],
+    group: 'valves',
+  },
+  {
+    id: 'mr-vti',
+    label: 'VTI de la insuficiencia mitral',
+    shortLabel: 'VTI IM',
+    kind: 'vti',
+    units: 'cm',
+    tool: 'auto-vti',
+    modalities: ['cw'],
+    views: ['a4c', 'a3c', 'a2c'],
+    phase: 'systole',
+    placement: {
+      structures: [
+        Structure.LaCavity,
+        Structure.LvCavity,
+        Structure.MitralAnterior,
+        Structure.MitralPosterior,
+        Structure.MitralAnnulus,
+      ],
+      label: 'línea de Doppler continuo a través del orificio mitral',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A4C/A3C/A2C, Doppler continuo alineado con el chorro de IM: traza la envolvente sistólica completa para cuantificar el volumen regurgitante (PISA × VTI).',
+    truth: (t) => t.regurgitation.mr?.vtiCm ?? null,
+    tolerancePct: 12,
+    referenceIds: ['ase-scmr-regurgitation-2017'],
+    group: 'valves',
+  },
+  {
+    id: 'ar-vmax',
+    label: 'Velocidad máxima de la insuficiencia aórtica',
+    shortLabel: 'Vmax IAo',
+    kind: 'velocity',
+    units: 'm/s',
+    tool: 'velocity',
+    modalities: ['cw'],
+    views: ['a5c', 'a3c'],
+    phase: 'early-diastole',
+    placement: {
+      structures: [
+        Structure.AorticValve,
+        Structure.AorticRoot,
+        Structure.Lvot,
+        Structure.LvCavity,
+      ],
+      label: 'línea de Doppler continuo a través de la válvula aórtica y TSVI',
+    },
+    maxAngleDeg: 20,
+    instruction:
+      'A5C o A3C, Doppler continuo alineado con el chorro diastólico de IAo: marca el pico protodiastólico de la envolvente.',
+    truth: (t) => t.regurgitation.ar?.vmaxMps ?? null,
+    tolerancePct: 10,
+    referenceIds: ['ase-scmr-regurgitation-2017'],
+    group: 'valves',
   },
 ];
 
