@@ -6,6 +6,7 @@ import { computeGroundTruth } from '@/simulator/hemodynamics/groundTruth';
 import { getMeasurementSpec } from '@/simulator/measurements/protocol';
 import type { Measurement } from '@/simulator/measurements/types';
 import { allTasks, isUnlocked } from './curriculum';
+import { subcostalPostureHint } from './causes';
 import { expectedFindings, scoreImpression } from './impression';
 import { loadProgress, PROGRESS_KEY, summarizeProgress } from './progress';
 import { biplaneVolume, deriveCalculations, pathologyImpressions, rightAtrialPressure } from './report';
@@ -280,5 +281,11 @@ describe('Educational grading, ASE clinical rules & curriculum', () => {
     ]);
     const mrGrad = derived.find((d) => d.id === 'mr-peak-gradient');
     assert.ok(mrGrad && mrGrad.value === '100 mmHg', `Expected 100 mmHg MR gradient, got ${mrGrad?.value}`);
+
+    // 6. Non-intrusive subcostal posture hint appears only for subcostal views outside supine-subcostal
+    assert.ok(subcostalPostureHint('subcostal-ivc', 'plax', 'left-lateral')?.includes('Supino (subcostal)'));
+    assert.ok(subcostalPostureHint(null, 'subcostal-4c', 'supine')?.includes('Supino (subcostal)'));
+    assert.equal(subcostalPostureHint('subcostal-ivc', 'subcostal-ivc', 'subcostal-supine'), null);
+    assert.equal(subcostalPostureHint('plax', 'plax', 'left-lateral'), null);
   });
 });

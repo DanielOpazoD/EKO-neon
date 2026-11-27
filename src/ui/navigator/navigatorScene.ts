@@ -235,9 +235,19 @@ export function mountNavigatorScene(
     body: () => ({ thorax, heartFrame, skin, skeleton, ghost }),
   });
 
+  let lastW = 0;
+  let lastH = 0;
+  let forceImmediate = false;
   const resize = () => {
-    const w = el.clientWidth || 300,
-      h = el.clientHeight || 300;
+    const rawW = el.clientWidth;
+    const rawH = el.clientHeight;
+    // Ignore collapsed/hidden mobile layout sizes instead of wiping the WebGL backing store.
+    if (lastW > 0 && (rawW <= 0 || rawH <= 0)) return;
+    const w = rawW > 0 ? rawW : 300;
+    const h = rawH > 0 ? rawH : 300;
+    if (w === lastW && h === lastH) return;
+    lastW = w;
+    lastH = h;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     // a tall, narrow panel (the exam's rail, torso alone, decision 256) widens the vertical field so the chest keeps
@@ -245,6 +255,11 @@ export function mountNavigatorScene(
     camera.fov = narrowPanelFovDeg(camera.aspect);
     camera.updateProjectionMatrix();
     dirty = true;
+    forceImmediate = true;
+    // Repaint synchronously when visible so resizing from mobile/collapsed never leaves a black frame.
+    if (!contextLost && !document.hidden && rawW > 0 && rawH > 0) {
+      renderer.render(scene, camera);
+    }
   };
   const ro = new ResizeObserver(resize);
   ro.observe(el);
@@ -300,9 +315,11 @@ export function mountNavigatorScene(
       lastRenderAtMs: lastRenderAt,
       lastCostMs,
       softwareGl,
+      forceImmediate,
     });
     dirty = decision.nextDirty;
     if (!decision.shouldRender) return;
+    forceImmediate = false;
 
     lastRenderAt = now;
     if (!thorax) {

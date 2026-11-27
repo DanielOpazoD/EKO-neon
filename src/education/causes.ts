@@ -1,5 +1,6 @@
 import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 import type { AcquisitionSettings } from '@/simulator/renderer/types';
+import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 
 /**
  * Causal explanations (spec 91): every hint the tutor gives is tied to a physical cause and the effect
@@ -89,6 +90,26 @@ export function explainAnalysis(
     });
   }
   return out;
+}
+
+const SUBCOSTAL_VIEWS = new Set(['subcostal-4c', 'subcostal-ivc']);
+
+/**
+ * Non-intrusive posture coaching hint for subcostal windows: never overrides the learner's
+ * patient position automatically, but explains why switching to «Supino (subcostal)» improves
+ * the subcostal acoustic window when the patient is still in left-lateral decubitus.
+ */
+export function subcostalPostureHint(
+  targetViewId: string | null,
+  bestViewId: string | null,
+  position: PatientState['position'],
+): string | null {
+  if (position === 'subcostal-supine') return null;
+  const activeSubcostal =
+    (targetViewId !== null && SUBCOSTAL_VIEWS.has(targetViewId)) ||
+    (bestViewId !== null && SUBCOSTAL_VIEWS.has(bestViewId));
+  if (!activeSubcostal) return null;
+  return 'Sugerencia de postura: coloca al paciente en «Supino (subcostal)» para relajar el abdomen y abrir mejor la ventana subcostal.';
 }
 
 /** Physical causes of each Doppler and console effect, used by the artifact lab and the curriculum. */

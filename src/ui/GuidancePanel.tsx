@@ -1,7 +1,7 @@
 import { useHudStore, useSimStore } from '@/app/store';
 import { modePolicy } from '@/app/modePolicy';
 import { getViewTarget } from '@/simulator/windows/viewDefinitions';
-import { explainAnalysis } from '@/education/causes';
+import { explainAnalysis, subcostalPostureHint } from '@/education/causes';
 
 /**
  * Left-bottom guidance (spec 27.2, 52), layered by how actionable each part is: the score, the
@@ -29,6 +29,7 @@ export function GuidancePanel() {
   const mode = useSimStore((s) => s.mode);
   const targetId = useSimStore((s) => s.targetViewId);
   const liveSettings = useSimStore((s) => s.settings);
+  const patientPosition = useSimStore((s) => s.patient.position);
   const settings = frozenSettings ?? liveSettings;
   if (!modePolicy(mode).hintsEnabled) return <ExamNotice />;
   if (!v) return <div className="guidance small">Analizando vista…</div>;
@@ -46,6 +47,9 @@ export function GuidancePanel() {
   const color = v.score >= 75 ? 'var(--ok)' : v.score >= 50 ? 'var(--warn)' : 'var(--bad)';
   const causes = showHints ? explainAnalysis(v, settings) : [];
   const targetHints = targetId ? getViewTarget(targetId).hints : [];
+  const postureHint = showHints
+    ? subcostalPostureHint(targetId, v.bestViewId, patientPosition)
+    : null;
   return (
     <div className="guidance" aria-live="polite">
       <div className="score">
@@ -80,8 +84,9 @@ export function GuidancePanel() {
       )}
       {showHints && (
         <>
-          {v.hints.length + targetHints.length > 0 && (
+          {v.hints.length + targetHints.length + (postureHint ? 1 : 0) > 0 && (
             <ul className="hints">
+              {postureHint && <li key="posture">{postureHint}</li>}
               {v.hints.map((h, i) => (
                 <li key={i}>{h}</li>
               ))}
