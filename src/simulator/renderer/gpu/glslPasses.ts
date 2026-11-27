@@ -37,26 +37,7 @@ float grainAbove(float g) { return g > GRAIN_THRESHOLD ? (g - GRAIN_THRESHOLD) /
 void acoustic(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
-  if (tissue == T_BLOOD) {
-    if (HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
-    float sec = 0.0;
-    if (structure == S_LA_CAV) {
-      sec = SEC_LA;
-    } else if (structure == S_LAA) {
-      sec = min(1.0, SEC_LA * SEC_LAA_BOOST);
-    } else if (structure == S_LV_CAV && SEC_LV > 0.0) {
-      float lvApex = 1.0 + m.z / max(1.0, LV_LEN);
-      float lvFrac = 0.2 + 0.8 * clamp(lvApex / 0.75, 0.0, 1.0);
-      sec = SEC_LV * lvFrac;
-    }
-    if (sec > 0.0) {
-      float px = m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
-      float py = m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
-      float pz = m.z * SEC_FREQ;
-      float swirl = 0.5 + 0.5 * sin(px + 0.85 * cos(py * 1.15 + pz * 0.75)) * cos(py * 0.9 - 0.75 * sin(pz * 1.1 - px * 0.65));
-      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
-    }
-  }
+  if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);
@@ -244,26 +225,7 @@ float heteroDb(int t) {
 void acousticSide(int tissue, int structure, float sdf, float extra, float nd, float ndP, float ndM, vec3 m, vec3 dirH, vec3 dirHP, vec3 dirHM, float transmural, float sc, out float sigma, out float specular) {
   vec4 props = uTissue[tissue];
   sigma = props.x;
-  if (tissue == T_BLOOD) {
-    if (HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
-    float sec = 0.0;
-    if (structure == S_LA_CAV) {
-      sec = SEC_LA;
-    } else if (structure == S_LAA) {
-      sec = min(1.0, SEC_LA * SEC_LAA_BOOST);
-    } else if (structure == S_LV_CAV && SEC_LV > 0.0) {
-      float lvApex = 1.0 + m.z / max(1.0, LV_LEN);
-      float lvFrac = 0.2 + 0.8 * clamp(lvApex / 0.75, 0.0, 1.0);
-      sec = SEC_LV * lvFrac;
-    }
-    if (sec > 0.0) {
-      float px = m.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
-      float py = m.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
-      float pz = m.z * SEC_FREQ;
-      float swirl = 0.5 + 0.5 * sin(px + 0.85 * cos(py * 1.15 + pz * 0.75)) * cos(py * 0.9 - 0.75 * sin(pz * 1.1 - px * 0.65));
-      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
-    }
-  }
+  if (tissue == T_BLOOD && HARM > 0.5) sigma *= BLOOD_HARMONIC_SIGMA;
   if (tissue == T_MYO) {
     if ((structure >= S_LV_SEPT && structure <= S_LV_APEX) || structure == S_RV_WALL) {
       float rr = length(m.xy);
@@ -544,6 +506,37 @@ void main() {
     if (sb.w > 0.5 && sb.z < 0.5) { accS += 0.25 * sb.x; accP += 0.25 * sb.y; wsum += 0.25; }
     sigma = accS / wsum;
     specular = accP / wsum;
+  }
+  // Spontaneous echo contrast ("smoke" / SEC) in low-flow stasis chambers (computed here in lightweight Pass B
+  // rather than Pass A / Pass A Side to keep Pass A's SwiftShader footprint untouched).
+  if (tid == T_BLOOD && (SEC_LA > 0.0 || SEC_LV > 0.0)) {
+    int sid = int(b.x * 255.0 + 0.5);
+    float ct = P(LINE_TRIG_BASE + 2 * li), sn = P(LINE_TRIG_BASE + 2 * li + 1);
+    vec3 dirT = vec3(B_FX, B_FY, B_FZ) * ct + vec3(B_LX, B_LY, B_LZ) * sn;
+    vec3 pT = vec3(B_OX, B_OY, B_OZ) + dirT * r + vec3(B_NX, B_NY, B_NZ) * ELEV_OFFSET;
+    vec3 dp = pT - vec3(HF_OX, HF_OY, HF_OZ);
+    vec3 pH = vec3(
+      dot(dp, vec3(HF_EXX, HF_EXY, HF_EXZ)),
+      dot(dp, vec3(HF_EYX, HF_EYY, HF_EYZ)),
+      dot(dp, vec3(HF_EZX, HF_EZY, HF_EZZ))
+    );
+    float sec = 0.0;
+    if (sid == S_LA_CAV) {
+      sec = SEC_LA;
+    } else if (sid == S_LAA) {
+      sec = min(1.0, SEC_LA * SEC_LAA_BOOST);
+    } else if (sid == S_LV_CAV && SEC_LV > 0.0) {
+      float lvApex = (pH.z - ZANN) / max(1.0, LENGTH_NOW);
+      float lvFrac = 0.2 + 0.8 * clamp(lvApex / 0.75, 0.0, 1.0);
+      sec = SEC_LV * lvFrac;
+    }
+    if (sec > 0.0) {
+      float sx = pH.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
+      float sy = pH.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
+      float sz = pH.z * SEC_FREQ;
+      float swirl = 0.5 + 0.5 * sin(sx + 0.85 * cos(sy * 1.15 + sz * 0.75)) * cos(sy * 0.9 - 0.75 * sin(sz * 1.1 - sx * 0.65));
+      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
+    }
   }
   // the beam's on-axis sensitivity at this depth: wide near the face, narrowest at the focus (decision 144)
   float fg = focusingGain(r, FOCUS);

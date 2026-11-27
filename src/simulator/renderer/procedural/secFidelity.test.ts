@@ -7,7 +7,11 @@ import { Structure } from '@/simulator/anatomy/tissue';
 import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { baseInput } from '@/simulator/core/baseInput';
 import { beamFrameFromPose, poseFromControl } from '@/simulator/probe/pose';
-import { GLSL_PASS_A_MAIN, GLSL_PASS_A_SIDE_MAIN } from '@/simulator/renderer/gpu/glslPasses';
+import {
+  GLSL_PASS_A_MAIN,
+  GLSL_PASS_A_SIDE_MAIN,
+  GLSL_PASS_B_MAIN,
+} from '@/simulator/renderer/gpu/glslPasses';
 import { allocPacked, packScene, PARAM_OFFSET } from '@/simulator/renderer/gpu/paramLayout';
 import {
   COLOR_TISSUE_PRIO_HI,
@@ -123,7 +127,7 @@ describe('PR C: Spontaneous Echo Contrast (SEC) & Color write-priority physics',
     );
   });
 
-  it('packs SEC_LA and SEC_LV scalars cleanly into GPU paramLayout and mirrors SEC in both Pass A shaders', () => {
+  it('packs SEC_LA and SEC_LV scalars cleanly into GPU paramLayout and mirrors SEC in lightweight Pass B', () => {
     const msCase = loadCaseById('mitral-stenosis-severe');
     const settings = baseInput().settings;
     const { heart, thorax, tables } = buildCaseModels(msCase, REST_PATIENT);
@@ -139,10 +143,11 @@ describe('PR C: Spontaneous Echo Contrast (SEC) & Color write-priority physics',
     assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LA']!]! - (phys.secLa ?? 0)) < 1e-6);
     assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LV']!]! - (phys.secLv ?? 0)) < 1e-6);
 
-    for (const src of [GLSL_PASS_A_MAIN, GLSL_PASS_A_SIDE_MAIN]) {
-      assert.ok(src.includes('SEC_LA') && src.includes('SEC_LV') && src.includes('SEC_GAIN'));
-      assert.ok(src.includes('SEC_FREQ') && src.includes('SEC_LAA_BOOST'));
-    }
+    assert.ok(GLSL_PASS_B_MAIN.includes('SEC_LA') && GLSL_PASS_B_MAIN.includes('SEC_LV'));
+    assert.ok(GLSL_PASS_B_MAIN.includes('SEC_GAIN') && GLSL_PASS_B_MAIN.includes('SEC_FREQ'));
+    assert.ok(GLSL_PASS_B_MAIN.includes('SEC_LAA_BOOST'));
+    // Pass A and Pass A Side remain free of SEC code to preserve SwiftShader compile budget
+    assert.ok(!GLSL_PASS_A_MAIN.includes('SEC_LA') && !GLSL_PASS_A_SIDE_MAIN.includes('SEC_LA'));
   });
 
   it('keeps tighter Color Doppler tissue write-priority window (full color on dark blood, clean valve rejection)', () => {

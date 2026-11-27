@@ -474,31 +474,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
         ndM = q.tissue === Tissue.Chordae ? cordAlignment(ndM0) : ndM0;
       }
       let sigma = props.reflect;
-      if (q.tissue === Tissue.Blood) {
-        if (harm) sigma *= BLOOD_HARMONIC_SIGMA;
-        let sec = 0;
-        if (q.structure === Structure.LaCavity) {
-          sec = ctx.secLa;
-        } else if (q.structure === Structure.LaAppendage) {
-          sec = Math.min(1, ctx.secLa * SEC_LAA_BOOST);
-        } else if (q.structure === Structure.LvCavity && ctx.secLv > 0) {
-          // Material z runs from −LV_LEN at the mitral base to 0 at the apex: 1 + mz/LV_LEN is 0 (base) → 1 (apex).
-          const lvApex = 1 + q.mz / Math.max(1, heart.lv.lengthCm);
-          const lvFrac = 0.2 + 0.8 * Math.max(0, Math.min(1, lvApex / 0.75));
-          sec = ctx.secLv * lvFrac;
-        }
-        if (sec > 0) {
-          const px = q.mx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X;
-          const py = q.my * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y;
-          const pz = q.mz * SEC_FREQ;
-          const swirl =
-            0.5 +
-            0.5 *
-              Math.sin(px + 0.85 * Math.cos(py * 1.15 + pz * 0.75)) *
-              Math.cos(py * 0.9 - 0.75 * Math.sin(pz * 1.1 - px * 0.65));
-          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
-        }
-      }
+      if (q.tissue === Tissue.Blood && harm) sigma *= BLOOD_HARMONIC_SIGMA;
       if (q.tissue === Tissue.Myocardium) {
         if (
           inH &&
@@ -686,6 +662,37 @@ export class ProceduralSliceRenderer implements RendererBackend {
         }
         sigma = accS / wsum;
         specular = accP / wsum;
+      }
+      // Spontaneous echo contrast ("smoke" / SEC) in low-flow stasis chambers (exact mirror of GLSL_PASS_B_MAIN)
+      if (tissue === Tissue.Blood && (ctx.secLa > 0 || ctx.secLv > 0)) {
+        const hf = heart.frame;
+        const dpx = px - hf.origin.x;
+        const dpy = py - hf.origin.y;
+        const dpz = pz - hf.origin.z;
+        const hx = dpx * hf.ex.x + dpy * hf.ex.y + dpz * hf.ex.z;
+        const hy = dpx * hf.ey.x + dpy * hf.ey.y + dpz * hf.ey.z;
+        const hz = dpx * hf.ez.x + dpy * hf.ez.y + dpz * hf.ez.z;
+        let sec = 0;
+        if (s.structure === Structure.LaCavity) {
+          sec = ctx.secLa;
+        } else if (s.structure === Structure.LaAppendage) {
+          sec = Math.min(1, ctx.secLa * SEC_LAA_BOOST);
+        } else if (s.structure === Structure.LvCavity && ctx.secLv > 0) {
+          const lvApex = (hz - ctx.scene.heartPose.zAnn) / Math.max(1, ctx.scene.heartPose.lengthNow);
+          const lvFrac = 0.2 + 0.8 * Math.max(0, Math.min(1, lvApex / 0.75));
+          sec = ctx.secLv * lvFrac;
+        }
+        if (sec > 0) {
+          const sx = hx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X;
+          const sy = hy * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y;
+          const sz = hz * SEC_FREQ;
+          const swirl =
+            0.5 +
+            0.5 *
+              Math.sin(sx + 0.85 * Math.cos(sy * 1.15 + sz * 0.75)) *
+              Math.cos(sy * 0.9 - 0.75 * Math.sin(sz * 1.1 - sx * 0.65));
+          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
+        }
       }
       // the beam's on-axis sensitivity at this depth: wide near the face, narrowest at the focus (decision 144)
       const fg = focusingGain(r, focus);
