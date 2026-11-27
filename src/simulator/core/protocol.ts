@@ -9,6 +9,7 @@ import type { ViewAnalysis } from '@/simulator/view-recognition/viewQuality';
 import type { SectorMapping } from '@/simulator/renderer/scanConvert';
 import type { CaseDefinition } from '@/cases/schema';
 import type { StructuredEchoTruth } from '@/simulator/hemodynamics/groundTruth';
+import type { AutoChamberVolumeResult, ChamberId } from '@/simulator/measurements/autoVolume';
 
 /**
  * The backend the user selects (Dev panel). `atlas` wraps the GPU port when available and the CPU tracer
@@ -257,8 +258,10 @@ export type SimRequest =
   | { kind: 'explainPoint'; rCm: number; thetaRad: number }
   /** One-touch Auto-Optimization (iScan): analyzes current polar frame bands to optimize gain & TGC. */
   | { kind: 'autoOpt' }
-  /** Jump to the cine frame closest to end-diastole ('ed') or end-systole ('es'). */
-  | { kind: 'cinePhaseJump'; target: 'ed' | 'es' }
+  /** Jump to the cine frame matching `frameId` (when given) or closest to end-diastole ('ed') / end-systole ('es'). */
+  | { kind: 'cinePhaseJump'; target: 'ed' | 'es'; frameId?: number }
+  /** Automatic 2D endocardial contour tracing, EDV/ESV volume, EF, and RV FAC over the acquired cine loop. */
+  | { kind: 'autoChamberVolume'; chamber: ChamberId }
   /**
    * Dev hook (`__echotwin.frameBus.request`): lose the GPU port's WebGL context, or restore the one so lost, through
    * WEBGL_lose_context, to check the recovery in a browser (`core/gpuRecovery.ts`).
@@ -278,6 +281,7 @@ export type SimResponse =
   | { kind: 'explainPoint'; explain: PointExplanation }
   | { kind: 'autoOpt'; gainDb: number; tgcDb: number[] }
   | { kind: 'cinePhaseJump'; offset: number; phase: number }
+  | { kind: 'autoChamberVolume'; result: AutoChamberVolumeResult }
   /** Whether there was a live context to lose, or a context lost by the hook to restore. */
   | { kind: 'gpuContext'; ok: boolean };
 

@@ -128,9 +128,9 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
     }),
   setCinePlaying: (p) => set({ cinePlaying: p }),
   setCineSpeed: (sp) => set({ cineSpeed: sp }),
-  jumpCinePhase: (target) => {
+  jumpCinePhase: (target, frameId) => {
     void frameBus
-      .request({ kind: 'cinePhaseJump', target })
+      .request({ kind: 'cinePhaseJump', target, ...(frameId !== undefined ? { frameId } : {}) })
       .then((res) => {
         if (res && res.kind === 'cinePhaseJump') {
           get().setCineOffset(res.offset);

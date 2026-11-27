@@ -2,6 +2,7 @@ import { v3 } from '@/core/vec3';
 import type { HeartModel } from '@/simulator/anatomy/heartModel';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { BeatTables } from '@/simulator/cardiac-cycle/cycleModel';
+import { computeAutoChamberVolume } from '@/simulator/measurements/autoVolume';
 import { computeAutoOpt } from '@/simulator/renderer/postprocess/autoOpt';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import type { PolarFrame } from '@/simulator/renderer/types';
@@ -85,10 +86,23 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
     return { kind: 'autoOpt', gainDb: opt.gainDb, tgcDb: opt.tgcDb };
   }
   if (req.kind === 'cinePhaseJump') {
+    const byId = req.frameId !== undefined ? ctx.cine.findFrameOffset(req.frameId) : null;
     const targetPhase = req.target === 'es' ? ctx.phaseMarks().endSystole : 0;
-    const found = ctx.cine.findNearestPhaseOffset(targetPhase);
+    const found = byId ?? ctx.cine.findNearestPhaseOffset(targetPhase);
     if (!found) return null;
     return { kind: 'cinePhaseJump', offset: found.offset, phase: found.phase };
+  }
+  if (req.kind === 'autoChamberVolume') {
+    const refFrame = ctx.displayedFrame ?? ctx.cine.newest;
+    const result = computeAutoChamberVolume(
+      ctx.cine,
+      refFrame,
+      ctx.phaseMarks(),
+      ctx.input.display,
+      ctx.input.settings,
+      req.chamber,
+    );
+    return { kind: 'autoChamberVolume', result };
   }
   if (
     ctx.input.frozen &&

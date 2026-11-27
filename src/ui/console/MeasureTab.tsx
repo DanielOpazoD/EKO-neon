@@ -1,11 +1,14 @@
 import { examClosed, modePolicy } from '@/app/modePolicy';
 import { useSimStore, type SimStore } from '@/app/store';
+import { fractionalAreaChange } from '@/clinical/formulas';
+import { biplaneVolume } from '@/education/report';
 import { MEASUREMENT_SPECS } from '@/simulator/measurements/protocol';
 import { modalityLabel } from '@/simulator/renderer/modality';
 import { viewLabel } from '@/simulator/windows/viewLabels';
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { Section } from '../controls';
+import { runAutoChamberVolume } from '../display/measurementTools';
 import { MeasurementPanel } from '../MeasurementPanel';
 import { useTip } from './useTip';
 
@@ -98,6 +101,14 @@ export function MeasureTab() {
   }
   return (
     <>
+      <Section
+        title="Volumen y FE automáticos"
+        tip={tip(
+          'Traza automáticamente el endocardio en TD y TS sobre el cine 2D actual (A4C/A2C para VI · enfocada en VD o A4C para VD).',
+        )}
+      >
+        <AutoEfPanel />
+      </Section>
       <Section title="Protocolo de medición">
         <MeasurementPanel />
       </Section>
@@ -150,6 +161,9 @@ function MeasureList({
     if (m.derived?.meanGradientMmHg !== undefined) {
       const mg = m.derived.meanGradientMmHg;
       parts.push(`ΔPm ${mg < 10 ? mg.toFixed(1) : mg.toFixed(0)} mmHg`);
+    }
+    if (m.derived?.areaCm2 !== undefined && m.derived.areaCm2 > 0) {
+      parts.push(`Área ${m.derived.areaCm2.toFixed(1)} cm²`);
     }
     return parts.join(' · ');
   };
@@ -210,6 +224,187 @@ function MeasureList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function latestById(ms: SimStore['measurements'], id: string) {
+  for (let i = ms.length - 1; i >= 0; i--) if (ms[i]!.measurementId === id) return ms[i]!;
+  return null;
+}
+
+/** One-click automatic LV & RV endocardial tracing, volume, EF, and RV FAC over the acquired 2D cine. */
+function AutoEfPanel() {
+  const s = useSimStore(
+    useShallow((st) => ({
+      measurements: st.measurements,
+      frozen: st.frozen,
+      mode: st.mode,
+      closed: examClosed(st),
+      toggleFreeze: st.toggleFreeze,
+      jumpCinePhase: st.jumpCinePhase,
+    })),
+  );
+  const [busy, setBusy] = useState<'lv' | 'rv' | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const run = async (chamber: 'lv' | 'rv') => {
+    if (busy || s.closed) return;
+    setBusy(chamber);
+    setNotice(null);
+    try {
+      const res = await runAutoChamberVolume(chamber);
+      if (!res.ok) {
+        setNotice({ kind: 'err', text: res.message });
+      } else {
+        setNotice({
+          kind: 'ok',
+          text:
+            chamber === 'lv'
+              ? `VI trazado en TD y TS (FEVI ${res.efPct.toFixed(0)} %).`
+              : `VD trazado en TD y TS (FEVD ${res.efPct.toFixed(0)} %, CAF ${res.facPct.toFixed(0)} %).`,
+        });
+      }
+    } catch (e: unknown) {
+      setNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'Error al calcular volumen automático.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const inspectFrame = (target: 'ed' | 'es', frameId: number) => {
+    if (s.closed) return;
+    if (!s.frozen) s.toggleFreeze();
+    s.jumpCinePhase(target, frameId);
+  };
+
+  const lvEdvM = latestById(s.measurements, 'lv-edv-simpson');
+  const lvEsvM = latestById(s.measurements, 'lv-esv-simpson');
+  const lvEdvBi = biplaneVolume(s.measurements, 'lv-edv-simpson');
+  const lvEsvBi = biplaneVolume(s.measurements, 'lv-esv-simpson');
+  const hasLvBiplane = Boolean(lvEdvBi && lvEsvBi && lvEdvBi.volumeMl > 0);
+  const lvEdv = hasLvBiplane ? lvEdvBi!.volumeMl : (lvEdvM?.value ?? null);
+  const lvEsv = hasLvBiplane ? lvEsvBi!.volumeMl : (lvEsvM?.value ?? null);
+  const lvEf = lvEdv !== null && lvEsv !== null && lvEdv > 0 ? ((lvEdv - lvEsv) / lvEdv) * 100 : null;
+
+  const rvEdvM = latestById(s.measurements, 'rv-edv');
+  const rvEsvM = latestById(s.measurements, 'rv-esv');
+  const rvEdv = rvEdvM?.value ?? null;
+  const rvEsv = rvEsvM?.value ?? null;
+  const rvEf = rvEdv !== null && rvEsv !== null && rvEdv > 0 ? ((rvEdv - rvEsv) / rvEdv) * 100 : null;
+  const rvEdArea = rvEdvM?.derived?.areaCm2 ?? null;
+  const rvEsArea = rvEsvM?.derived?.areaCm2 ?? null;
+  const rvFac =
+    rvEdArea !== null && rvEsArea !== null && rvEdArea > 0
+      ? fractionalAreaChange(rvEdArea, rvEsArea)
+      : null;
+
+  return (
+    <div className="auto-ef">
+      <div className="auto-ef-actions" role="group" aria-label="Cálculo automático de volumen y FE">
+        <button
+          type="button"
+          onClick={() => void run('lv')}
+          disabled={s.closed || busy !== null}
+          data-tip="Calcula VTD, VTS y FEVI (Simpson) desde el contorno endocárdico en A4C o A2C; repite en ambos planos para biplano"
+        >
+          {busy === 'lv' ? 'Midiendo VI…' : 'Auto-FE VI'}
+        </button>
+        <button
+          type="button"
+          onClick={() => void run('rv')}
+          disabled={s.closed || busy !== null}
+          data-tip="Calcula VTD, VTS, FEVD estimada (2D) y CAF del VD desde vista enfocada en VD o A4C"
+        >
+          {busy === 'rv' ? 'Midiendo VD…' : 'Auto-FE VD'}
+        </button>
+      </div>
+      {notice && (
+        <div
+          className={`auto-ef-notice ${notice.kind === 'err' ? 'err' : 'ok'}`}
+          role="status"
+        >
+          {notice.text}
+        </div>
+      )}
+      {lvEf !== null && lvEdv !== null && lvEsv !== null && (
+        <div className="auto-ef-card" data-auto-ef="lv">
+          <div className="auto-ef-head">
+            <span className="auto-ef-title">
+              VI · {hasLvBiplane ? 'Simpson biplano' : 'Simpson'}
+            </span>
+            <span className="auto-ef-primary">FEVI {lvEf.toFixed(0)} %</span>
+          </div>
+          <div className="auto-ef-metrics">
+            <span>VTD {lvEdv.toFixed(0)} mL</span>
+            <span>VTS {lvEsv.toFixed(0)} mL</span>
+            <span>VS {(lvEdv - lvEsv).toFixed(0)} mL</span>
+          </div>
+          {lvEdvM && lvEsvM && (
+            <div className="auto-ef-jump">
+              <button
+                type="button"
+                className="ghost"
+                disabled={s.closed}
+                onClick={() => inspectFrame('ed', lvEdvM.frameId)}
+              >
+                Ver TD
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={s.closed}
+                onClick={() => inspectFrame('es', lvEsvM.frameId)}
+              >
+                Ver TS
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {rvEf !== null && rvEdv !== null && rvEsv !== null && (
+        <div className="auto-ef-card" data-auto-ef="rv">
+          <div className="auto-ef-head">
+            <span className="auto-ef-title">VD · 2D</span>
+            <span className="auto-ef-primary">
+              FEVD {rvEf.toFixed(0)} %{rvFac !== null ? ` · CAF ${rvFac.toFixed(0)} %` : ''}
+            </span>
+          </div>
+          <div className="auto-ef-metrics">
+            <span>VTD {rvEdv.toFixed(0)} mL</span>
+            <span>VTS {rvEsv.toFixed(0)} mL</span>
+            <span>VS {(rvEdv - rvEsv).toFixed(0)} mL</span>
+            {rvEdArea !== null && rvEsArea !== null && (
+              <span>
+                Área {rvEdArea.toFixed(1)}/{rvEsArea.toFixed(1)} cm²
+              </span>
+            )}
+          </div>
+          {rvEdvM && rvEsvM && (
+            <div className="auto-ef-jump">
+              <button
+                type="button"
+                className="ghost"
+                disabled={s.closed}
+                onClick={() => inspectFrame('ed', rvEdvM.frameId)}
+              >
+                Ver TD
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={s.closed}
+                onClick={() => inspectFrame('es', rvEsvM.frameId)}
+              >
+                Ver TS
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

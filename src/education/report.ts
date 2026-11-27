@@ -15,7 +15,13 @@ import {
 } from '@/clinical/reference-values';
 import { discProfileFromContour } from '@/simulator/measurements/simpson';
 import { truthFor } from './scoring/scoring';
-import { mvaFromPht, pisaEroaCm2, rvspFromTr, simpsonBiplaneVolume } from '@/clinical/formulas';
+import {
+  fractionalAreaChange,
+  mvaFromPht,
+  pisaEroaCm2,
+  rvspFromTr,
+  simpsonBiplaneVolume,
+} from '@/clinical/formulas';
 
 /**
  * Educational report assembly (spec 26). Deterministic; compares user measurements with the model
@@ -386,6 +392,38 @@ export function deriveCalculations(ms: Measurement[], bsaM2: number | null = nul
       formula: '4·Vmax IT² + PAD',
       inputs: `Vmax IT ${tr.toFixed(2)} m/s, PAD ${rap.rapMmHg} mmHg (${rap.basis})`,
     });
+  }
+  const rvEdvM = latest(ms, 'rv-edv'),
+    rvEsvM = latest(ms, 'rv-esv');
+  if (rvEdvM && rvEsvM && rvEdvM.value > 0) {
+    const rvSv = rvEdvM.value - rvEsvM.value;
+    const rvEf = (rvSv / rvEdvM.value) * 100;
+    rows.push({
+      id: 'ef-rv',
+      label: 'FEVD estimada (2D)',
+      value: `${rvEf.toFixed(0)} %`,
+      formula: '(VTD VD − VTS VD) / VTD VD',
+      inputs: `VTD VD ${rvEdvM.value.toFixed(0)} mL, VTS VD ${rvEsvM.value.toFixed(0)} mL`,
+    });
+    rows.push({
+      id: 'sv-rv',
+      label: 'Volumen sistólico del VD (2D)',
+      value: `${rvSv.toFixed(0)} mL`,
+      formula: 'VTD VD − VTS VD',
+      inputs: `VTD VD ${rvEdvM.value.toFixed(0)} mL, VTS VD ${rvEsvM.value.toFixed(0)} mL`,
+    });
+    const edA = rvEdvM.derived?.areaCm2,
+      esA = rvEsvM.derived?.areaCm2;
+    if (edA !== undefined && esA !== undefined && edA > 0) {
+      const fac = fractionalAreaChange(edA, esA);
+      rows.push({
+        id: 'rv-fac',
+        label: 'Cambio de área fraccional del VD (CAF)',
+        value: `${fac.toFixed(0)} %`,
+        formula: '(ATD − ATS) / ATD (normal ≥ 35 %)',
+        inputs: `ATD ${edA.toFixed(1)} cm², ATS ${esA.toFixed(1)} cm²`,
+      });
+    }
   }
   return rows;
 }

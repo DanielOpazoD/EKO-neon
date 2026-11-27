@@ -171,6 +171,17 @@ export function fractionalAreaChange(edAreaCm2: number, esAreaCm2: number): numb
   return ((edAreaCm2 - esAreaCm2) / edAreaCm2) * 100;
 }
 
+/**
+ * 2D single-plane RV volume estimate (mL) from apical 4C / RV-focused endocardial area (cm²),
+ * accounting for the crescentic out-of-plane geometry of the right ventricle (V ≈ 1.60 · A^(3/2)).
+ * Intended to be interpreted alongside RV Fractional Area Change (FAC, ASE Right Heart 2025).
+ */
+export const RV_AREA_VOLUME_COEFF = 1.6;
+export function rvVolumeFromAreaMl(areaCm2: number): number {
+  assertPositive(areaCm2, 'areaCm2');
+  return RV_AREA_VOLUME_COEFF * Math.pow(areaCm2, 1.5);
+}
+
 /** Doppler shift: fd = 2·f0·v·cosθ / c. f0 in Hz, v in m/s, c in m/s → Hz. */
 export function dopplerShiftHz(f0Hz: number, vMps: number, cosTheta: number, cMps = 1540): number {
   return (2 * f0Hz * vMps * cosTheta) / cMps;

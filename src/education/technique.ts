@@ -306,7 +306,11 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
         ctx.segmentStructures.filter(
           (s) => pl.structures.includes(s) || s === Structure.PapillaryMuscle,
         ).length / ctx.segmentStructures.length;
-      const chamber = pl.structures.includes(Structure.LaCavity) ? 'de la AI' : 'del VI';
+      const chamber = pl.structures.includes(Structure.LaCavity)
+        ? 'de la AI'
+        : pl.structures.includes(Structure.RvCavity)
+          ? 'del VD'
+          : 'del VI';
       if (inside < 0.7)
         add(
           'placement',
@@ -349,7 +353,11 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
 
   // the chamber cut by the depth of the sector (Simpson, decision 180)
   if (spec.tool === 'simpson' && ctx.cutByDepth) {
-    const chamber = spec.placement?.structures.includes(Structure.LaCavity) ? 'La AI' : 'El VI';
+    const chamber = spec.placement?.structures.includes(Structure.LaCavity)
+      ? 'La AI'
+      : spec.placement?.structures.includes(Structure.RvCavity)
+        ? 'El VD'
+        : 'El VI';
     add(
       'depth',
       'invalid',
@@ -383,7 +391,9 @@ export function evaluateTechnique(spec: MeasurementSpec, ctx: MeasurementContext
     add(
       'assisted',
       'ok',
-      'Envolvente trazada automáticamente; revisa que siga la señal más densa.',
+      spec.tool === 'simpson'
+        ? 'Contorno endocárdico trazado automáticamente; revisa que siga el borde interno.'
+        : 'Envolvente trazada automáticamente; revisa que siga la señal más densa.',
     );
 
   let score = 1;

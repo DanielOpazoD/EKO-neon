@@ -148,7 +148,7 @@ export interface AcquisitionSlice {
   stepCine: () => void;
   setCinePlaying: (p: boolean) => void;
   setCineSpeed: (sp: 0.25 | 0.5 | 1) => void;
-  jumpCinePhase: (target: 'ed' | 'es') => void;
+  jumpCinePhase: (target: 'ed' | 'es', frameId?: number) => void;
   setColor: (c: Partial<ColorSettings>) => void;
   /** Re-frame the Color ROI box to the active view's anatomical preset and clear manual override. */
   resetColorBox: () => void;
