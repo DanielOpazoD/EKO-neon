@@ -462,9 +462,12 @@ export function sampleFlow(
       }
       const reach = rho < jetReach(rHalf, sShear, shear);
       const asSev = isStenotic ? smoothstep(2.0, 0.65, p.avAreaCm2) : 0;
+      const samActive = p.lvotObstruction ? smoothstep(0.12, 0.65, narrowPeak) : 0;
       const rSinus = p.avR * 1.42;
       const inSinusPlume = isStenotic && tAv > 0.18 && tAv < 3.4 && rho < rSinus;
-      if (reach || vJet > 0 || inSinusPlume) {
+      const inSamPlume =
+        samActive > 0.05 && tAv > LVOT_OBSTRUCTION_T - 0.05 && tAv < 1.2 && rho < rLvot * 1.15;
+      if (reach || vJet > 0 || inSinusPlume || inSamPlume) {
         const v = qao / area / 100;
         // Physiologic radial shear for laminar LVOT/AV (= 1.00 on centerline rho = 0, so PW/CW Vmax is exact)
         const rNorm = Math.min(1.4, rho / Math.max(0.25, R));
@@ -485,23 +488,47 @@ export function sampleFlow(
             (1 - smoothstep(rSinus * 0.68, rSinus, rho));
           vEddy = (qao / areaAsc / 100) * (0.45 + 0.55 * asSev) * eddyEnv;
         }
-        const vOut = Math.max(vTract, vJet, vEddy);
-        // Distal LVOT laminar proximal flow convergence right beneath a stenotic AV (tAv in [-0.38, 0.14];
-        // strictly zero at the PW LVOT plane tAv = -0.5 cm and on the centerline rho = 0).
+        // Post-SAM subaortic turbulent shear envelope filling the distal LVOT beneath the normal aortic cusps
+        let vSamEddy = 0;
+        if (inSamPlume) {
+          const samEnv =
+            smoothstep(LVOT_OBSTRUCTION_T - 0.05, LVOT_OBSTRUCTION_T + 0.28, tAv) *
+            fadeOut(tAv, 0.55, 1.2) *
+            (1 - smoothstep(rLvot * 0.72, rLvot * 1.15, rho));
+          vSamEddy = (qao / p.lvotAreaCm2 / 100) * (0.55 + 0.65 * samActive) * samEnv;
+        }
+        const vOut = Math.max(vTract, vJet, vEddy, vSamEddy);
+        // Distal LVOT laminar proximal flow convergence beneath a stenotic AV (tAv in [-0.38, 0.14]) or
+        // immediately upstream of dynamic SAM-septal contact (tAv in [-1.05, -0.45]); strictly zero on rho = 0.
         let dirX = ax.x;
         let dirY = ax.y;
         let dirZ = ax.z;
+        let inward = 0;
         if (asSev > 0 && tAv > -0.38 && tAv < 0.14 && rho > 1e-4) {
-          const inwardAs =
+          inward = Math.max(
+            inward,
             asSev *
-            0.46 *
-            smoothstep(-0.38, -0.04, tAv) *
-            fadeOut(tAv, 0.02, 0.14) *
-            Math.min(1, rho / Math.max(0.22, rLvot));
+              0.46 *
+              smoothstep(-0.38, -0.04, tAv) *
+              fadeOut(tAv, 0.02, 0.14) *
+              Math.min(1, rho / Math.max(0.22, rLvot)),
+          );
+        }
+        if (samActive > 0 && tAv > -1.05 && tAv < LVOT_OBSTRUCTION_T + 0.15 && rho > 1e-4) {
+          inward = Math.max(
+            inward,
+            samActive *
+              0.42 *
+              smoothstep(-1.05, LVOT_OBSTRUCTION_T - 0.05, tAv) *
+              fadeOut(tAv, LVOT_OBSTRUCTION_T, LVOT_OBSTRUCTION_T + 0.15) *
+              Math.min(1, rho / Math.max(0.22, rLvot)),
+          );
+        }
+        if (inward > 0) {
           const invRho = 1 / rho;
-          const rawX = ax.x - qx * invRho * inwardAs;
-          const rawY = ax.y - qy * invRho * inwardAs;
-          const rawZ = ax.z - qz * invRho * inwardAs;
+          const rawX = ax.x - qx * invRho * inward;
+          const rawY = ax.y - qy * invRho * inward;
+          const rawZ = ax.z - qz * invRho * inward;
           const rawL = Math.hypot(rawX, rawY, rawZ) || 1;
           dirX = rawX / rawL;
           dirY = rawY / rawL;
@@ -511,20 +538,34 @@ export function sampleFlow(
         rootVy = dirY * vOut;
         rootVz = dirZ * vOut;
         rootSpeed = vOut;
+        // Dynamic SAM obstruction stays laminar in early systole before leaflet-septal contact, then
+        // erupts into full subaortic mosaic turbulence right at LVOT_OBSTRUCTION_T (-0.6 cm) in mid-late systole.
+        const rawLvotTurb = p.turbulence['lvot'] ?? 0.04;
+        const baseLvotDisp = p.lvotObstruction?.dynamic
+          ? 0.05 + (rawLvotTurb - 0.05) * samActive * smoothstep(LVOT_OBSTRUCTION_T - 0.2, LVOT_OBSTRUCTION_T + 0.1, tAv)
+          : rawLvotTurb;
         const stenotic =
           isStenotic && tAv > 0
             ? Math.min(0.65, (2.0 - p.avAreaCm2) * 0.52)
-            : p.lvotObstruction && tAv > LVOT_OBSTRUCTION_T - 0.4
+            : p.lvotObstruction && tAv > LVOT_OBSTRUCTION_T - 0.12
               ? Math.max(
-                  0.4 * Math.max(0, 1 - area / p.lvotAreaCm2),
-                  vJet > 1.5 ? Math.min(0.55, (vJet - 1.2) * 0.16) : 0,
+                  0.58 * samActive * smoothstep(LVOT_OBSTRUCTION_T - 0.12, LVOT_OBSTRUCTION_T + 0.18, tAv),
+                  vJet > 1.3 ? Math.min(0.68, (vJet - 1.0) * 0.22) : 0,
                 )
               : 0;
-        const eddyTurb = vEddy > vTract && inSinusPlume ? 0.42 + 0.3 * asSev : 0;
+        const eddyTurb =
+          vEddy > vTract && inSinusPlume
+            ? 0.42 + 0.3 * asSev
+            : vSamEddy > 0 && inSamPlume
+              ? 0.48 + 0.26 * samActive
+              : 0;
+        // Valvular AS turbulence starts above the cusps (tAv > 0); subaortic SAM erupts inside the LVOT (tAv >= -0.6 cm)
+        const stenoticGain = isStenotic ? (tAv > 0 ? 1 : 0.35) : 1;
         rootDisp = Math.max(
-          (p.turbulence['lvot'] ?? 0.04) +
-            stenotic * (tAv > 0 ? 1 : 0.35) +
-            (isStenotic ? 0.12 : 0.04) * Math.pow(Math.min(1, rho / Math.max(0.25, R)), 4),
+          baseLvotDisp +
+            stenotic * stenoticGain +
+            (isStenotic || samActive > 0.3 ? 0.12 : 0.04) *
+              Math.pow(Math.min(1, rho / Math.max(0.25, R)), 4),
           tAv > 0 ? (p.turbulence['aortic-valve'] ?? 0) : 0,
           eddyTurb,
         );

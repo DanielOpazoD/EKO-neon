@@ -1745,3 +1745,75 @@ test('severe aortic stenosis shows laminar distal-LVOT convergence and post-sten
     `Expected post-stenotic turbulent sinus entrainment plume in AorticRoot, got v=${Math.hypot(fs.vx, fs.vy, fs.vz).toFixed(2)}, d=${fs.dispersion.toFixed(2)}`,
   );
 });
+
+test('HOCM SAM stays laminar in early systole and erupts into subaortic LVOT turbulence in late systole (distinct from valvular AS)', () => {
+  const fs: FlowSample = { vx: 0, vy: 0, vz: 0, dispersion: 0, present: 0 };
+  const hocmCase = loadCaseById('hocm-sam');
+  const models = buildCaseModels(hocmCase, REST_PATIENT);
+  const flow = buildFlowParams(hocmCase, models.heart, models.tables, models.thorax);
+  const ax = flow.avAxis;
+  const tm = models.tables.timings;
+
+  // Early systole (u = 0.15, before SAM-septal contact): subaortic LVOT at tAv = -0.35 cm is laminar
+  const phEarly = (tm.ejectionStartS + 0.15 * (tm.ejectionEndS - tm.ejectionStartS)) / models.tables.rrS;
+  const hpEarly = computeHeartPose(models.heart, cycleStateAt(models.tables, phEarly, flow.flowPeaks));
+  const czEarly = flow.avCenter.z + hpEarly.zAnn * 0.65;
+  sampleFlow(
+    flow,
+    models.tables,
+    hpEarly,
+    phEarly,
+    flow.avCenter.x + ax.x * -0.35,
+    flow.avCenter.y + ax.y * -0.35,
+    czEarly + ax.z * -0.35,
+    fs,
+    Structure.Lvot,
+  );
+  assert.ok(
+    fs.present === 1 && fs.dispersion < 0.18,
+    `Early-systolic HOCM LVOT before SAM contact should stay laminar, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+
+  // Late systole (u = 0.80, peak SAM-septal contact): high-velocity subaortic turbulent mosaic BELOW the AV (tAv = -0.35 cm)
+  const phLate = (tm.ejectionStartS + 0.8 * (tm.ejectionEndS - tm.ejectionStartS)) / models.tables.rrS;
+  const hpLate = computeHeartPose(models.heart, cycleStateAt(models.tables, phLate, flow.flowPeaks));
+  const czLate = flow.avCenter.z + hpLate.zAnn * 0.65;
+  sampleFlow(
+    flow,
+    models.tables,
+    hpLate,
+    phLate,
+    flow.avCenter.x + ax.x * -0.35,
+    flow.avCenter.y + ax.y * -0.35,
+    czLate + ax.z * -0.35,
+    fs,
+    Structure.Lvot,
+  );
+  const vLate = Math.hypot(fs.vx, fs.vy, fs.vz);
+  assert.ok(
+    fs.present === 1 && vLate > 2.5 && fs.dispersion > 0.65,
+    `Late-systolic HOCM subaortic LVOT must show blistering turbulent mosaic (v>2.5, d>0.65), got v=${vLate.toFixed(2)}, d=${fs.dispersion.toFixed(2)}`,
+  );
+
+  // Valvular AS at the exact same subaortic level (tAv = -0.35 cm) stays laminar (turbulence begins at the valve tAv > 0)
+  const asCase = loadCaseById('aortic-stenosis-severe');
+  const asModels = buildCaseModels(asCase, REST_PATIENT);
+  const asFlow = buildFlowParams(asCase, asModels.heart, asModels.tables, asModels.thorax);
+  const asHp = computeHeartPose(asModels.heart, cycleStateAt(asModels.tables, 0.2, asFlow.flowPeaks));
+  const asCz = asFlow.avCenter.z + asHp.zAnn * 0.65;
+  sampleFlow(
+    asFlow,
+    asModels.tables,
+    asHp,
+    0.2,
+    asFlow.avCenter.x + asFlow.avAxis.x * -0.35,
+    asFlow.avCenter.y + asFlow.avAxis.y * -0.35,
+    asCz + asFlow.avAxis.z * -0.35,
+    fs,
+    Structure.Lvot,
+  );
+  assert.ok(
+    fs.dispersion < 0.25,
+    `Valvular AS subaortic LVOT (-0.35 cm) must stay laminar vs HOCM SAM mosaic, got disp=${fs.dispersion.toFixed(2)}`,
+  );
+});
