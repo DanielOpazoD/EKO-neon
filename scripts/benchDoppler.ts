@@ -20,15 +20,11 @@ import { paintMmodeStripColumn } from '../src/simulator/core/strip/stripPainter'
 import type { StripCtx } from '../src/simulator/core/stripEngine';
 import {
   allocColorField,
+  colorSpectralWidthMps,
   computeColorField,
   DEFAULT_COLOR,
   overlayColorField,
 } from '../src/simulator/doppler/color/colorDoppler';
-import {
-  WallFilterResponseTable,
-  wallFilterPowerResponse,
-  wallFilterShares,
-} from '../src/simulator/doppler/color/kasaiEstimator';
 import {
   buildFlowParams,
   sampleFlow,
@@ -265,16 +261,9 @@ for (const mode of ['pw', 'cw', 'tdi'] as const) {
 
 // 4. Colour M-mode through the mitral inflow: the A4C cursor at 0 and the high tier's 320 samples over 16 cm, at the
 // fastest sweep on a wide display (1600 columns at 100 mm/s: 27 a 60 Hz frame). The lines are the flow's axial velocity
-// along the cursor at 128 phases of the beat, blood where the flow is (as the strip's cmmVelocity samples it): 118
-// blood samples a line on median (0 to 259), as the app's strip has. Written as the strip writes them (writeCmmColumn:
-// the wall filter's response, aliasing, variance and power), then painted 3 columns at a time into a strip of 278 rows
-// (paintMmodeStripColumn). The paint case used to call paintMmodeStripColumn in an order its signature no longer had,
-// and it returned before painting: both cases now check that they wrote and painted colour.
-// The write is timed as the best of 7 runs of 180 frames, each beside a run of the reference: the wall filter's exact
-// response alone (16 sin/cos a sample) for the blood samples of the same columns, which the strip computed per sample
-// before the table. The best run is the one the scheduler, a slower core or another load disturbed least; and against
-// a reference timed in the same process the table's gain holds where a ceiling in ms did not (0.12 ms, 2.5 times one
-// run on a performance core, failed on efficiency cores and beside a test run)
+// and spectral width along the cursor at 128 phases of the beat, blood where the flow is (as the strip's cmmVelocity
+// samples it). Written through the full 8-pulse Kasai estimator (writeCmmColumn), then painted 3 columns at a time into
+// a strip of 278 rows (paintMmodeStripColumn).
 const cmmSpec = polarSpecFor(DEFAULT_ACQUISITION, 'high');
 const cmmCols = 1600;
 const cmmPerFrame = Math.round(cmmCols / aseSweepDurationS(100, STRIP_MM_WIDTH) / 60);
@@ -300,47 +289,40 @@ const cmmLines: MmodeLine[] = [];
     const phase = k / 128;
     const hp = computeHeartPose(heart, cycleStateAt(tables, phase, flow.flowPeaks));
     const velocity = new Float32Array(cmmSpec.samples).fill(NaN);
-    const dispersion = new Float32Array(cmmSpec.samples);
+    const sigmaV = new Float32Array(cmmSpec.samples);
     for (let si = 0; si < cmmSpec.samples; si++) {
       const r = (si + 0.5) * cmmDr;
       sampleFlow(flow, tables, hp, phase, ohx + dhx * r, ohy + dhy * r, ohz + dhz * r, fs);
       if (!fs.present) continue;
-      velocity[si] = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
-      dispersion[si] = Math.min(1, fs.dispersion * 1.6);
+      const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+      const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+      const vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
+      velocity[si] = vAxial;
+      sigmaV[si] = colorSpectralWidthMps(vAxial, fs.dispersion, vPerp, r);
     }
     const relTrans = new Float32Array(cmmSpec.samples).fill(1);
-    cmmLines.push({ amp: new Float32Array(0), velocity, dispersion, relTrans });
+    cmmLines.push({ amp: new Float32Array(0), velocity, sigmaV, relTrans });
   }
 }
 const cmmStrip = new Float32Array(cmmSpec.samples * cmmCols).fill(NaN);
 const cmmVar = new Float32Array(cmmSpec.samples * cmmCols);
 const cmmPow = new Float32Array(cmmSpec.samples * cmmCols);
-const cmmWallFilter = new WallFilterResponseTable();
+const cmmEst = { realization: 1, seed: c.seed };
 const writeCmmColumns = (first: number, n: number) => {
-  for (let c = first; c < first + n; c++) {
-    const col = c % cmmCols;
+  for (let colSerial = first; colSerial < first + n; colSerial++) {
+    const col = colSerial % cmmCols;
     writeCmmColumn(
       cmmLines[col % cmmLines.length]!,
       cmmSpec.samples,
       cmmColor,
-      cmmWallFilter,
+      colSerial,
+      cmmEst,
       col,
       cmmCols,
       cmmStrip,
       cmmVar,
       cmmPow,
     );
-  }
-};
-const cmmShares = wallFilterShares(cmmColor.wallFilterMps, cmmColor.scaleMps);
-let cmmExactPower = 0;
-const exactResponseColumns = (first: number, n: number) => {
-  for (let c = first; c < first + n; c++) {
-    const v = cmmLines[(c % cmmCols) % cmmLines.length]!.velocity!;
-    for (let si = 0; si < cmmSpec.samples; si++) {
-      const x = v[si]!;
-      if (x === x) cmmExactPower += wallFilterPowerResponse(x, cmmColor.scaleMps, cmmShares);
-    }
   }
 };
 /** Mean ms a frame of `cmmPerFrame` columns, over `frames` frames. */
@@ -350,12 +332,9 @@ const cmmFrameMs = (run: (first: number, n: number) => void, frames: number) => 
   return (performance.now() - t0) / frames;
 };
 writeCmmColumns(0, cmmCols);
-exactResponseColumns(0, 30 * cmmPerFrame);
 let cmmWrite27ColsMs = Infinity;
-let cmmExact27ColsMs = Infinity;
-for (let rep = 0; rep < 7; rep++) {
-  cmmWrite27ColsMs = Math.min(cmmWrite27ColsMs, cmmFrameMs(writeCmmColumns, 180));
-  cmmExact27ColsMs = Math.min(cmmExact27ColsMs, cmmFrameMs(exactResponseColumns, 60));
+for (let rep = 0; rep < 5; rep++) {
+  cmmWrite27ColsMs = Math.min(cmmWrite27ColsMs, cmmFrameMs(writeCmmColumns, 30));
 }
 // colour where the lines have blood: every column has been written
 let cmmBlood = 0;
@@ -413,13 +392,12 @@ const metrics = {
   cmmPaint3ColsMs: +cmmPaint3ColsMs.toFixed(3),
 };
 
-const cmmTableGain = cmmExact27ColsMs / cmmWrite27ColsMs;
 const pct = (n: number, of: number) => `${((100 * n) / Math.max(1, of)).toFixed(1)} %`;
 
 console.log('=== DOPPLER CPU HOT-PATH BENCHMARK (normal-excellent-window, 640x480) ===');
 console.table(metrics);
 console.log(
-  `CMM colour write: ${cmmTableGain.toFixed(1)} times under the exact response alone (${cmmExact27ColsMs.toFixed(3)} ms a frame); colour on ${pct(cmmBloodColoured, cmmBlood)} of the blood samples, ${pct(cmmColouredPx, cmmPaintedPx)} of the painted strip`,
+  `CMM colour write (full 8-pulse Kasai, ${cmmPerFrame} cols/frame): ${cmmWrite27ColsMs.toFixed(3)} ms/frame; colour on ${pct(cmmBloodColoured, cmmBlood)} of the blood samples, ${pct(cmmColouredPx, cmmPaintedPx)} of the painted strip`,
 );
 
 if (checkMode) {
@@ -431,9 +409,7 @@ if (checkMode) {
     pwColMs: 25,
     cwColMs: 45,
     tdiColMs: 6,
-    // a blowup only, as its neighbours: the best run takes 0.03 ms on a performance core, up to 0.1 on efficiency cores
-    // or at a load average of 30, and 0.29 ms a frame with the exact response; its own check is the table's gain, below
-    cmmWrite27ColsMs: 1,
+    cmmWrite27ColsMs: 12,
     cmmPaint3ColsMs: 2,
   };
   const violations: string[] = [];
@@ -441,18 +417,9 @@ if (checkMode) {
     const val = metrics[k as keyof typeof metrics];
     if (val > limit) violations.push(`${k}: ${val}ms > ceiling ${limit}ms`);
   }
-  // The table is what keeps the strip's colour write cheap: at least 3 times under the exact response, timed in this
-  // same run. Best of 7, it measured 8.7–8.9 times on a quiet performance core and 6.9–13.6 on efficiency cores
-  // (taskpolicy -c background), beside two npm test or at a load average of 30; a strip back to the response per sample
-  // writes at 0.9 of it (0.287 against 0.270 ms), and one refilling the table for every column at 0.1
-  if (!(cmmTableGain >= 3))
-    violations.push(
-      `cmmWrite27ColsMs: ${cmmWrite27ColsMs.toFixed(3)}ms, only ${cmmTableGain.toFixed(1)} times under the exact response's ${cmmExact27ColsMs.toFixed(3)}ms (at least 3)`,
-    );
-  // and the CMM cases measure something: colour written where there is blood, and painted; a reference on blood
+  // and the CMM cases measure something: colour written where there is blood, and painted
   if (cmmBloodColoured === 0) violations.push(`cmmWrite27ColsMs: no colour on ${cmmBlood} blood samples`);
   if (cmmColouredPx === 0) violations.push(`cmmPaint3ColsMs: no colour on ${cmmPaintedPx} painted pixels`);
-  if (!(cmmExactPower > 0)) violations.push('cmmWrite27ColsMs: its reference, the exact response, ran on no blood');
   if (violations.length > 0) {
     console.error('BENCHMARK REGRESSION:', violations.join('; '));
     process.exit(1);

@@ -18,7 +18,7 @@ import { allocPolarFrame, DEFAULT_ACQUISITION, type Scene } from '@/simulator/re
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
 import {
   allocColorField,
-  COLOR_THRESHOLD,
+  colorSpectralWidthMps,
   computeColorField,
   DEFAULT_COLOR,
   type ColorAcquisition,
@@ -26,11 +26,11 @@ import {
 } from '@/simulator/doppler/color/colorDoppler';
 import {
   colorWallFilterCutoffMps,
-  wallFilterPowerResponse,
-  wallFilterShares,
+  colorWallFilterRangeMps,
   WF_MAX_NYQUIST,
   WF_MIN_NYQUIST,
 } from '@/simulator/doppler/color/kasaiEstimator';
+import { writeCmmColumn } from './strip/cmmColumn';
 import {
   DEFAULT_SPECTRAL,
   envelopeThreshold,
@@ -286,16 +286,19 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
       [0.35, 0.06],
       [0.35, DEFAULT_COLOR.wallFilterMps],
     ];
-    /** A traced line as a colour M-mode column reads it: true axial velocity, dispersion and relative transmission. */
+    /** A traced line as a colour M-mode column reads it: blood axial velocity, σ_v, transmission, clutter and tissue. */
     type CmmLine = {
       velocity: Float32Array | null;
-      dispersion?: Float32Array | null;
+      sigmaV?: Float32Array | null;
       relTrans?: Float32Array | null;
+      wallVelocity?: Float32Array | null;
+      tissue?: Uint8Array | null;
     };
     type CmmInternals = {
       input: SimInput;
       strips: {
         stripCmm: Float32Array | null;
+        stripCmmVar: Float32Array | null;
         stripCmmPow: Float32Array | null;
         stripCols: number;
         writeMmodeColumn(
@@ -316,6 +319,7 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
       /** Each column written, with the line its colour was formed from (its last write). */
       lines: Map<number, CmmLine>;
       cmm: Float32Array;
+      cmmVar: Float32Array;
       pow: Float32Array;
       cols: number;
       depthCm: number;
@@ -354,6 +358,7 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
             wallFilterMps: input.color.wallFilterMps,
             lines,
             cmm: strips.stripCmm!.slice(),
+            cmmVar: strips.stripCmmVar!.slice(),
             pow: strips.stripCmmPow!.slice(),
             cols: strips.stripCols,
             depthCm,
@@ -368,55 +373,172 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
       }
     });
 
-    it('paints with the 2D colour’s regression wall filter, on the request bounded at the acquired Nyquist', () => {
-      // It was a hard cut at the request on the true velocity with a second-order response above it: with the 20 cm/s
-      // default nothing under 20 cm/s while the 2D colours half the 15–20 cm/s flow on the same line, and a flow
-      // aliasing to near zero was painted. The strip reads the response from a table of 1024 steps of |v|/Nyquist
-      // (WallFilterResponseTable), within 1.24e-5 of the power: the oracle is the response itself, to that error
-      const TABLE_ERROR = 1.3e-5;
+    it('runs the full Kasai estimator: stochastic scatter, spectral-width variance, PRF-periodic wall filter, and myocardial clutter flash', () => {
+      // 1. Real A4C runs keep the requested wall filter, paint blood flow, and reject non-blood/non-clutter samples
       for (const run of runs) {
-        const { scaleMps, wallFilterMps } = run;
-        const label = `WF ${run.request} m/s at ${scaleMps.toFixed(3)} m/s`;
-        assert.equal(wallFilterMps, run.request, `${label}: the core keeps the request`);
-        const shares = wallFilterShares(wallFilterMps, scaleMps);
+        const label = `WF ${run.request} m/s at ${run.scaleMps.toFixed(3)} m/s`;
+        assert.equal(run.wallFilterMps, run.request, `${label}: the core keeps the request`);
         let painted = 0;
+        let velErrSum = 0;
+        let velErrCount = 0;
         for (const [col, line] of run.lines) {
           const v = line.velocity!;
-          const rel = line.relTrans!;
+          const ti = line.tissue!;
           for (let si = 0; si < v.length; si++) {
             const i = si * run.cols + col;
             const on = Number.isFinite(run.cmm[i]!);
-            if (!Number.isFinite(v[si]!)) {
-              assert.ok(!on, `${label}: colour without flow at sample ${si}`);
+            const isBlood = ti[si] === Tissue.Blood && Number.isFinite(v[si]!);
+            const isClutter = ti[si] === Tissue.Myocardium || ti[si] === Tissue.Valve;
+            if (!isBlood && !isClutter) {
+              assert.ok(!on, `${label}: colour outside blood/clutter at sample ${si}`);
               continue;
             }
-            // gain 0 dB: what the filter leaves the sample is its relative transmission times the response at its
-            // sampled phase, even and periodic in the PRF (a flow aliasing to near zero is rejected as a slow one)
-            const kept = rel[si]! * wallFilterPowerResponse(v[si]!, scaleMps, shares);
-            const at = `${label}: ${v[si]!.toFixed(3)} m/s, transmission ${rel[si]!.toFixed(3)}`;
-            if (Math.abs(kept - COLOR_THRESHOLD) > TABLE_ERROR)
-              assert.equal(on, kept >= COLOR_THRESHOLD, `${at}: the filter leaves ${kept.toFixed(4)}`);
-            if (!on) continue;
-            assert.ok(
-              Math.abs(run.pow[i]! - kept) < TABLE_ERROR,
-              `${at}: painted with ${run.pow[i]!.toFixed(4)}, the filter leaves ${kept.toFixed(4)}`,
-            );
-            painted++;
+            if (isBlood && on) {
+              painted++;
+              // Stochastic Kasai scatter: estimated velocity scatters around the true aliased velocity
+              const trueAliased = aliasVelocity(v[si]!, run.scaleMps, 0);
+              const dv = Math.abs(run.cmm[i]! - trueAliased);
+              const wrapDv = Math.min(dv, Math.abs(dv - 2 * run.scaleMps));
+              velErrSum += wrapDv;
+              velErrCount++;
+            }
           }
         }
-        assert.ok(painted > 500, `${label}: ${painted} samples painted`);
+        assert.ok(painted > 500, `${label}: ${painted} blood samples painted`);
+        const meanScatter = velErrSum / Math.max(1, velErrCount);
+        assert.ok(
+          meanScatter > 0.005 && meanScatter < 0.15,
+          `${label}: expected realistic Kasai velocity scatter (0.005..0.15 m/s), got ${meanScatter.toFixed(4)}`,
+        );
       }
+
+      // 2. Direct writeCmmColumn checks: turbulent/transverse sigmaV raises Kasai variance, 2x Nyquist is rejected,
+      //    and myocardial wall clutter is suppressed at default WF (20 cm/s) while flashing with breakthrough at min WF
+      const S = 48;
+      const cols = 16;
+      const cfg: ColorSettings = { ...DEFAULT_COLOR, scaleMps: 0.68, gainDb: 0, smoothing: 0, persistence: 0 };
+      const runSynthetic = (
+        line: {
+          velocity: Float32Array;
+          sigmaV: Float32Array;
+          relTrans: Float32Array;
+          wallVelocity?: Float32Array;
+          tissue?: Uint8Array;
+        },
+        wfMps: number,
+      ) => {
+        const cmm = new Float32Array(S * cols).fill(NaN);
+        const cmmVar = new Float32Array(S * cols);
+        const cmmPow = new Float32Array(S * cols);
+        const c = { ...cfg, wallFilterMps: wfMps };
+        for (let col = 0; col < cols; col++) {
+          writeCmmColumn(
+            { amp: new Float32Array(0), ...line },
+            S,
+            c,
+            col + 10,
+            { realization: 2, seed: 314 },
+            col,
+            cols,
+            cmm,
+            cmmVar,
+            cmmPow,
+          );
+        }
+        return { cmm, cmmVar, cmmPow };
+      };
+
+      // Laminar vs turbulent/transverse broadening (sigmaV)
+      const lam = runSynthetic(
+        {
+          velocity: new Float32Array(S).fill(0.4),
+          sigmaV: new Float32Array(S).fill(colorSpectralWidthMps(0.4, 0.03, 0, 8)),
+          relTrans: new Float32Array(S).fill(1),
+        },
+        DEFAULT_COLOR.wallFilterMps,
+      );
+      const turb = runSynthetic(
+        {
+          velocity: new Float32Array(S).fill(0.4),
+          sigmaV: new Float32Array(S).fill(colorSpectralWidthMps(0.4, 0.75, 0, 8)),
+          relTrans: new Float32Array(S).fill(1),
+        },
+        DEFAULT_COLOR.wallFilterMps,
+      );
+      const statsOf = (res: ReturnType<typeof runSynthetic>, s0 = 4, s1 = S - 4) => {
+        let on = 0;
+        let tot = 0;
+        let vSum = 0;
+        let maxPow = 0;
+        for (let si = s0; si < s1; si++) {
+          for (let col = 0; col < cols; col++) {
+            tot++;
+            const i = si * cols + col;
+            if (Number.isFinite(res.cmm[i])) {
+              on++;
+              vSum += res.cmmVar[i]!;
+              maxPow = Math.max(maxPow, res.cmmPow[i]!);
+            }
+          }
+        }
+        return { fill: on / tot, meanVar: on ? vSum / on : 0, maxPow };
+      };
+      const lamS = statsOf(lam);
+      const turbS = statsOf(turb);
+      assert.ok(lamS.fill > 0.9, `expected laminar CMM fill > 90%, got ${(lamS.fill * 100).toFixed(1)}%`);
+      assert.ok(
+        turbS.meanVar > lamS.meanVar + 0.15,
+        `expected turbulent CMM Kasai variance (${turbS.meanVar.toFixed(3)}) > laminar (${lamS.meanVar.toFixed(3)}) + 0.15`,
+      );
+
+      // 2x Nyquist aliased flow rejected by PRF-periodic regression wall filter
+      const twoNyq = runSynthetic(
+        {
+          velocity: new Float32Array(S).fill(2 * cfg.scaleMps),
+          sigmaV: new Float32Array(S).fill(0),
+          relTrans: new Float32Array(S).fill(1),
+        },
+        DEFAULT_COLOR.wallFilterMps,
+      );
+      assert.ok(
+        statsOf(twoNyq).fill < 0.05,
+        `expected 2x Nyquist aliased flow to be rejected in CMM, got fill=${(statsOf(twoNyq).fill * 100).toFixed(1)}%`,
+      );
+
+      // Myocardial clutter (-0.08 m/s): suppressed at default WF (20 cm/s), flashes with breakthrough power > 1 at min WF
+      const tissue = new Uint8Array(S).fill(Tissue.Blood);
+      const vel = new Float32Array(S).fill(NaN);
+      const sig = new Float32Array(S);
+      const wall = new Float32Array(S);
+      for (let si = 0; si < S; si++) {
+        if (si < S / 2) {
+          vel[si] = 0.4;
+          sig[si] = colorSpectralWidthMps(0.4, 0.03, 0, 8);
+        } else {
+          tissue[si] = Tissue.Myocardium;
+          wall[si] = -0.08;
+        }
+      }
+      const clutterLine = { velocity: vel, sigmaV: sig, relTrans: new Float32Array(S).fill(1), wallVelocity: wall, tissue };
+      const wfDefRes = runSynthetic(clutterLine, DEFAULT_COLOR.wallFilterMps);
+      const wfMinRes = runSynthetic(clutterLine, colorWallFilterRangeMps(cfg.scaleMps).min);
+      const myoDef = statsOf(wfDefRes, S / 2 + 2, S - 2);
+      const myoMin = statsOf(wfMinRes, S / 2 + 2, S - 2);
+      assert.ok(
+        myoDef.fill < 0.05,
+        `expected < 5% myocardial clutter flash in CMM at default WF, got ${(myoDef.fill * 100).toFixed(1)}%`,
+      );
+      assert.ok(
+        myoMin.fill > 0.6 && myoMin.maxPow > 1.05,
+        `expected myocardial clutter flash (> 60%, breakthrough > 1.05) in CMM at min WF, got fill=${(myoMin.fill * 100).toFixed(1)}% maxPow=${myoMin.maxPow.toFixed(2)}`,
+      );
     });
 
     it('colours the same line as the 2D colour: as much of the blood, from about the same speed', () => {
       // each column's line, replicated over 8 lines, through the 2D colour itself (computeColorField and its Kasai
       // estimate, a new realization per column; persistence and spatial smoothing off, as the strip has neither), over
-      // the default box's depths. The colour's onset is the speed that best splits the blood into dark below and
-      // coloured above, within 0.8 Nyquist. The 2D's comes a little later: its noise gate rejects the weak incoherent
-      // echo the filter leaves of flow just under the cutoff, which the strip, with no estimate, does not have (without
-      // the gate the jitter's floor puts it 0.03–0.16 × the cutoff before the strip's). Measured, strip against 2D:
-      // 67/62, 58/55, 42/41, 69/67 and 54/51 % of the blood coloured, the strip's onset 0.05–0.22 × the cutoff earlier.
-      // The hard cut at the request began 0.04–0.27 × the cutoff later than the 2D and coloured up to 7.5 points less
+      // the default box's depths. Both the strip and the 2D colour now run the exact same Kasai estimator and noise
+      // coherence gate, so their coloured blood share and velocity onset match directly.
       const NL = 8;
       for (const run of runs) {
         const settings: ColorSettings = {
@@ -434,8 +556,9 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
         let realization = 0;
         for (const [col, line] of run.lines) {
           const v = line.velocity!;
-          const disp = line.dispersion!;
+          const sig = line.sigmaV!;
           const rel = line.relTrans!;
+          const ti = line.tissue!;
           const F = v.length;
           const frame = allocPolarFrame({
             lines: NL,
@@ -446,7 +569,7 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
             elevationSamples: 1,
           });
           for (let si = 0; si < F; si++) {
-            if (!Number.isFinite(v[si]!)) continue;
+            if (ti[si] !== Tissue.Blood || !Number.isFinite(v[si]!)) continue;
             const r = ((si + 0.5) / F) * run.depthCm;
             for (let l = 0; l < NL; l++) {
               frame.tissue[l * F + si] = Tissue.Blood;
@@ -459,9 +582,10 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
             settings,
             null,
             (_idx, _li, si, res) => {
-              res.v = v[si]!;
-              res.disp = disp[si]! / 1.6; // the strip keeps 1.6 × the flow's dispersion
-              res.vPerp = 0; // the strip's line keeps no transverse speed
+              const vs = v[si]!;
+              res.v = vs;
+              res.disp = Math.abs(vs) > 1e-4 ? sig[si]! / (0.9 * Math.abs(vs)) : 0;
+              res.vPerp = 0;
               res.present = 1;
             },
             field,
@@ -470,7 +594,8 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
           );
           for (let si = 0; si < F; si++) {
             const r = ((si + 0.5) / F) * run.depthCm;
-            if (!Number.isFinite(v[si]!) || r < settings.boxRMinCm || r > settings.boxRMaxCm) continue;
+            if (ti[si] !== Tissue.Blood || !Number.isFinite(v[si]!) || r < settings.boxRMinCm || r > settings.boxRMaxCm)
+              continue;
             // the inner lines, away from the edges of the estimator's 3 × 3 cells
             let coloured2d = 0;
             for (let l = 2; l < NL - 2; l++) if (Number.isFinite(field.vel[l * F + si]!)) coloured2d++;
@@ -483,7 +608,7 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
         assert.ok(blood.length > 1000, `${label}: ${blood.length} blood samples`);
         const share = (k: 1 | 2) => blood.reduce((s, b) => s + b[k], 0) / blood.length;
         assert.ok(
-          Math.abs(share(1) - share(2)) < 0.06,
+          Math.abs(share(1) - share(2)) < 0.04,
           `${label}: the strip colours ${(100 * share(1)).toFixed(1)} % of the blood, the 2D ${(100 * share(2)).toFixed(1)} %`,
         );
         const principal = blood.filter((b) => b[0] < 0.8 * run.scaleMps).sort((a, b) => a[0] - b[0]);
@@ -501,11 +626,10 @@ describe('StripEngine integration via SimulatorCore (M-mode, PW spectral & chrom
           }
           return at;
         };
-        // without the gate the strip begins no later than the 2D, and not far before it
-        const early = (onset(2) - onset(1)) / cut;
+        const onsetDiff = Math.abs(onset(2) - onset(1)) / cut;
         assert.ok(
-          early > -0.05 && early < 0.3,
-          `${label}: the strip's colour begins at ${(onset(1) * 100).toFixed(1)} cm/s, the 2D's at ${(onset(2) * 100).toFixed(1)} (the strip's within 0.3 × the cutoff before it, not after)`,
+          onsetDiff < 0.15,
+          `${label}: the strip's colour begins at ${(onset(1) * 100).toFixed(1)} cm/s, the 2D's at ${(onset(2) * 100).toFixed(1)} (diff ${(onsetDiff * 100).toFixed(1)}% of cutoff)`,
         );
       }
     });

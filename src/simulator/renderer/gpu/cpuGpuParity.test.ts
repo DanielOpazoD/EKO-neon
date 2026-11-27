@@ -175,8 +175,8 @@ import { canonicalControl, getViewTarget } from '@/simulator/windows/viewTargets
  *   ribCenterY (thoraxModel.ts); rootRadiusAt, mvHingeHeight, mvInflowTaper and tvWarpScale (valveSkirt.ts
  *   skirtWarpScale, which tvInflowSdf's mirror binds) run inside the classifier's runs;
  * - the classifier's valves and the aortic extension (above).
- * The Doppler programs hold scalar mirrors not annotated yet: wallFilterResponse and colorPowerConf (colorPowerConfidence
- * at COLOR_THRESHOLD) agree with their TypeScript; aliasVelocity agrees with clinical/formulas only for a positive
+ * The Doppler programs hold scalar mirrors not annotated yet: colorPowerConf (colorPowerConfidence
+ * at COLOR_THRESHOLD) agrees with its TypeScript; aliasVelocity agrees with clinical/formulas only for a positive
  * Nyquist velocity (for a non-positive one the TypeScript returns v and the shader NaN), and takes its baseline as a
  * third parameter where the TypeScript defaults it.
  */

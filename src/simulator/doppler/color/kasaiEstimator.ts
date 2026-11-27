@@ -7,8 +7,7 @@ import { APERTURE_MM } from '@/simulator/probe/transducer';
  * (exponential, averaged over the packet and the sample volume) decides whether a sample passes the display threshold,
  * and the velocity estimate scatters around the velocity, more with a broad spectrum and with a weak echo. Both are
  * correlated over about two samples and two lines (the resolution cell) and new at every update, as the blood moves on.
- * Without an estimate the field is the expected one. Declared values: no measured colour Doppler texture was found to
- * calibrate against.
+ * Declared values: no measured colour Doppler texture was found to calibrate against.
  */
 export interface ColorEstimate {
   /** Index of the colour update: every update draws a new realization. */
@@ -168,9 +167,7 @@ function keptPower(a: Float64Array, s: WallFilterShares): number {
  * Expected share of its power a laminar flow at `vMps` keeps through the regression wall filter with these shares: the
  * response of the 8-pulse packet to a tone turning by π·v/Nyquist per pulse. It acts on the sampled phase, so it is
  * periodic in the PRF (a flow aliasing to near zero is rejected as a slow one) and even in v. The estimator's power
- * follows it above the cutoff; below, the transit jitter keeps a floor near −9 dB (`TRANSIT_JITTER_RAD`). The colour
- * M-mode paints with it, tabulated (`WallFilterResponseTable`), so the strip and the 2D colour cut at the same −3 dB
- * point.
+ * follows it above the cutoff; below, the transit jitter keeps a floor near −9 dB (`TRANSIT_JITTER_RAD`).
  */
 export function wallFilterPowerResponse(
   vMps: number,
@@ -221,8 +218,8 @@ export function colorWallFilterRangeMps(scaleMps: number): { min: number; max: n
 /**
  * The −3 dB cutoff (m/s) the colour wall filter has for a requested one at the Nyquist it acquires with: bounded to what
  * the packet allows, 0 = off. The request is what the store and the review reports keep (`ColorSettings.wallFilterMps`);
- * each consumer bounds it here: the estimator's shares (CPU and GPU, `wallFilterShares`), the colour M-mode, the
- * expected field and the console's readout. Bounded where it was kept, a lowered scale lowered it for good: back at
+ * each consumer bounds it here: the estimator's shares (CPU 2D, GPU Pass D1, and colour M-mode, via `wallFilterShares`)
+ * and the console's readout. Bounded where it was kept, a lowered scale lowered it for good: back at
  * 0.68 m/s after 0.35 the 20 cm/s default stayed 11.2 cm/s, and the moving myocardium of an A4C (CPU, 44 frames) went
  * from 112 coloured samples to 7073.
  */
@@ -270,60 +267,16 @@ export function wallFilterShares(
   return out;
 }
 
-/** Intervals of |v|/Nyquist over [0, 1] that `WallFilterResponseTable` samples the response on. */
-const WF_TABLE_STEPS = 1024;
-
-/**
- * `wallFilterPowerResponse` for one request at one Nyquist, tabulated for a loop that filters many velocities alike:
- * the colour M-mode reads it for every blood sample of its columns. Even and periodic in 2·Nyquist, the response is a
- * function of |v|/Nyquist folded into [0, 1], sampled here at 1025 points and read by linear interpolation. That errs
- * by at most Δ²/8·max|h''| with Δ = 1/1024: the response is a trigonometric polynomial of degree 7 in π·v/Nyquist
- * with values in [0, 1], so |h''| ≤ 7²·π²/2 (Bernstein), at most 2.9e-5 of the power; over every cutoff the packet
- * allows |h''| peaks at (8² − 1)·π²/6 ≈ 104, next to zero with the mean removal, and the error at 1.24e-5. The table
- * is refilled only when the request or the Nyquist changes (1025 responses, 0.1 ms). Per sample, the response's 16
- * sin/cos took ~0.1 µs: with A4C through the crux at high quality, 1600 px and 100 mm/s (27 columns of 118 blood
- * samples a frame) the strip's colour loop took 0.30 ms a frame, 11 µs from the table (6 µs with the old hard cut).
- */
-export class WallFilterResponseTable {
-  private readonly power = new Float64Array(WF_TABLE_STEPS + 1);
-  private readonly shares: WallFilterShares = { mean: 0, trend: 0, quad: 0 };
-  private wallFilterMps = NaN;
-  private scaleMps = NaN;
-  /** Table steps per m/s of |v|. */
-  private stepsPerMps = 0;
-
-  /** The response for this request at this acquired Nyquist; refilled only when either changes. */
-  set(wallFilterMps: number, scaleMps: number): this {
-    if (wallFilterMps === this.wallFilterMps && scaleMps === this.scaleMps) return this;
-    this.wallFilterMps = wallFilterMps;
-    this.scaleMps = scaleMps;
-    const scale = Math.max(1e-3, scaleMps);
-    wallFilterShares(wallFilterMps, scale, this.shares);
-    for (let i = 0; i <= WF_TABLE_STEPS; i++)
-      this.power[i] = wallFilterPowerResponse((i / WF_TABLE_STEPS) * scale, scale, this.shares);
-    this.stepsPerMps = WF_TABLE_STEPS / scale;
-    return this;
-  }
-
-  /** Share of its power a laminar flow at `vMps` keeps (`wallFilterPowerResponse`), from the table. */
-  at(vMps: number): number {
-    // |v| in table steps, folded into [0, 1] Nyquist: the response is even and periodic in 2·Nyquist
-    let x = Math.abs(vMps) * this.stepsPerMps;
-    x -= 2 * WF_TABLE_STEPS * Math.floor(x / (2 * WF_TABLE_STEPS));
-    if (x > WF_TABLE_STEPS) x = 2 * WF_TABLE_STEPS - x;
-    const i = Math.min(WF_TABLE_STEPS - 1, Math.floor(x));
-    const lo = this.power[i]!;
-    return lo + (this.power[i + 1]! - lo) * (x - i);
-  }
-}
-
 const WF_SHARES: WallFilterShares = { mean: 0, trend: 0, quad: 0 };
 
 /** Module-level scratch buffers reused across every packet evaluation (zero per-update heap churn). */
 const XR_BUF = new Float64Array(COLOR_PACKET);
 const XI_BUF = new Float64Array(COLOR_PACKET);
+const JIT_LOCAL = new Float64Array(COLOR_PACKET);
 const PAIR_TMP = { a: 0, b: 0 };
-const JIT_SLOTS: Float32Array[] = new Array<Float32Array>(COLOR_PACKET);
+/** Stream offsets matching GPU Pass D1 (`glslDoppler.ts`): zSpec, zSpec2, and 4 jitter pairs (8 pulses). */
+const CORR_STREAM_OFFSETS = [0, 40, 2, 4, 6, 8] as const;
+const INV_SQRT2 = Math.SQRT1_2;
 
 /**
  * Scratch buffers reused across colour updates (decision 304): an update allocated ~18 typed arrays the size of the colour
@@ -340,12 +293,24 @@ export function colorScratch(name: string, n: number): Float32Array {
   return b.subarray(0, n);
 }
 
-/** Unit Gaussian from two hashes (Box–Muller). */
-function hashGaussian(li: number, si: number, stream: number, seed: number): number {
-  const u1 = hash3(li, si, stream, seed);
-  const u2 = hash3(li, si, stream + 1, seed);
-  return Math.sqrt(-2 * Math.log(Math.max(1e-12, u1))) * Math.cos(2 * Math.PI * u2);
+let maskScratch = new Uint8Array(0);
+function getCornerMask(n: number): Uint8Array {
+  if (maskScratch.length < n)
+    maskScratch = new Uint8Array(Math.max(n, Math.ceil(maskScratch.length * 1.5)));
+  return maskScratch.subarray(0, n);
 }
+
+/**
+ * Single-row hash memo for sequential 1-line calls (Color M-Mode): column `li` shares row `li - 1`
+ * with column `li - 1`, halving Box–Muller evaluations while staying bit-exact identical to a fresh call.
+ */
+let cachedRowLi = NaN;
+let cachedRowSiMin = 0;
+let cachedRowNS = 0;
+let cachedRowStream = 0;
+let cachedRowSeed = 0;
+let cachedRowMask = new Uint8Array(0);
+let cachedRowPairs = new Float32Array(0);
 
 /** A pair of independent unit Gaussians from the same two hashes (both outputs of Box–Muller), into `out`. */
 function hashGaussianPair(
@@ -358,34 +323,22 @@ function hashGaussianPair(
   const u1 = hash3(li, si, stream, seed);
   const u2 = hash3(li, si, stream + 1, seed);
   const r = Math.sqrt(-2 * Math.log(Math.max(1e-12, u1)));
-  out.a = r * Math.cos(2 * Math.PI * u2);
-  out.b = r * Math.sin(2 * Math.PI * u2);
-}
-
-/** Binomial [1 2 1]/4 smoothing of a lines × samples grid, along lines and along samples, in place. */
-function smoothGrid(g: Float32Array, nL: number, nS: number, tmp: Float32Array): void {
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      const i = l * nS + k;
-      tmp[i] = 0.25 * (g[k > 0 ? i - 1 : i]! + 2 * g[i]! + g[k < nS - 1 ? i + 1 : i]!);
-    }
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      const i = l * nS + k;
-      g[i] = 0.25 * (tmp[l > 0 ? i - nS : i]! + 2 * tmp[i]! + tmp[l < nL - 1 ? i + nS : i]!);
-    }
+  const ang = 2 * Math.PI * u2;
+  out.a = r * Math.cos(ang);
+  out.b = r * Math.sin(ang);
 }
 
 /**
- * The colour estimate of one update (decision 300), as a scanner forms it. Each sample of the box receives a packet of
- * `COLOR_PACKET` echoes: the blood's speckle amplitude (a complex Gaussian correlated over the resolution cell, new at every
- * update), turning by π·v/Nyquist per pulse, with a pulse-to-pulse jitter from transit and turbulence (the spectral width
- * 0.9 × dispersion × speed of spectrum.ts), plus receiver noise. A regression wall filter removes the packet's mean, and
- * its linear trend and quadratic as the cutoff rises, −3 dB at the cutoff (`wallFilterShares`): it acts on the sampled
- * phase, so it is periodic in the PRF and rejects a jet that aliases to near zero as well as slow flow. The lag-zero
- * and lag-one autocorrelations R0 and R1, averaged over the resolution cell as a scanner's range and lateral averaging
- * does, give the power, the velocity Nyquist·arg(R1)/π (Kasai) and the variance 1 − |R1|/R0. Until then the field was the true velocity plus a Gaussian scatter and the wall filter a cut on
- * the true velocity, which kept a jet at twice Nyquist that a real filter rejects.
+ * The colour estimate of one update (decision 300), as a scanner forms it — shared by 2D Color Doppler,
+ * GPU Pass D1/D2 (`glslDoppler.ts`), and Color M-Mode (`cmmColumn.ts`). Each sample receives a packet of
+ * `COLOR_PACKET` echoes: a 2-look complex Gaussian speckle amplitude correlated over a 2×2 resolution cell
+ * (`0.5 * sum` of 4 corner `hashGaussianPair` draws, unit variance everywhere including `nL = 1`), turning
+ * by π·v/Nyquist per pulse with correlated pulse-to-pulse transit + turbulent phase jitter plus receiver noise.
+ * A 3-basis orthonormal Legendre regression wall filter removes the packet's mean, linear trend, and quadratic
+ * (−3 dB at the bounded cutoff from `wallFilterShares`), acting on the sampled phase so it is periodic in the PRF.
+ * Lag-zero and lag-one autocorrelations R0 and R1 are averaged with [1 2 1] weights over the resolution cell
+ * strictly within the same class (blood vs tissue clutter) to produce velocity, noise-subtracted power, coherence,
+ * and normalized spectral variance.
  */
 export function kasaiEstimate(
   cellV: Float32Array,
@@ -401,194 +354,267 @@ export function kasaiEstimate(
   cellClass?: Float32Array,
 ): KasaiResult {
   const n = nL * nS;
-  const stream = estimate.realization * 64;
-  // the blood's speckle amplitude: 2-look incoherent range-cell envelope (multi-cycle Color Doppler
-  // transmit burst spans ~2 axial scatterer sub-volumes), unit mean power, correlated over the resolution cell
-  const zr = colorScratch('zr', n);
-  const zi = colorScratch('zi', n);
-  const zr2 = colorScratch('zr2', n);
-  const zi2 = colorScratch('zi2', n);
-  const tmp = colorScratch('tmp', n);
-  for (let l = 0; l < nL; l++)
-    for (let k = 0; k < nS; k++) {
-      const idx = l * nS + k;
-      zr[idx] = hashGaussian(liMin + l, siMin + k, stream, estimate.seed);
-      zi[idx] = hashGaussian(liMin + l, siMin + k, stream + 2, estimate.seed);
-      zr2[idx] = hashGaussian(liMin + l, siMin + k, stream + 40, estimate.seed);
-      zi2[idx] = hashGaussian(liMin + l, siMin + k, stream + 42, estimate.seed);
-    }
-  smoothGrid(zr, nL, nS, tmp);
-  smoothGrid(zi, nL, nS, tmp);
-  smoothGrid(zr2, nL, nS, tmp);
-  smoothGrid(zi2, nL, nS, tmp);
-  // the pulse-to-pulse jitter of each pulse, correlated over the same cell: neighbouring samples share their scatterers
-  const N = COLOR_PACKET;
-  for (let p = 0; p < N; p++) {
-    const j = colorScratch(`jit${p}`, n);
-    for (let l = 0; l < nL; l++)
-      for (let k = 0; k < nS; k++)
-        j[l * nS + k] = hashGaussian(liMin + l, siMin + k, stream + 4 + 2 * p, estimate.seed);
-    smoothGrid(j, nL, nS, tmp);
-    for (let g = 0; g < n; g++) j[g]! /= 0.375;
-    JIT_SLOTS[p] = j;
-  }
-  // [1 2 1]/4 in two directions keeps (6/16)² of the variance; each part then carries half the unit power
-  const unit = 1 / (0.375 * Math.SQRT2);
-  // 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic), its −3 dB point on the
-  // requested cutoff (`wallFilterShares`)
-  const { mean: meanShare, trend: trendShare, quad: quadShare } = wallFilterShares(
-    wallFilterMps,
-    scaleMps,
-    WF_SHARES,
-  );
-  const r0 = colorScratch('r0', n);
-  const r1r = colorScratch('r1r', n);
-  const r1i = colorScratch('r1i', n);
-  const valid = colorScratch('valid', n);
-  valid.fill(0);
-
-  for (let g = 0; g < n; g++) {
-    const v = cellV[g]!;
-    if (Number.isNaN(v)) continue;
-    const cls = cellClass ? cellClass[g]! : 1;
-    if (cls < 0.25) continue;
-    valid[g] = cls;
-    const isClutter = cls < 0.75;
-    const l = Math.floor(g / nS);
-    const k = g - l * nS;
-    const li = liMin + l;
-    const si = siMin + k;
-    const amp = Math.sqrt(cellRel[g]!);
-    const z1r = zr[g]!;
-    const z1i = zi[g]!;
-    const z2r = zr2[g]!;
-    const z2i = zi2[g]!;
-    const p1 = z1r * z1r + z1i * z1i;
-    const p2 = z2r * z2r + z2i * z2i;
-    const lookBoost = Math.sqrt(0.5 * (1 + p2 / Math.max(1e-8, p1)));
-    const ar = amp * z1r * unit * lookBoost;
-    const ai = amp * z1i * unit * lookBoost;
-    const phi = (Math.PI * v) / scaleMps;
-    const turbulent = (Math.PI * cellSigmaV[g]!) / scaleMps / Math.SQRT2;
-    const baseJitter = isClutter ? CLUTTER_JITTER_RAD : TRANSIT_JITTER_RAD;
-    const jitter = Math.hypot(baseJitter, turbulent);
-    const noise = Math.sqrt(NOISE_POWER / 2);
-    for (let p = 0; p < N; p++) {
-      const ph = p * phi + jitter * JIT_SLOTS[p]![g]!;
-      const c = Math.cos(ph);
-      const sn = Math.sin(ph);
-      hashGaussianPair(li, si, stream + 24 + 2 * p, estimate.seed, PAIR_TMP);
-      XR_BUF[p] = ar * c - ai * sn + noise * PAIR_TMP.a;
-      XI_BUF[p] = ar * sn + ai * c + noise * PAIR_TMP.b;
-    }
-    // 3-basis orthonormal Legendre regression wall filter (P0, P1, P2)
-    if (meanShare > 0) {
-      let mr = 0;
-      let mi = 0;
-      for (let p = 0; p < N; p++) {
-        mr += XR_BUF[p]!;
-        mi += XI_BUF[p]!;
-      }
-      mr = (mr / N) * meanShare;
-      mi = (mi / N) * meanShare;
-      for (let p = 0; p < N; p++) {
-        XR_BUF[p]! -= mr;
-        XI_BUF[p]! -= mi;
-      }
-      if (trendShare > 0) {
-        let pr = 0;
-        let pi = 0;
-        for (let p = 0; p < N; p++) {
-          pr += XR_BUF[p]! * LIN_BASIS[p]!;
-          pi += XI_BUF[p]! * LIN_BASIS[p]!;
-        }
-        pr *= trendShare;
-        pi *= trendShare;
-        for (let p = 0; p < N; p++) {
-          XR_BUF[p]! -= pr * LIN_BASIS[p]!;
-          XI_BUF[p]! -= pi * LIN_BASIS[p]!;
-        }
-        if (quadShare > 0) {
-          let qr = 0;
-          let qi = 0;
-          for (let p = 0; p < N; p++) {
-            qr += XR_BUF[p]! * QUAD_BASIS[p]!;
-            qi += XI_BUF[p]! * QUAD_BASIS[p]!;
-          }
-          qr *= quadShare;
-          qi *= quadShare;
-          for (let p = 0; p < N; p++) {
-            XR_BUF[p]! -= qr * QUAD_BASIS[p]!;
-            XI_BUF[p]! -= qi * QUAD_BASIS[p]!;
-          }
-        }
-      }
-    }
-    let a0 = 0;
-    let a1r = 0;
-    let a1i = 0;
-    for (let p = 0; p < N; p++) a0 += XR_BUF[p]! * XR_BUF[p]! + XI_BUF[p]! * XI_BUF[p]!;
-    for (let p = 0; p + 1 < N; p++) {
-      // x[p+1] · conj(x[p])
-      a1r += XR_BUF[p + 1]! * XR_BUF[p]! + XI_BUF[p + 1]! * XI_BUF[p]!;
-      a1i += XI_BUF[p + 1]! * XR_BUF[p]! - XR_BUF[p + 1]! * XI_BUF[p]!;
-    }
-    r0[g] = a0 / N;
-    r1r[g] = a1r / (N - 1);
-    r1i[g] = a1i / (N - 1);
-  }
-
-  // averaged over the resolution cell ([1 2 1] in range and across lines), strictly within the same class
-  // (blood 1.0 vs tissue clutter 0.5) so wall flash never biases adjacent laminar blood flow
-  const avg = (src: Float32Array, name: string): Float32Array => {
-    const outA = colorScratch(name, n);
-    outA.fill(0);
-    for (let l = 0; l < nL; l++)
-      for (let k = 0; k < nS; k++) {
-        const g = l * nS + k;
-        const cls = valid[g]!;
-        if (cls < 0.25) continue;
-        let sum = 0;
-        let w = 0;
-        for (let dl = -1; dl <= 1; dl++)
-          for (let dk = -1; dk <= 1; dk++) {
-            const ll = l + dl;
-            const kk = k + dk;
-            if (ll < 0 || ll >= nL || kk < 0 || kk >= nS) continue;
-            const h = ll * nS + kk;
-            const nCls = valid[h]!;
-            if (nCls < 0.25 || Math.abs(nCls - cls) >= 0.25) continue;
-            const wt = (dl === 0 ? 2 : 1) * (dk === 0 ? 2 : 1);
-            sum += wt * src[h]!;
-            w += wt;
-          }
-        outA[g] = sum / w;
-      }
-    return outA;
-  };
-
-  const R0 = avg(r0, 'R0');
-  const R1r = avg(r1r, 'R1r');
-  const R1i = avg(r1i, 'R1i');
   const velocity = colorScratch('velocity', n).fill(NaN);
   const power = colorScratch('power', n).fill(0);
   const variance = colorScratch('variance', n).fill(0);
   const coherence = colorScratch('coherence', n).fill(0);
-  for (let g = 0; g < n; g++) {
-    if (!valid[g]) continue;
-    const p0 = R0[g]!;
-    if (p0 <= 0) continue;
-    velocity[g] = (scaleMps * Math.atan2(R1i[g]!, R1r[g]!)) / Math.PI;
-    // the noise is part of what the receiver measures: subtract its expected share, as a scanner's power estimate does
-    power[g] = Math.max(0, p0 - NOISE_POWER);
-    // the variance over what a laminar flow already shows through transit and noise: laminar flow reads 0, as on a
-    // scanner whose variance map starts at the system's own decorrelation
-    coherence[g] = Math.hypot(R1r[g]!, R1i[g]!) / p0;
-    const raw = 1 - coherence[g]!;
-    variance[g] = Math.min(
-      1,
-      Math.max(0, (raw - LAMINAR_DECORRELATION) / (1 - LAMINAR_DECORRELATION)),
-    );
+  if (n <= 0) return { velocity, power, variance, coherence };
+
+  const gL = nL + 1;
+  const gS = nS + 1;
+  const gN = gL * gS;
+  const mask = getCornerMask(gN);
+  mask.fill(0);
+
+  const valid = colorScratch('valid', n);
+  valid.fill(0);
+  let validCount = 0;
+  for (let l = 0; l < nL; l++) {
+    const row = l * nS;
+    const mRow0 = l * gS;
+    const mRow1 = (l + 1) * gS;
+    for (let k = 0; k < nS; k++) {
+      const g = row + k;
+      const v = cellV[g]!;
+      if (v !== v) continue;
+      const cls = cellClass ? cellClass[g]! : 1;
+      if (cls < 0.25) continue;
+      valid[g] = cls;
+      validCount++;
+      mask[mRow0 + k] = 1;
+      mask[mRow0 + k + 1] = 1;
+      mask[mRow1 + k] = 1;
+      mask[mRow1 + k + 1] = 1;
+    }
+  }
+  if (validCount === 0) return { velocity, power, variance, coherence };
+
+  // Sparse 2×2 corner hash evaluation (6 correlated Gaussian pairs = 12 floats per active corner),
+  // matching GPU Pass D1 `correlatedGaussianPair` stream-for-stream.
+  const rawPairs = colorScratch('rawPairs', gN * 12);
+  const baseStream = (estimate.realization * 64) >>> 0;
+  const seed = estimate.seed >>> 0;
+  const reusePrevRow =
+    nL === 1 &&
+    liMin - 1 === cachedRowLi &&
+    siMin === cachedRowSiMin &&
+    nS === cachedRowNS &&
+    baseStream === cachedRowStream &&
+    seed === cachedRowSeed;
+
+  for (let gl = 0; gl < gL; gl++) {
+    const li = liMin + gl - 1;
+    const mRow = gl * gS;
+    const canReuse = reusePrevRow && gl === 0;
+    for (let gk = 0; gk < gS; gk++) {
+      const mi = mRow + gk;
+      if (!mask[mi]) continue;
+      const base = mi * 12;
+      if (canReuse && cachedRowMask[gk]) {
+        const srcBase = gk * 12;
+        for (let c = 0; c < 12; c++) rawPairs[base + c] = cachedRowPairs[srcBase + c]!;
+        continue;
+      }
+      const si = siMin + gk - 1;
+      for (let st = 0; st < 6; st++) {
+        hashGaussianPair(li, si, (baseStream + CORR_STREAM_OFFSETS[st]!) >>> 0, seed, PAIR_TMP);
+        rawPairs[base + st * 2] = PAIR_TMP.a;
+        rawPairs[base + st * 2 + 1] = PAIR_TMP.b;
+      }
+    }
+  }
+
+  if (nL === 1) {
+    if (cachedRowMask.length < gS) {
+      cachedRowMask = new Uint8Array(gS);
+      cachedRowPairs = new Float32Array(gS * 12);
+    }
+    const row1MaskOff = gS;
+    const row1PairOff = gS * 12;
+    for (let gk = 0; gk < gS; gk++) {
+      const active = mask[row1MaskOff + gk]!;
+      cachedRowMask[gk] = active;
+      if (active) {
+        const dst = gk * 12;
+        const src = row1PairOff + dst;
+        for (let c = 0; c < 12; c++) cachedRowPairs[dst + c] = rawPairs[src + c]!;
+      }
+    }
+    cachedRowLi = liMin;
+    cachedRowSiMin = siMin;
+    cachedRowNS = nS;
+    cachedRowStream = baseStream;
+    cachedRowSeed = seed;
+  }
+
+  const N = COLOR_PACKET;
+  const scale = Math.max(1e-3, scaleMps);
+  // 3-basis orthonormal Legendre regression wall filter (P0 mean + P1 linear + P2 quadratic), its −3 dB point on the
+  // requested cutoff (`wallFilterShares`)
+  const { mean: meanShare, trend: trendShare, quad: quadShare } = wallFilterShares(
+    wallFilterMps,
+    scale,
+    WF_SHARES,
+  );
+  const noiseAmp = Math.sqrt(NOISE_POWER * 0.5);
+  const r0 = colorScratch('r0', n);
+  const r1r = colorScratch('r1r', n);
+  const r1i = colorScratch('r1i', n);
+
+  for (let l = 0; l < nL; l++) {
+    const li = liMin + l;
+    const row = l * nS;
+    const mRow0 = l * gS;
+    const mRow1 = (l + 1) * gS;
+    for (let k = 0; k < nS; k++) {
+      const g = row + k;
+      const cls = valid[g]!;
+      if (cls < 0.25) continue;
+      const si = siMin + k;
+      const v = cellV[g]!;
+      const isClutter = cls < 0.75;
+      const b00 = (mRow0 + k) * 12;
+      const b01 = (mRow0 + k + 1) * 12;
+      const b10 = (mRow1 + k) * 12;
+      const b11 = (mRow1 + k + 1) * 12;
+
+      const amp = Math.sqrt(cellRel[g]!) * INV_SQRT2;
+      const z1r = 0.5 * (rawPairs[b00]! + rawPairs[b01]! + rawPairs[b10]! + rawPairs[b11]!) * amp;
+      const z1i =
+        0.5 * (rawPairs[b00 + 1]! + rawPairs[b01 + 1]! + rawPairs[b10 + 1]! + rawPairs[b11 + 1]!) * amp;
+      const z2r =
+        0.5 * (rawPairs[b00 + 2]! + rawPairs[b01 + 2]! + rawPairs[b10 + 2]! + rawPairs[b11 + 2]!) * amp;
+      const z2i =
+        0.5 * (rawPairs[b00 + 3]! + rawPairs[b01 + 3]! + rawPairs[b10 + 3]! + rawPairs[b11 + 3]!) * amp;
+      const p1 = z1r * z1r + z1i * z1i;
+      const p2 = z2r * z2r + z2i * z2i;
+      const lookBoost = Math.sqrt(0.5 * (1 + p2 / Math.max(1e-8, p1)));
+      const ar = z1r * lookBoost;
+      const ai = z1i * lookBoost;
+
+      for (let j = 0; j < N; j++) {
+        const off = 4 + j;
+        JIT_LOCAL[j] =
+          0.5 * (rawPairs[b00 + off]! + rawPairs[b01 + off]! + rawPairs[b10 + off]! + rawPairs[b11 + off]!);
+      }
+
+      const phi = (Math.PI * v) / scale;
+      const turbulent = ((Math.PI * cellSigmaV[g]!) / scale) * INV_SQRT2;
+      const baseJitter = isClutter ? CLUTTER_JITTER_RAD : TRANSIT_JITTER_RAD;
+      const jitter = Math.hypot(baseJitter, turbulent);
+
+      for (let p = 0; p < N; p++) {
+        const ph = p * phi + jitter * JIT_LOCAL[p]!;
+        const c = Math.cos(ph);
+        const sn = Math.sin(ph);
+        hashGaussianPair(li, si, (baseStream + 24 + 2 * p) >>> 0, seed, PAIR_TMP);
+        XR_BUF[p] = ar * c - ai * sn + noiseAmp * PAIR_TMP.a;
+        XI_BUF[p] = ar * sn + ai * c + noiseAmp * PAIR_TMP.b;
+      }
+
+      // 3-basis orthonormal Legendre regression wall filter (P0, P1, P2)
+      if (meanShare > 0) {
+        let mr = 0;
+        let mi = 0;
+        for (let p = 0; p < N; p++) {
+          mr += XR_BUF[p]!;
+          mi += XI_BUF[p]!;
+        }
+        mr = (mr / N) * meanShare;
+        mi = (mi / N) * meanShare;
+        for (let p = 0; p < N; p++) {
+          XR_BUF[p]! -= mr;
+          XI_BUF[p]! -= mi;
+        }
+        if (trendShare > 0) {
+          let pr = 0;
+          let pi = 0;
+          for (let p = 0; p < N; p++) {
+            pr += XR_BUF[p]! * LIN_BASIS[p]!;
+            pi += XI_BUF[p]! * LIN_BASIS[p]!;
+          }
+          pr *= trendShare;
+          pi *= trendShare;
+          for (let p = 0; p < N; p++) {
+            XR_BUF[p]! -= pr * LIN_BASIS[p]!;
+            XI_BUF[p]! -= pi * LIN_BASIS[p]!;
+          }
+          if (quadShare > 0) {
+            let qr = 0;
+            let qi = 0;
+            for (let p = 0; p < N; p++) {
+              qr += XR_BUF[p]! * QUAD_BASIS[p]!;
+              qi += XI_BUF[p]! * QUAD_BASIS[p]!;
+            }
+            qr *= quadShare;
+            qi *= quadShare;
+            for (let p = 0; p < N; p++) {
+              XR_BUF[p]! -= qr * QUAD_BASIS[p]!;
+              XI_BUF[p]! -= qi * QUAD_BASIS[p]!;
+            }
+          }
+        }
+      }
+
+      let a0 = 0;
+      let a1r = 0;
+      let a1i = 0;
+      for (let p = 0; p < N; p++) a0 += XR_BUF[p]! * XR_BUF[p]! + XI_BUF[p]! * XI_BUF[p]!;
+      for (let p = 0; p + 1 < N; p++) {
+        // x[p+1] · conj(x[p])
+        a1r += XR_BUF[p + 1]! * XR_BUF[p]! + XI_BUF[p + 1]! * XI_BUF[p]!;
+        a1i += XI_BUF[p + 1]! * XR_BUF[p]! - XR_BUF[p + 1]! * XI_BUF[p]!;
+      }
+      r0[g] = a0 / N;
+      r1r[g] = a1r / (N - 1);
+      r1i[g] = a1i / (N - 1);
+    }
+  }
+
+  // Averaged over the resolution cell ([1 2 1] in range and across lines), strictly within the same class
+  // (blood 1.0 vs tissue clutter 0.5) so wall flash never biases adjacent laminar blood flow
+  for (let l = 0; l < nL; l++) {
+    for (let k = 0; k < nS; k++) {
+      const g = l * nS + k;
+      const cls = valid[g]!;
+      if (cls < 0.25) continue;
+      let s0 = 0;
+      let sr = 0;
+      let sii = 0;
+      let w = 0;
+      for (let dl = -1; dl <= 1; dl++) {
+        const ll = l + dl;
+        if (ll < 0 || ll >= nL) continue;
+        const wl = dl === 0 ? 2 : 1;
+        for (let dk = -1; dk <= 1; dk++) {
+          const kk = k + dk;
+          if (kk < 0 || kk >= nS) continue;
+          const h = ll * nS + kk;
+          const nCls = valid[h]!;
+          if (nCls < 0.25 || Math.abs(nCls - cls) >= 0.25) continue;
+          const wt = wl * (dk === 0 ? 2 : 1);
+          s0 += wt * r0[h]!;
+          sr += wt * r1r[h]!;
+          sii += wt * r1i[h]!;
+          w += wt;
+        }
+      }
+      const p0 = s0 / w;
+      if (p0 <= 0) continue;
+      const m1r = sr / w;
+      const m1i = sii / w;
+      velocity[g] = (scale * (Math.abs(m1r) + Math.abs(m1i) > 1e-12 ? Math.atan2(m1i, m1r) : 0)) / Math.PI;
+      // the noise is part of what the receiver measures: subtract its expected share, as a scanner's power estimate does
+      power[g] = Math.max(0, p0 - NOISE_POWER);
+      // the variance over what a laminar flow already shows through transit and noise: laminar flow reads 0, as on a
+      // scanner whose variance map starts at the system's own decorrelation
+      coherence[g] = Math.hypot(m1r, m1i) / p0;
+      const raw = 1 - coherence[g]!;
+      variance[g] = Math.min(
+        1,
+        Math.max(0, (raw - LAMINAR_DECORRELATION) / (1 - LAMINAR_DECORRELATION)),
+      );
+    }
   }
   return { velocity, power, variance, coherence };
 }

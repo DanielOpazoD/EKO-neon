@@ -715,12 +715,14 @@ export function compareDeferredDoppler(
 
     const acq = { frequencyMHz: settings.frequencyMHz, harmonics: settings.harmonics };
     const cpuDet = allocColorField(n);
-    // the expected field at the packet's lowest cutoff (its old 0.06 m/s is bounded to it): parity over the most blood
+    // Sample-by-sample CPU <-> GPU Kasai parity at the packet's lowest cutoff (maximum blood coverage),
+    // using the exact same (realization, seed) now that CPU and GPU share the same 2x2 correlated Gaussian draw
     const detCfg: ColorSettings = {
       ...baseColor,
       wallFilterMps: colorWallFilterRangeMps(baseColor.scaleMps).min,
     };
-    computeColorField(frame, detCfg, null, sampleFromBox, cpuDet, acq, undefined);
+    const detEst = { realization: 1, seed: 42 };
+    computeColorField(frame, detCfg, null, sampleFromBox, cpuDet, acq, detEst);
 
     const shadedDet = gpu.shadeDoppler({
       spec,
@@ -728,9 +730,10 @@ export function compareDeferredDoppler(
       frequencyMHz: settings.frequencyMHz,
       harmonics: settings.harmonics,
       rawFlowBox,
+      estimate: detEst,
       resetHistory: true,
     });
-    if (!shadedDet) return { ...empty, error: 'shadeDoppler deterministic failed' };
+    if (!shadedDet) return { ...empty, error: 'shadeDoppler Kasai parity pass failed' };
     const gpuDetVel = new Float32Array(n);
     const gpuDetVar = new Float32Array(n);
     gpu.readbackDopplerBox(spec, detCfg.scaleMps, detCfg.baselineShiftMps, gpuDetVel, gpuDetVar);

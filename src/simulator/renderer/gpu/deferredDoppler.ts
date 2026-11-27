@@ -10,7 +10,6 @@ import {
 } from './glHelpers';
 import { COLOR_THRESHOLD } from '@/simulator/doppler/color/colorDoppler';
 import {
-  colorWallFilterCutoffMps,
   wallFilterShares,
   type WallFilterShares,
 } from '@/simulator/doppler/color/kasaiEstimator';
@@ -37,7 +36,6 @@ export const DOPPLER_AUTOCORR_UNIFORMS = [
   'uWallShares',
   'uBloomSamples',
   'uInvert',
-  'uUseKasai',
   'uRealization',
   'uSeed',
 ] as const;
@@ -48,12 +46,10 @@ export const DOPPLER_SHADE_UNIFORMS = [
   'uBoxBounds',
   'uScaleMps',
   'uBaselineMps',
-  'uWallFilterMps',
   'uGainLin',
   'uPersist',
   'uSmoothing',
   'uUseHistory',
-  'uUseKasai',
 ] as const;
 
 export const DOPPLER_SPATIAL_UNIFORMS = [
@@ -110,8 +106,8 @@ export interface DeferredDopplerRequest {
    * console settings (scale, baseline, wall filter, gain, persistence, invert) changed.
    */
   rawFlowBox?: Float32Array;
-  /** When provided, runs the stochastic 8-pulse Kasai estimator on GPU; omit for deterministic expected field. */
-  estimate?: { realization: number; seed: number };
+  /** Stochastic 8-pulse Kasai estimator realization index and seed. */
+  estimate: { realization: number; seed: number };
   /** Explicitly invalidate temporal circular phasor history (e.g. probe movement or modality switch). */
   resetHistory?: boolean;
 }
@@ -447,7 +443,6 @@ export class DeferredDopplerPipeline {
     const bloomSamples = Math.max(0, Math.round((settings.gainDb - 2) * 0.6));
     const gainLin = Math.pow(10, settings.gainDb / 20);
     const attenFreqMHz = attenuationFrequencyMHz(req.frequencyMHz, req.harmonics);
-    const useKasai = req.estimate ? 1 : 0;
 
     gl.viewport(0, 0, w, h);
     gl.disable(gl.DEPTH_TEST);
@@ -469,9 +464,8 @@ export class DeferredDopplerPipeline {
     gl.uniform3f(ua.uWallShares, wf.mean, wf.trend, wf.quad);
     gl.uniform1i(ua.uBloomSamples, bloomSamples);
     gl.uniform1i(ua.uInvert, settings.invert ? 1 : 0);
-    gl.uniform1i(ua.uUseKasai, useKasai);
-    gl.uniform1ui(ua.uRealization, (req.estimate?.realization ?? 0) >>> 0);
-    gl.uniform1ui(ua.uSeed, (req.estimate?.seed ?? 0) >>> 0);
+    gl.uniform1ui(ua.uRealization, req.estimate.realization >>> 0);
+    gl.uniform1ui(ua.uSeed, req.estimate.seed >>> 0);
     this.bindAt(2, gbuffer.envTex);
     this.bindAt(3, gbuffer.idsTex);
     this.bindAt(4, this.texFlowRaw);
@@ -492,13 +486,10 @@ export class DeferredDopplerPipeline {
     gl.uniform4i(us.uBoxBounds, box.siMin, box.liMin, box.siMax, box.liMax);
     gl.uniform1f(us.uScaleMps, settings.scaleMps);
     gl.uniform1f(us.uBaselineMps, settings.baselineShiftMps);
-    // the expected field's cutoff (no estimate), bounded as the CPU's computeColorField bounds it
-    gl.uniform1f(us.uWallFilterMps, colorWallFilterCutoffMps(settings.wallFilterMps, settings.scaleMps));
     gl.uniform1f(us.uGainLin, gainLin);
     gl.uniform1f(us.uPersist, useHistory ? settings.persistence : 0);
     gl.uniform1f(us.uSmoothing, smoothing);
     gl.uniform1i(us.uUseHistory, useHistory ? 1 : 0);
-    gl.uniform1i(us.uUseKasai, useKasai);
     this.bindAt(2, this.texCorr);
     this.bindAt(3, this.texHist[this.current]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

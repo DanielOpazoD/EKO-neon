@@ -62,6 +62,11 @@ export function paintMmodeStripColumn(
       const conf = colorPowerConfidence(cmmPow[idx] ?? 1, COLOR_THRESHOLD);
       return ST_POW_ALPHA_MIN + (1 - ST_POW_ALPHA_MIN) * conf;
     };
+    const breakthroughAt = (idx: number): number => {
+      if (!cmmPow) return 0;
+      const pw = cmmPow[idx] ?? 0;
+      return pw > 1 ? Math.min(1, pw - 1) : 0;
+    };
     for (let y = 0; y < rows; y++) {
       const sf = ((y + 0.5) / rows) * F - 0.5;
       const s0 = Math.max(0, Math.min(F - 1, Math.floor(sf)));
@@ -78,6 +83,7 @@ export function paintMmodeStripColumn(
       let im = 0;
       let varAcc = 0;
       let powAcc = 0;
+      let btAcc = 0;
       let wSum = 0;
       if (v0 === v0) {
         const ph = (v0 - baseline) * kPhi;
@@ -85,6 +91,7 @@ export function paintMmodeStripColumn(
         im += f0 * Math.sin(ph);
         varAcc += f0 * (cmmVar ? (cmmVar[i0] ?? 0) : 0);
         powAcc += f0 * powAlphaAt(i0);
+        btAcc += f0 * breakthroughAt(i0);
         wSum += f0;
       }
       if (v1 === v1) {
@@ -93,6 +100,7 @@ export function paintMmodeStripColumn(
         im += f1 * Math.sin(ph);
         varAcc += f1 * (cmmVar ? (cmmVar[i1] ?? 0) : 0);
         powAcc += f1 * powAlphaAt(i1);
+        btAcc += f1 * breakthroughAt(i1);
         wSum += f1;
       }
       if (wSum <= 0.18) continue;
@@ -101,6 +109,7 @@ export function paintMmodeStripColumn(
       const v = baseline + invPiScale * Math.atan2(im, re);
       const vari = varAcc / wSum;
       const powAlpha = powAcc / wSum;
+      const breakthrough = btAcc / wSum;
       colorMap(v, scale, vari, color.showVariance, rgb, baseline, color.palette);
 
       const edgeT = Math.min(1, Math.max(0, (wSum - 0.18) / 0.54));
@@ -110,12 +119,14 @@ export function paintMmodeStripColumn(
       const g0 = img[o + 1] ?? 0;
       const b0 = img[o + 2] ?? 0;
       const lum = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
-      // Clinical tissue write priority: preserves bright specular leaflet excursion lines through color plumes
+      // Clinical tissue write priority: preserves bright specular leaflet excursion lines through color plumes,
+      // relaxed only when real clutter flash or extreme overgain carries breakthrough > 0.
       const tpU = Math.min(1, Math.max(0, (lum - 98) / 74));
       const tissuePrio = 1 - tpU * tpU * (3 - 2 * tpU);
+      const effTwp = tissuePrio + (1 - tissuePrio) * breakthrough;
       const velU = Math.min(1, Math.max(0, (Math.abs(v) / scale - 0.05) / 0.17));
       const velAlpha = 0.62 + 0.38 * velU * velU * (3 - 2 * velU);
-      const blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * tissuePrio;
+      const blend = COLOR_BLEND * edgeAlpha * powAlpha * velAlpha * effTwp;
       const inv = 1 - blend;
       img[o] = Math.round(rgb[0] * blend + r0 * inv);
       img[o + 1] = Math.round(rgb[1] * blend + g0 * inv);

@@ -8,8 +8,10 @@ import {
   relativeTransmission,
   type ColorSettings,
 } from '@/simulator/doppler/color/colorDoppler';
-import { WallFilterResponseTable } from '@/simulator/doppler/color/kasaiEstimator';
+import { colorSpectralWidthMps } from '@/simulator/doppler/color/kasaiEstimator';
 import {
+  prepareClutterContext,
+  sampleClutterAxialVelocity,
   sampleFlow,
   type FlowFieldParams,
   type FlowSample,
@@ -114,8 +116,6 @@ export class StripEngine {
   private stripCmm: Float32Array | null = null;
   private stripCmmVar: Float32Array | null = null;
   private stripCmmPow: Float32Array | null = null;
-  /** The colour wall filter's response the colour M-mode columns are written with, kept for its request and Nyquist. */
-  private readonly cmmWallFilter = new WallFilterResponseTable();
   private stripMmode: Uint8ClampedArray | null = null;
   private stripCols = 0;
   private stripHead = 0;
@@ -654,12 +654,14 @@ export class StripEngine {
     return {
       amp: this.lineAmp.slice(),
       velocity: cmmData ? cmmData.velocity : null,
-      dispersion: cmmData ? cmmData.dispersion : null,
+      sigmaV: cmmData ? cmmData.sigmaV : null,
       relTrans: cmmData ? cmmData.relTrans : null,
+      wallVelocity: cmmData ? cmmData.wallVelocity : null,
+      tissue: cmmData ? cmmData.tissue : null,
     };
   }
 
-  /** Colour M-mode: axial flow velocity (+ toward transducer), variance, and relative acoustic transmission. */
+  /** Colour M-mode: axial flow velocity (+ toward transducer), spectral width σ_v, relative transmission, and wall clutter. */
   private cmmVelocity(
     beam: BeamFrame,
     spec: PolarFrameSpec,
@@ -667,7 +669,13 @@ export class StripEngine {
     theta: number,
     scene: Scene,
     ctx: StripCtx,
-  ): { velocity: Float32Array; dispersion: Float32Array; relTrans: Float32Array } {
+  ): {
+    velocity: Float32Array;
+    sigmaV: Float32Array;
+    relTrans: Float32Array;
+    wallVelocity: Float32Array;
+    tissue: Uint8Array;
+  } {
     const hf = ctx.heart.frame;
     const ct = Math.cos(theta),
       sn = Math.sin(theta);
@@ -677,12 +685,20 @@ export class StripEngine {
     const dhx = dx * hf.ex.x + dy * hf.ex.y + dz * hf.ex.z;
     const dhy = dx * hf.ey.x + dy * hf.ey.y + dz * hf.ey.z;
     const dhz = dx * hf.ez.x + dy * hf.ez.y + dz * hf.ez.z;
+    const ox = beam.origin.x - hf.origin.x;
+    const oy = beam.origin.y - hf.origin.y;
+    const oz = beam.origin.z - hf.origin.z;
+    const ohx = ox * hf.ex.x + oy * hf.ex.y + oz * hf.ex.z;
+    const ohy = ox * hf.ey.x + oy * hf.ey.y + oz * hf.ey.z;
+    const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
     const fs = this.flowSample;
     const F = spec.samples;
     const S = this.mmodeSamples;
-    const velocity = new Float32Array(F);
-    const dispersion = new Float32Array(F);
+    const velocity = new Float32Array(F).fill(NaN);
+    const sigmaV = new Float32Array(F);
     const relTrans = new Float32Array(F);
+    const wallVelocity = new Float32Array(F);
+    const tissue = new Uint8Array(F);
     const dr = spec.depthCm / F;
     const acq = {
       frequencyMHz: ctx.input.settings.frequencyMHz,
@@ -691,30 +707,67 @@ export class StripEngine {
     for (let si = 0; si < F; si++) {
       const li = Math.min(S - 1, Math.floor(((si + 0.5) / F) * S));
       const r = (si + 0.5) * dr;
+      tissue[si] = this.lineTi[li]!;
       const rel = relativeTransmission(this.lineTr[li] ?? 0, r, acq);
-      if (this.lineTi[li] !== Tissue.Blood || rel < DOPPLER_SHADOW_TRANSMISSION) {
-        velocity[si] = NaN;
-        continue;
-      }
-      const px = beam.origin.x + dx * r,
-        py = beam.origin.y + dy * r,
-        pz = beam.origin.z + dz * r;
-      const hx =
-        (px - hf.origin.x) * hf.ex.x + (py - hf.origin.y) * hf.ex.y + (pz - hf.origin.z) * hf.ex.z;
-      const hy =
-        (px - hf.origin.x) * hf.ey.x + (py - hf.origin.y) * hf.ey.y + (pz - hf.origin.z) * hf.ey.z;
-      const hz =
-        (px - hf.origin.x) * hf.ez.x + (py - hf.origin.y) * hf.ez.y + (pz - hf.origin.z) * hf.ez.z;
-      sampleFlow(ctx.flow, ctx.tables, scene.heartPose, phase, hx, hy, hz, fs);
-      if (!fs.present) {
-        velocity[si] = NaN;
-        continue;
-      }
-      velocity[si] = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
-      dispersion[si] = Math.min(1, fs.dispersion * 1.6);
-      relTrans[si] = Math.min(1, rel);
+      relTrans[si] = rel >= DOPPLER_SHADOW_TRANSMISSION ? Math.min(1, rel) : 0;
     }
-    return { velocity, dispersion, relTrans };
+    // Maximum blooming reach along the line (gain up to +12 dB -> 6 samples) so changing gain never re-traces lines
+    const maxBloom = 6;
+    const clutterCtx = prepareClutterContext(
+      ctx.heart,
+      ctx.tables,
+      scene.heartPose,
+      phase,
+      ctx.flow.flowPeaks,
+    );
+    for (let si = 0; si < F; si++) {
+      if (relTrans[si]! < DOPPLER_SHADOW_TRANSMISSION) continue;
+      const tId = tissue[si]!;
+      const isBlood = tId === Tissue.Blood;
+      const isClutter = tId === Tissue.Myocardium || tId === Tissue.Valve;
+      let nearBlood = isBlood;
+      if (!nearBlood) {
+        const lo = Math.max(0, si - maxBloom);
+        const hi = Math.min(F - 1, si + maxBloom);
+        for (let k = lo; k <= hi; k++) {
+          if (tissue[k] === Tissue.Blood) {
+            nearBlood = true;
+            break;
+          }
+        }
+      }
+      if (!nearBlood && !isClutter) continue;
+      const r = (si + 0.5) * dr;
+      const hx = ohx + dhx * r;
+      const hy = ohy + dhy * r;
+      const hz = ohz + dhz * r;
+      if (nearBlood) {
+        sampleFlow(ctx.flow, ctx.tables, scene.heartPose, phase, hx, hy, hz, fs);
+        if (fs.present) {
+          const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
+          const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
+          const vPerp = Math.sqrt(Math.max(0, vSq - vAxial * vAxial));
+          velocity[si] = vAxial;
+          sigmaV[si] = colorSpectralWidthMps(vAxial, fs.dispersion, vPerp, r);
+        }
+      }
+      if (isClutter) {
+        const li = Math.min(S - 1, Math.floor(((si + 0.5) / F) * S));
+        wallVelocity[si] = sampleClutterAxialVelocity(
+          clutterCtx,
+          ctx.heart,
+          hx,
+          hy,
+          hz,
+          tId,
+          this.lineSt[li] ?? -1,
+          dhx,
+          dhy,
+          dhz,
+        );
+      }
+    }
+    return { velocity, sigmaV, relTrans, wallVelocity, tissue };
   }
 
   /** Form an M-mode column from its traced lines, pass it through the console and store it. */
@@ -764,13 +817,14 @@ export class StripEngine {
     const grey = this.mmodeGrey;
     for (let s = 0; s < S; s++) strip[s * cols + col] = grey[s]!;
     const effColor = this.acquired ? this.effectiveColor(this.acquired) : inp.color;
-    // the colour from the nearer of the two traced lines, through the 2D colour's wall filter
+    // the colour from the nearer of the two traced lines, through the full 8-pulse Kasai estimator
     if (this.stripCmm)
       writeCmmColumn(
         t < 0.5 ? src.lo : src.hi,
         spec.samples,
         effColor,
-        this.cmmWallFilter,
+        this.stripHead,
+        { realization: this.acquisitionId, seed: ctx.caseDef.seed },
         col,
         cols,
         this.stripCmm,
