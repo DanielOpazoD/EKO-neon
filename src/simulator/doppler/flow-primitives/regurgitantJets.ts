@@ -389,21 +389,49 @@ function lvRadialRateCmps(heart: HeartModel, tables: BeatTables, phase: number):
     : rate;
 }
 
-/** Instantaneous isovolumic contraction/relaxation annular reshaping transient (cm/s). */
-function lvIsoTransientCmps(heart: HeartModel, tables: BeatTables, phase: number): number {
+/**
+ * Instantaneous LV isovolumic contraction (IVC) and relaxation (IVR) biphasic annular reshaping
+ * transients (cm/s): distinct positive-then-negative pre-ejection IVC spike and smaller post-AVC
+ * biphasic IVR deflection delineating S′ from e′ on pulsed-wave TDI while staying well below e′/S′.
+ */
+export function lvIsoTransientCmps(heart: HeartModel, tables: BeatTables, phase: number): number {
   const t = phase * tables.rrS;
   const tm = tables.timings;
   const ivcDur = Math.max(0.025, tm.ejectionStartS);
   if (t > 0.004 && t < tm.ejectionStartS - 0.002) {
     const u = (t - 0.004) / Math.max(0.015, ivcDur - 0.006);
-    const amp = Math.min(2.6, 0.24 * heart.physiology.ePrimeSeptalCmps);
+    const amp = Math.min(5.2, 0.44 * heart.physiology.ePrimeSeptalCmps);
     return amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
   }
-  if (t > tm.ejectionEndS + 0.004 && t < tm.mitralOpenS - 0.004) {
-    const ivrDur = tm.mitralOpenS - tm.ejectionEndS - 0.008;
-    if (ivrDur > 0.018) {
+  if (t > tm.ejectionEndS + 0.004 && t < tm.mitralOpenS - 0.006) {
+    const ivrDur = tm.mitralOpenS - tm.ejectionEndS - 0.01;
+    if (ivrDur > 0.016) {
       const u = (t - (tm.ejectionEndS + 0.004)) / ivrDur;
-      const amp = Math.min(2.0, 0.18 * heart.physiology.ePrimeSeptalCmps);
+      const amp = Math.min(3.8, 0.32 * heart.physiology.ePrimeSeptalCmps);
+      return -amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+    }
+  }
+  return 0;
+}
+
+/**
+ * Instantaneous RV tricuspid annular IVC (myocardial isovolumic acceleration) and IVR biphasic
+ * transients (cm/s), driven strictly by right-heart pulmonary/tricuspid valve timings.
+ */
+export function rvIsoTransientCmps(heart: HeartModel, tables: BeatTables, phase: number): number {
+  const t = phase * tables.rrS;
+  const tm = tables.timings;
+  const ivcDur = Math.max(0.022, tm.pulmonaryOpenS);
+  if (t > 0.004 && t < tm.pulmonaryOpenS - 0.002) {
+    const u = (t - 0.004) / Math.max(0.015, ivcDur - 0.006);
+    const amp = Math.min(5.4, 0.4 * heart.physiology.sPrimeTricuspidCmps);
+    return amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
+  }
+  if (t > tm.pulmonaryCloseS + 0.004 && t < tm.tricuspidOpenS - 0.006) {
+    const ivrDur = tm.tricuspidOpenS - tm.pulmonaryCloseS - 0.01;
+    if (ivrDur > 0.014) {
+      const u = (t - (tm.pulmonaryCloseS + 0.004)) / ivrDur;
+      const amp = Math.min(3.4, 0.24 * heart.physiology.sPrimeTricuspidCmps);
       return -amp * Math.sin(2 * Math.PI * u) * Math.sin(Math.PI * u);
     }
   }
@@ -464,12 +492,12 @@ export function sampleTissueVelocity(
       (shortening((phase + dPhase) % 1) - shortening((phase - dPhase + 1) % 1)) /
       (2 * dPhase * tables.rrS);
     const lateral = Math.min(1, Math.max(0, (A.tvCenter.x + A.tvR - x) / (2 * A.tvR)));
+    const rvIsoCmps = rvIsoTransientCmps(heart, tables, phase);
     return {
       vx: (2 * A.tvR * rate * lateral * (1 - rvLevel)) / 100,
       vy: 0,
       vz:
-        (heart.physiology.tapseCm *
-          sampleTable(tables.rvLongitudinalVelocity, phase) *
+        ((heart.physiology.tapseCm * sampleTable(tables.rvLongitudinalVelocity, phase) + rvIsoCmps) *
           (1 - rvLevel)) /
         100,
     };

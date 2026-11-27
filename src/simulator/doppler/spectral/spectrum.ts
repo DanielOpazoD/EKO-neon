@@ -2,6 +2,7 @@ import { aliasVelocity } from '@/clinical/formulas';
 import { SPEED_OF_SOUND_MPS } from '@/core/units';
 import { hash3 } from '@/core/random';
 import { APERTURE_MM } from '@/simulator/probe/transducer';
+import type { StripTintMapChoice } from '@/simulator/renderer/postprocess/tintMap';
 import {
   acousticSnrScale,
   clutterFilterPowerResponse,
@@ -26,6 +27,8 @@ export interface SpectralSettings {
   volume: number;
   /** Postprocess background floor rejection threshold in [0, 0.5] (display-only; never alters envelope/auto-trace). */
   reject?: number;
+  /** Independent presentation-only chroma tint for spectral & M-mode strips ('inherit' follows 2D tint). */
+  stripTintMap?: StripTintMapChoice;
 }
 
 export const DEFAULT_SPECTRAL: SpectralSettings = {
@@ -39,6 +42,7 @@ export const DEFAULT_SPECTRAL: SpectralSettings = {
   audioOn: false,
   volume: 0.5,
   reject: 0,
+  stripTintMap: 'inherit',
 };
 
 /** The spectral modes, each with its own velocity settings (decision 230). */

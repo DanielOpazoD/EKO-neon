@@ -9,8 +9,10 @@ import {
 } from '@/simulator/doppler/color/spatiotemporalFilter';
 import { SPECTRAL_BINS, spectralRange, type SpectralSettings } from '@/simulator/doppler/spectral/spectrum';
 import { COLOR_BLEND } from '@/simulator/renderer/postprocess/colorMap';
-import { tintGrayByte } from '@/simulator/renderer/postprocess/tintMap';
-import type { TintMapId } from '@/simulator/renderer/types';
+import {
+  tintGrayByte,
+  type ResolvedStripTint,
+} from '@/simulator/renderer/postprocess/tintMap';
 import type { RowMap } from '../mmodeStrip';
 
 /** Paint one column of the displayed M-mode (and optional Colour M-mode) strip RGBA buffer. */
@@ -21,7 +23,7 @@ export function paintMmodeStripColumn(
   strip: Uint8ClampedArray,
   cols: number,
   samples: number,
-  tint: TintMapId | undefined,
+  tint: ResolvedStripTint | undefined,
   cmm: Float32Array | null,
   color: ColorSettings | undefined,
   cmmVar?: Float32Array | null,
@@ -30,6 +32,7 @@ export function paintMmodeStripColumn(
   if (map.samples !== samples) return;
   const { rows, taps, first, weights } = map;
   const rgbGray: [number, number, number] = [0, 0, 0];
+  const customTint = tint && tint !== 'gray' && tint !== 'neutral-gray';
   for (let y = 0; y < rows; y++) {
     let g = 0;
     const i0 = first[y]!;
@@ -38,7 +41,7 @@ export function paintMmodeStripColumn(
       if (w > 0 && i0 + k < samples) g += w * strip[(i0 + k) * cols + col]!;
     }
     const o = (y * cols + col) * 4;
-    if (tint && tint !== 'gray') {
+    if (customTint) {
       tintGrayByte(Math.round(g), tint, rgbGray);
       img[o] = rgbGray[0];
       img[o + 1] = rgbGray[1];
@@ -180,16 +183,21 @@ export function buildSpectralRowMap(rows: number): SpectralRowMap {
 
 const spectralLutCache = new Map<string, Uint8Array>();
 
-function spectralRgbLut(tintMap?: TintMapId): Uint8Array {
-  const key = tintMap && tintMap !== 'gray' ? tintMap : 'gray';
+function spectralRgbLut(tintMap?: ResolvedStripTint): Uint8Array {
+  const key = tintMap ?? 'gray';
   let lut = spectralLutCache.get(key);
   if (lut) return lut;
   lut = new Uint8Array(256 * 3);
   const rgb: [number, number, number] = [0, 0, 0];
-  const customTint = tintMap && tintMap !== 'gray';
+  const neutral = tintMap === 'neutral-gray';
+  const customTint = tintMap && tintMap !== 'gray' && tintMap !== 'neutral-gray';
   for (let g = 0; g < 256; g++) {
     const o = g * 3;
-    if (customTint) {
+    if (neutral) {
+      lut[o] = g;
+      lut[o + 1] = g;
+      lut[o + 2] = g;
+    } else if (customTint) {
       tintGrayByte(g, tintMap, rgb);
       lut[o] = rgb[0];
       lut[o + 1] = rgb[1];
@@ -216,7 +224,7 @@ export function paintSpectralStripColumn(
   cols: number,
   reject: number,
   ybRel: number,
-  tintMap?: TintMapId,
+  tintMap?: ResolvedStripTint,
 ): void {
   const { rows, b0, b1, fy, fy0 } = map;
   const r = Math.max(0, Math.min(0.6, reject));
@@ -252,7 +260,7 @@ export function renderSpectralStripRgba(
   stripDisplay: Float32Array,
   cols: number,
   spectral: SpectralSettings,
-  tintMap?: TintMapId,
+  tintMap?: ResolvedStripTint,
   headCol?: number,
   rejectOverride?: number,
 ): { vMin: number; vMax: number } {

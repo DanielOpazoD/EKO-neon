@@ -38,6 +38,10 @@ import {
   createConsoleState,
   NO_ARTIFACTS,
 } from '@/simulator/renderer/postprocess/consolePipeline';
+import {
+  resolveStripTint,
+  type ResolvedStripTint,
+} from '@/simulator/renderer/postprocess/tintMap';
 import type { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import type {
   ImagingModality,
@@ -193,7 +197,7 @@ export class StripEngine {
       }
     | undefined
   > = new Array(192);
-  private lastTintMap: TintMapId | undefined = undefined;
+  private lastTintMap: ResolvedStripTint | undefined = undefined;
   private rowMap: RowMap | null = null;
   /** Peak flow vector over the cycle at the last gate position (heart frame), keyed by that position. */
   private gateFlow: GateFlowCache = { key: '', best: 0, bx: 0, by: 0, bz: 0 };
@@ -1051,7 +1055,11 @@ export class StripEngine {
   ): StripInfo {
     const acquired = this.acquired;
     this.displayCols = W;
-    this.lastTintMap = tintMap;
+    const stripTint = resolveStripTint(
+      liveSpectral?.stripTintMap ?? acquired?.spectral.stripTintMap,
+      tintMap,
+    );
+    this.lastTintMap = stripTint;
     const y0 = sectorH + 2;
     const h = H - y0 - 4;
     const cols = this.stripCols;
@@ -1069,7 +1077,7 @@ export class StripEngine {
       const cmmLayout = this.stripCmm
         ? `|${displayColor.palette ?? 'vivid'}|${displayColor.showVariance ? 1 : 0}|${displayColor.baselineShiftMps}`
         : '';
-      const layout = `${cols}x${h}|${this.mmodeSamples}|${tintMap ?? 'gray'}${cmmLayout}`;
+      const layout = `${cols}x${h}|${this.mmodeSamples}|${stripTint ?? 'gray'}${cmmLayout}`;
       if (this.stripRgbaKey !== layout || !this.stripRgba) {
         this.stripRgba = new Uint8ClampedArray(cols * h * 4);
         this.rowMap = buildRowMap(h, this.mmodeSamples);
@@ -1082,7 +1090,7 @@ export class StripEngine {
             this.stripMmode,
             cols,
             this.mmodeSamples,
-            tintMap,
+            stripTint,
             this.stripCmm,
             displayColor,
             this.stripCmmVar,
@@ -1127,7 +1135,7 @@ export class StripEngine {
       if (cols === W && h > 0) {
         const ybAbs = y0 + Math.round((vMax / (vMax - vMin)) * h);
         const ybRel = ybAbs >= y0 && ybAbs < Math.min(H, y0 + h) ? ybAbs - y0 : -1;
-        const layout = `${cols}x${h}|${tintMap ?? 'gray'}|${reject.toFixed(4)}|${ybRel}`;
+        const layout = `${cols}x${h}|${stripTint ?? 'gray'}|${reject.toFixed(4)}|${ybRel}`;
         if (this.spectralRgbaKey !== layout || !this.spectralRgba) {
           this.spectralRgba = new Uint8ClampedArray(cols * h * 4);
           if (!this.spectralRowMap || this.spectralRowMap.rows !== h) {
@@ -1145,7 +1153,7 @@ export class StripEngine {
               cols,
               reject,
               ybRel,
-              tintMap,
+              stripTint,
             );
           }
         }
@@ -1160,7 +1168,7 @@ export class StripEngine {
           this.stripDisplay,
           cols,
           effectiveSpectral,
-          tintMap,
+          stripTint,
           this.stripHead % Math.max(1, cols),
           reject,
         );
