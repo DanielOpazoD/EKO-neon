@@ -269,6 +269,11 @@ export function buildBeatTables(
   const tvVelocity = new Float32Array(n); // cm/s, with its own inflow area
   let velIntegralCm = 0; // cm (VTI of mitral inflow)
   let tvIntegralCm = 0;
+  // When a forced mitral orifice area elevates transmitral E (mitral stenosis), keep tricuspid
+  // inflow velocity physiological (~0.65 m/s) rather than copying the stenotic mitral velocity.
+  const tvVelocityScale = hemo.mvEffectiveAreaCm2
+    ? Math.min(1, 0.65 / Math.max(0.1, physiology.ePeakMps))
+    : 1;
   // the tricuspid valve opens TRICUSPID_LEAD_S before the mitral one (decision 162): its early wave runs that much earlier
   const tvLead = timings.mitralOpenS - timings.tricuspidOpenS;
   for (let i = 0; i < n; i++) {
@@ -276,7 +281,7 @@ export function buildBeatTables(
     const atrial = aScale * aCm * aShapeAt(t);
     const v = eAt(t) * mitralEFactor + atrial;
     mvVelocity[i] = v;
-    tvVelocity[i] = eAt(t + tvLead) * tricuspidEFactor + atrial;
+    tvVelocity[i] = (eAt(t + tvLead) * tricuspidEFactor + atrial) * tvVelocityScale;
     velIntegralCm += v * dt;
     tvIntegralCm += tvVelocity[i]! * dt;
   }
@@ -394,7 +399,9 @@ export function buildBeatTables(
     rvEndVolumeChangeMl,
     trVelocityMps: tr.velocityMps,
     trFlowMlps: tr.flowMlps,
-    mvEffectiveAreaCm2: mvArea * scaleMv,
+    // Preserve forced effective mitral orifice area (e.g. mitral stenosis); mass conservation
+    // ∫Q_mv dt = svMitral is already carried by scaleMv inside mitralFlowMlps.
+    mvEffectiveAreaCm2: mvArea,
     mrFlowMlps: mrFlow,
     mrVelocityMps: mrVelocity,
     arFlowMlps: arFlow,

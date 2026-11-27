@@ -29,6 +29,7 @@ export function modelDiastolicAssessment(t: StructuredEchoTruth) {
       t.wallMotion.abnormalSegments.length > 0 ||
       t.lv.ivsdCm >= 1.5 ||
       wallThickened(t.lv.ivsdCm, t.lv.lvpwdCm, t.sex),
+    mitralStenosis: t.mitral.effectiveAreaCm2 <= 1.5 && t.mitral.decelerationTimeMs >= 350,
   });
 }
 

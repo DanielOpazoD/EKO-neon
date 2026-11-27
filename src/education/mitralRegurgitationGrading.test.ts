@@ -71,6 +71,7 @@ const CASE_MR_GRADE: Record<string, ValveGrade | null> = {
   'af-diastolic': 'mild',
   'artifact-challenge': 'mild',
   'aortic-regurgitation-severe': null,
+  'mitral-stenosis-severe': null,
 };
 
 const SPANISH: Record<ValveGrade, string> = {

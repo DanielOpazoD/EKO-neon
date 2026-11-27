@@ -36,7 +36,7 @@ function truthFor(id: string): StructuredEchoTruth {
 }
 
 test('all clinical cases produce finite, physiologically consistent hemodynamic ground truth', () => {
-  assert.equal(CASE_INPUTS.length, 13, 'expected 13 clinical cases');
+  assert.equal(CASE_INPUTS.length, 14, 'expected 14 clinical cases');
   for (const input of CASE_INPUTS) {
     const t = truthFor(input.id);
     assert.ok(Number.isFinite(t.bsaM2) && t.bsaM2 > 1.0 && t.bsaM2 < 3.0, `${input.id}: BSA`);
@@ -128,6 +128,35 @@ test('clinical pathology invariants hold across severity tiers and hemodynamic p
   assert.ok(sevAr.regurgitation.ar!.vmaxMps >= 3.8, `severe AR Vmax=${sevAr.regurgitation.ar!.vmaxMps}`);
   assert.ok(sevAr.lv.eddCm > 5.8 && sevAr.lv.efPct >= 52, `severe AR compensated dilated LV: EDD=${sevAr.lv.eddCm}, EF=${sevAr.lv.efPct}`);
   assert.ok(sevAr.aorticValve.vmaxMps < 2.0, `pure severe AR must not mimic AS: AV Vmax=${sevAr.aorticValve.vmaxMps}`);
+
+  // Rheumatic severe MS: forced mvEffectiveAreaCm2 preserved (not cancelled by scaleMv), high E, prolonged DT, dilated LA, secondary PH, diastolic exclusion
+  const sevMs = truthFor('mitral-stenosis-severe');
+  assert.ok(
+    Math.abs(sevMs.mitral.effectiveAreaCm2 - 1.1) < 1e-6,
+    `forced mvEffectiveAreaCm2 must stay 1.10 cm², got ${sevMs.mitral.effectiveAreaCm2}`,
+  );
+  assert.ok(sevMs.mitral.ePeakMps >= 1.8, `severe MS E peak=${sevMs.mitral.ePeakMps}`);
+  assert.ok(sevMs.mitral.decelerationTimeMs * 0.29 >= 190, `severe MS PHT=${sevMs.mitral.decelerationTimeMs * 0.29}`);
+  assert.ok(sevMs.la.volumeIndexMlM2 > 48, `severe MS severely dilated LA=${sevMs.la.volumeIndexMlM2}`);
+  assert.ok(sevMs.rightHeart.trVmaxMps !== null && sevMs.rightHeart.trVmaxMps >= 3.2, `severe MS secondary PH TR=${sevMs.rightHeart.trVmaxMps}`);
+  assert.equal(
+    assessDiastolic({
+      ageYears: sevMs.ageYears,
+      rhythm: sevMs.rhythm,
+      eMps: sevMs.mitral.ePeakMps,
+      eOverA: sevMs.mitral.eOverA,
+      septalEPrimeCmps: sevMs.mitral.ePrimeSeptalCmps,
+      lateralEPrimeCmps: sevMs.mitral.ePrimeLateralCmps,
+      laviMlM2: sevMs.la.volumeIndexMlM2,
+      laSizeReliable: false,
+      trMps: sevMs.rightHeart.trVmaxMps,
+      paspMmHg: sevMs.rightHeart.rvspMmHg,
+      decelerationTimeMs: sevMs.mitral.decelerationTimeMs,
+      pulmonaryVeinSd: sevMs.pulmonaryVein.sdRatio,
+      mitralStenosis: true,
+    }).fillingPressure,
+    'not-assessed',
+  );
 });
 
 test('anatomical measureModel matches pathological chamber & wall remodeling', () => {

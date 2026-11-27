@@ -75,6 +75,7 @@ export const FINDINGS: Finding[] = [
   { id: 'mr-severe', label: 'Insuficiencia mitral severa', domain: 'valves', exclusive: 'mr' },
   { id: 'mvp', label: 'Prolapso mitral', domain: 'valves' },
   { id: 'ar-present', label: 'Insuficiencia aórtica', domain: 'valves' },
+  { id: 'ms-present', label: 'Estenosis mitral', domain: 'valves' },
   { id: 'rv-dilated', label: 'Ventrículo derecho dilatado', domain: 'right' },
   { id: 'rv-dysfunction', label: 'Disfunción sistólica del VD (TAPSE < 1,7 cm)', domain: 'right' },
   {
@@ -148,6 +149,7 @@ export function expectedFindings(t: StructuredEchoTruth): string[] {
   const mr = t.regurgitation.mr;
   out.add(`mr-${mr ? gradeMitralRegurgitation(mr) : 'none'}`);
   if (t.regurgitation.ar) out.add('ar-present');
+  if (t.mitral.effectiveAreaCm2 <= 1.5 && t.mitral.decelerationTimeMs >= 350) out.add('ms-present');
   if (t.rv.basalDiameterCm > 4.1) out.add('rv-dilated');
   if (t.rightHeart.tapseCm < 1.7) out.add('rv-dysfunction');
   if (modelPulmonaryAssessment(t).suggestive) out.add('ph-probable');

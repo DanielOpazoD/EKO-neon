@@ -11,6 +11,7 @@ import { pericardialEffusionTamponadeCase } from './pericardial-effusion-tampona
 import { afDiastolicCase } from './af-diastolic';
 import { artifactChallengeCase } from './artifact-challenge';
 import { aorticRegurgitationSevereCase } from './aortic-regurgitation-severe';
+import { mitralStenosisSevereCase } from './mitral-stenosis-severe';
 import type { CaseDefinition, CaseDefinitionInput } from './schema';
 import { normalizeCase } from './normalizeCase';
 
@@ -29,6 +30,7 @@ export const CASE_INPUTS: CaseDefinitionInput[] = [
   afDiastolicCase,
   artifactChallengeCase,
   aorticRegurgitationSevereCase,
+  mitralStenosisSevereCase,
 ];
 
 export function listCases(): { id: string; title: string; difficulty: number }[] {

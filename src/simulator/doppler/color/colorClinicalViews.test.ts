@@ -415,3 +415,43 @@ test('view-level Color fidelity: severe chronic AR diastolic LVOT jet, aortic PI
     `Expected opposite diastolic flow direction in AR DescendingAorta vs normal: norm=${descNorm.meanSignedAxial.toFixed(2)}, ar=${descAr.meanSignedAxial.toFixed(2)}`,
   );
 });
+
+test('view-level Color fidelity: rheumatic severe MS turbulent diastolic candle-flame jet and laminar LA convergence', () => {
+  const msPlax = auditSlice('mitral-stenosis-severe', 'plax', 0.65);
+  const plaxLv = requireStat(msPlax, Structure.LvCavity, 'MS plax LvCavity');
+  const plaxLa = requireStat(msPlax, Structure.LaCavity, 'MS plax LaCavity');
+  const plaxAo = requireStat(msPlax, Structure.AorticRoot, 'MS plax AorticRoot');
+  const plaxRvot = requireStat(msPlax, Structure.Rvot, 'MS plax Rvot');
+  assert.ok(
+    plaxLv.fillPct >= 60 && plaxLv.maxSpeed >= 1.65 && plaxLv.maxDisp >= 0.45,
+    `Expected turbulent high-velocity diastolic candle-flame MS jet in PLAX LV, got ${JSON.stringify(plaxLv)}`,
+  );
+  assert.ok(
+    plaxLa.fillPct >= 15 && plaxLa.maxDisp <= 0.14,
+    `Expected laminar LA-side proximal convergence in PLAX, got ${JSON.stringify(plaxLa)}`,
+  );
+  assert.equal(plaxAo.flowSamples, 0, 'Diastolic MS jet must not bleed into AorticRoot');
+  // Secondary post-capillary PH (PASP 52 mmHg) drives emergent diastolic pulmonary regurgitation in RVOT
+  assert.ok(
+    plaxRvot.fillPct >= 50 && plaxRvot.maxDisp >= 0.35,
+    `Expected secondary PH pulmonary regurgitation in PLAX RVOT, got ${JSON.stringify(plaxRvot)}`,
+  );
+
+  const msA4c = auditSlice('mitral-stenosis-severe', 'a4c', 0.65);
+  const a4cLv = requireStat(msA4c, Structure.LvCavity, 'MS a4c LvCavity');
+  const a4cLa = requireStat(msA4c, Structure.LaCavity, 'MS a4c LaCavity');
+  const a4cRv = requireStat(msA4c, Structure.RvCavity, 'MS a4c RvCavity');
+  assert.ok(
+    a4cLv.fillPct >= 50 && a4cLv.maxSpeed >= 1.0 && a4cLv.maxDisp >= 0.45,
+    `Expected turbulent diastolic MS jet in A4C LV, got ${JSON.stringify(a4cLv)}`,
+  );
+  assert.ok(
+    a4cLa.fillPct >= 15 && a4cLa.maxDisp <= 0.14,
+    `Expected laminar LA-side proximal convergence in A4C, got ${JSON.stringify(a4cLa)}`,
+  );
+  // Tricuspid inflow stays physiological & laminar (must not inherit stenotic mitral velocity or turbulence)
+  assert.ok(
+    a4cRv.maxSpeed < 1.0 && a4cRv.maxDisp <= 0.12,
+    `Tricuspid inflow in pure MS must stay normal and laminar, got ${JSON.stringify(a4cRv)}`,
+  );
+});

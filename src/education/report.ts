@@ -454,6 +454,13 @@ export function pathologyImpressions(t: StructuredEchoTruth): string[] {
       `Insuficiencia aórtica ${grade} (ORE ${ar.eroaCm2.toFixed(2)} cm², PHT ${ar.phtMs.toFixed(0)} ms, volumen regurgitante ${ar.regurgitantVolumeMl.toFixed(0)} mL).`,
     );
   }
+  if (t.mitral.effectiveAreaCm2 <= 1.5 && t.mitral.decelerationTimeMs >= 350) {
+    const phtMs = t.mitral.decelerationTimeMs * 0.29;
+    const grade = t.mitral.effectiveAreaCm2 <= 1.0 ? 'muy severa' : 'severa';
+    out.push(
+      `Estenosis mitral ${grade} (AVM ${t.mitral.effectiveAreaCm2.toFixed(2)} cm², PHT ${phtMs.toFixed(0)} ms, onda E ${t.mitral.ePeakMps.toFixed(2)} m/s).`,
+    );
+  }
   if (t.lvot.peakGradientMmHg >= 30)
     out.push(
       `Obstrucción ${t.lvot.dynamicObstruction ? 'dinámica' : 'fija'} del TSVI con gradiente pico ${t.lvot.peakGradientMmHg.toFixed(0)} mmHg${t.lvot.peakGradientMmHg >= 50 ? ' (significativa)' : ''}.`,
