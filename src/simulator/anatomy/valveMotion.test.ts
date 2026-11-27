@@ -3,11 +3,12 @@ import test from 'node:test';
 import { CASE_INPUTS, loadCaseById } from '@/cases';
 import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { buildCaseModels, REST_PATIENT } from './caseModels';
-import { computeChamberPose, lvInflowCavitySdf } from './heartPose';
+import { computeChamberPose, dynamicSeptalShiftCm, lvInflowCavitySdf } from './heartPose';
 import {
   mitralFreeEdge,
   mitralHingeZ,
   mitralLeafletPoint,
+  rheumaticDomingFactor,
   SAM_CONTACT_SEVERITY,
   SAM_DRAG_RISE,
   SAM_MAX_BLEND,
@@ -272,4 +273,41 @@ test('fitOpenRotation: the least violated rotation when none clears, continuous 
     prev = rot;
   }
   assert.ok(closed, 'the channel never closed');
+});
+
+test('rheumatic severe MS domes the anterior leaflet ("hockey-stick") in diastole while normal leaflets stay straight', () => {
+  assert.equal(rheumaticDomingFactor(70), 0);
+  assert.ok(rheumaticDomingFactor(32) > 0.85);
+
+  const ms = buildCaseModels(loadCaseById('mitral-stenosis-severe'), REST_PATIENT);
+  const norm = buildCaseModels(loadCaseById('normal-excellent-window'), REST_PATIENT);
+  const msPose = computeChamberPose(ms.heart, cycleStateAt(ms.tables, 0.62));
+  const normPose = computeChamberPose(norm.heart, cycleStateAt(norm.tables, 0.62));
+
+  // Open anterior profile: negative `a` = bowing anteriorly/outward; in rheumatic MS the mid-leaflet
+  // knee bows farther anteriorly than the tethered tip (a2 < a3), creating a classic hockey-stick dome.
+  const msProf = msPose.valves.mitral.anterior.openProf;
+  const normProf = normPose.valves.mitral.anterior.openProf;
+  assert.ok(
+    msProf[4]! > msProf[2]! + 0.15,
+    `Expected MS anterior tip to hook inward relative to mid-belly knee (a2=${msProf[2]!.toFixed(3)}, a3=${msProf[4]!.toFixed(3)})`,
+  );
+  assert.ok(
+    normProf[4]! < normProf[2]!,
+    `Normal open anterior leaflet should swing monotonically outward (a2=${normProf[2]!.toFixed(3)}, a3=${normProf[4]!.toFixed(3)})`,
+  );
+});
+
+test('pulmonary hypertension produces dynamic systolic D-sign septal flattening', () => {
+  assert.equal(dynamicSeptalShiftCm(0, 0), 0);
+  assert.equal(dynamicSeptalShiftCm(0, 1), 0);
+  const ph = buildCaseModels(loadCaseById('pulmonary-hypertension-rv'), REST_PATIENT);
+  const edPose = computeChamberPose(ph.heart, cycleStateAt(ph.tables, 0.0));
+  const esPhase = ph.tables.endSystoleS / ph.tables.rrS;
+  const esPose = computeChamberPose(ph.heart, cycleStateAt(ph.tables, esPhase));
+  assert.ok(edPose.septalShiftCm > 0.4, `Expected mild residual diastolic flattening, got ${edPose.septalShiftCm}`);
+  assert.ok(
+    esPose.septalShiftCm > edPose.septalShiftCm * 1.4,
+    `Expected systolic D-sign amplification (ES ${esPose.septalShiftCm.toFixed(2)} vs ED ${edPose.septalShiftCm.toFixed(2)})`,
+  );
 });
