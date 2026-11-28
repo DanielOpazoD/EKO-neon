@@ -15,18 +15,18 @@ import {
   IconTorso,
 } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
+import { Segmented } from './controls';
 import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
 
-const MODES = MODALITY_LIST;
+const PRIMARY_MODES = MODALITY_LIST.filter((m) => m.id !== 'cmm');
 
 /**
- * Bottom toolbar: only the acquisition controls live in the first row — modality keys, freeze/cine
- * and the torso toggle. Interface toggles and secondary actions live in the ⋯ overflow menu.
+ * Clean bottom acquisition bar: the 6 daily modalities (CMM appears on demand via Shift+M or Ajustes),
+ * Freeze/Store, cine playback when frozen, and 2 layout icons (Modo clase, Torso 3D) + ⋯ menu.
  */
 export function ModeBar() {
   const s = useSimStore(
     useShallow((st) => ({
-      // a finished exam keeps its frozen image: the store refuses a modality or a resume (`examClosed`)
       closed: examClosed(st),
       captureCount: st.captures.length,
       frozen: st.frozen,
@@ -57,29 +57,28 @@ export function ModeBar() {
       flashTimer.current = window.setTimeout(() => setSavedFlash(false), 1200);
     }
   };
+  const visibleModes = s.modality === 'cmm' ? MODALITY_LIST : PRIMARY_MODES;
   const segRef = useRef<HTMLDivElement>(null);
   const pill = useSlidingPill(segRef, s.modality);
   return (
     <div className="modebar" role="toolbar" aria-label="Modalidades y cine">
       <div className="seg-bar" role="group" aria-label="Modalidad" ref={segRef}>
         {pill && <span className="seg-pill accent" style={pill} aria-hidden="true" />}
-        {MODES.map((m) => (
+        {visibleModes.map((m) => (
           <button
             key={m.id}
             className={s.modality === m.id ? 'active' : ''}
             data-tour={m.id === 'color' ? 'color' : m.id === 'pw' ? 'pw' : undefined}
+            data-tip={m.name}
+            data-tip-key={m.key.replace('Shift+', '⇧')}
             onClick={() => s.setModality(m.id)}
             aria-pressed={s.modality === m.id}
             disabled={s.closed}
           >
             {m.label}
-            <kbd className="kbd" aria-hidden="true">
-              {m.key.replace('Shift+', '⇧')}
-            </kbd>
           </button>
         ))}
       </div>
-      <ContextChip />
       <div className="sep" />
       <button
         className={`freeze-btn${s.frozen ? ' active' : ''}`}
@@ -89,7 +88,7 @@ export function ModeBar() {
           s.closed
             ? 'Examen finalizado: la imagen queda congelada'
             : s.frozen
-              ? 'Reanudar'
+              ? 'Reanudar adquisición en vivo'
               : 'Congelar la imagen'
         }
         data-tip-key={s.closed ? undefined : 'Espacio'}
@@ -107,7 +106,7 @@ export function ModeBar() {
         data-tip={
           s.closed
             ? 'Examen finalizado: no se pueden guardar más capturas'
-            : 'Guardar imagen actual en la galería del estudio e informe (Store)'
+            : 'Guardar imagen actual en el estudio e informe'
         }
         data-tip-key={s.closed ? undefined : 'K'}
         aria-label="Guardar captura en el estudio"
@@ -125,8 +124,8 @@ export function ModeBar() {
             aria-pressed={s.teachingPointerOn}
             data-tip={
               s.teachingPointerOn
-                ? 'Arrastrá sobre la imagen congelada para señalar con una flecha (Esc para salir)'
-                : 'Señalar sobre el cuadro congelado con flechas temporales para clase (se capturan al Guardar)'
+                ? 'Arrastra sobre la imagen congelada para señalar con una flecha (Esc para salir)'
+                : 'Señalar sobre el cuadro congelado con flechas temporales para clase'
             }
           >
             <IconArrowPointer size={13} />
@@ -138,7 +137,7 @@ export function ModeBar() {
               className="pointer-clear-btn"
               onClick={() => s.clearTeachingArrows()}
               aria-label={`Borrar ${s.teachingArrowCount} flechas docentes`}
-              data-tip="Borrar todas las flechas temporales de este cuadro (Esc)"
+              data-tip="Borrar flechas temporales (Esc)"
             >
               ×{s.teachingArrowCount}
             </button>
@@ -147,7 +146,6 @@ export function ModeBar() {
       )}
       {s.frozen && <CineControls />}
       <span className="spacer" style={{ flex: 1 }} />
-      {/* 1-click classroom / projector presentation mode: clean maximized image + dark room chrome */}
       <button
         type="button"
         onClick={() => s.setUi(nextClassModeUi({ minimal: s.minimal, roomMode: s.roomMode }))}
@@ -155,15 +153,14 @@ export function ModeBar() {
         aria-label="Modo clase (proyector)"
         data-tip={
           classMode
-            ? 'Salir del modo clase (restaurar panel izquierdo y brillo normal)'
-            : 'Modo clase / proyector: maximiza la imagen y oscurece la interfaz para proyectar'
+            ? 'Salir del modo clase'
+            : 'Modo clase / proyector: maximiza la imagen y oscurece la interfaz'
         }
         data-tip-key="F"
         aria-pressed={classMode}
       >
         <IconPresentation />
       </button>
-      {/* no label (decision 244): the button is an icon, its name stays «Torso 3D» for assistive technology */}
       <button
         onClick={() => s.setUi({ showTorso: !s.showTorso })}
         className={`icon-btn${s.showTorso ? ' active' : ''}`}
@@ -235,7 +232,7 @@ function CineControls() {
         type="button"
         className="cine-chip"
         aria-label={`Velocidad del cine ${s.cineSpeed}×`}
-        data-tip="Cambiar velocidad del bucle (1× / 0.5× / 0.25×)"
+        data-tip="Velocidad del bucle (1× / 0.5× / 0.25×)"
         onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
       >
         {s.cineSpeed}×
@@ -275,57 +272,7 @@ function CineControls() {
   );
 }
 
-/**
- * One glanceable chip that states what the active modality is doing — colour Nyquist, the PW/TDI
- * gate depth, the CW cursor or the M-mode sweep. Read-only: the control lives in the Doppler tab.
- * Locked to the displayed cine frame's acquisition while frozen (returns null from HUD store while live
- * so live ticks trigger zero re-renders).
- */
-function ContextChip() {
-  const live = useSimStore(
-    useShallow((s) => ({
-      modality: s.modality,
-      scaleMps: s.color.scaleMps,
-      baselineShiftMps: s.color.baselineShiftMps,
-      gateDepthCm: s.gateDepthCm,
-      sweepSpeed: s.spectral.sweepSpeedMmPerS,
-    })),
-  );
-  const frozenAcq = useHudStore((h) => (h.hud?.frozen ? (h.hud.acquisition ?? null) : null));
-  const modality = frozenAcq ? frozenAcq.modality : live.modality;
-  const scaleMps = frozenAcq ? frozenAcq.color.scaleMps : live.scaleMps;
-  const baselineShiftMps = frozenAcq ? frozenAcq.color.baselineShiftMps : live.baselineShiftMps;
-  const gateDepthCm = frozenAcq ? frozenAcq.gateDepthCm : live.gateDepthCm;
-  const sweepSpeed = frozenAcq ? frozenAcq.spectral.sweepSpeedMmPerS : live.sweepSpeed;
-  const fmtSigned = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`;
-  const colorText =
-    Math.abs(baselineShiftMps) < 0.005
-      ? `±${scaleMps.toFixed(2)} m/s`
-      : `${fmtSigned(baselineShiftMps + scaleMps)}/${fmtSigned(baselineShiftMps - scaleMps)} m/s`;
-  const spec: Record<string, { text: string; title: string } | undefined> = {
-    color: {
-      text: colorText,
-      title: 'Escala de Nyquist y línea base de la caja de color (pestaña Doppler)',
-    },
-    pw: { text: `Gate ${gateDepthCm.toFixed(1)} cm`, title: 'Profundidad de la compuerta PW' },
-    cw: { text: 'Cursor', title: 'Cursor CW activo — sin compuerta' },
-    tdi: { text: `Gate ${gateDepthCm.toFixed(1)} cm`, title: 'Profundidad de la compuerta TDI' },
-    'm-mode': { text: `${sweepSpeed} mm/s`, title: 'Velocidad de barrido del modo M' },
-    cmm: {
-      text: `${colorText} · ${sweepSpeed} mm/s`,
-      title: 'Escala de color y velocidad de barrido del modo M color (pestaña Doppler)',
-    },
-  };
-  const chip = spec[modality];
-  if (!chip) return null;
-  return (
-    <span className="ctx-chip" data-tip={chip.title}>
-      {chip.text}
-    </span>
-  );
-}
-
-/** ⋯ menu: interface toggles (checkable) plus the secondary actions, per the minimal-console spec. */
+/** ⋯ menu: quality, interface toggles, export actions, and developer tools. */
 function OverflowMenu() {
   const { open, setOpen, wrap } = usePopover();
   const [recording, setRecording] = useState(false);
@@ -337,7 +284,7 @@ function OverflowMenu() {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Más opciones"
-        data-tip="Paneles y acciones"
+        data-tip="Opciones, calidad y exportación"
         onClick={() => setOpen(!open)}
       >
         <IconSliders />
@@ -367,6 +314,8 @@ function OverflowMenuContent({
       caseId: st.caseId,
       examFinished: st.examFinished,
       mode: st.mode,
+      quality: st.quality,
+      setQuality: st.setQuality,
       setUi: st.setUi,
       ui: st.ui,
     })),
@@ -376,6 +325,21 @@ function OverflowMenuContent({
 
   return (
     <div className="menu" role="menu" aria-label="Paneles y acciones">
+      <MenuCap>Calidad de imagen</MenuCap>
+      <div className="menu-quality">
+        <Segmented
+          ariaLabel="Calidad"
+          value={s.quality}
+          onChange={(v) => s.setQuality(v)}
+          options={[
+            { id: 'auto', label: 'Auto' },
+            { id: 'low', label: 'Baja' },
+            { id: 'medium', label: 'Media' },
+            { id: 'high', label: 'Alta' },
+          ]}
+        />
+      </div>
+      <div className="menu-sep" />
       <MenuCap>Mostrar</MenuCap>
       <CheckItem
         label="Ayudas de vista"
@@ -391,16 +355,10 @@ function OverflowMenuContent({
         hint="Caso, FC y parámetros en las esquinas"
       />
       <CheckItem
-        label="Interfaz limpia"
-        checked={s.ui.minimal}
-        onToggle={() => s.setUi({ minimal: !s.ui.minimal })}
-        hint="Solo imagen y consola — oculta el rail izquierdo"
-      />
-      <CheckItem
-        label="Modo sala"
+        label="Modo sala oscura"
         checked={s.ui.roomMode}
         onToggle={() => s.setUi({ roomMode: !s.ui.roomMode })}
-        hint="Atenúa todo salvo la imagen, como en la sala a oscuras"
+        hint="Atenúa los bordes dejando destacar la ecografía"
       />
       <CheckItem
         label="ECG"
@@ -408,7 +366,7 @@ function OverflowMenuContent({
         onToggle={() => s.setUi({ showEcg: !s.ui.showEcg })}
       />
       <div className="menu-sep" />
-      <MenuCap>Acciones</MenuCap>
+      <MenuCap>Exportar y ayuda</MenuCap>
       <ActionItem
         label="Guardar imagen PNG"
         onClick={() => {
@@ -449,7 +407,7 @@ function OverflowMenuContent({
             label="Modo desarrollador"
             checked={s.ui.devMode}
             onToggle={() => s.setUi({ devMode: !s.ui.devMode })}
-            hint="Habilita Lab, anatomía experimental, revisión y telemetría"
+            hint="Lab, anatomía experimental, revisión y telemetría"
           />
           {devOn && (
             <>
@@ -483,11 +441,7 @@ function OverflowMenuContent({
   );
 }
 
-/**
- * Replays the frozen cine as a loop at the pace it was acquired (decision 191): each tick shows the next frame and the
- * newest wraps to the oldest. The loop lives in the store, so any frame picked by hand, a tool, review mode or the
- * freeze stops it (decision 197); the button keeps one name and says whether it plays with aria-pressed.
- */
+/** Replays the frozen cine loop at the selected playback speed. */
 function CinePlay({
   length,
   spanS,
