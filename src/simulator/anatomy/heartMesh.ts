@@ -268,6 +268,14 @@ function extractMeshes(
   const wantDescAorta = Boolean(opts.thorax) && specs.some((g) => g.id === 'thoracic-aorta');
   const descScale = opts.thorax ? descAortaScale(opts.thorax, pose.state.aorticPressure) : 1;
 
+  // The 2D analytic RV model uses 90% radial crescent collapse (RV_BODY_RADIAL_CONTRACTION = 0.90)
+  // to match 2D A4C fractional area change; on a 3D exterior mesh that produces a deep focal crater
+  // (~2.2 cm dent at 120°–160°) even in failing RVs. Scaling only `tvZ` for the 3D mesh classifier
+  // caps `rvRadialState(tvZ, tapse, contraction)` cleanly to physiological 3D epicardial amplitude
+  // (~25–30%) while leaving LV, atria, valves, and the 2D ultrasound physics engine untouched.
+  const classifyPose: HeartPose =
+    pose.tvZ > 1e-4 ? { ...pose, tvZ: pose.tvZ * 0.2 } : pose;
+
   for (let k = 0; k < nz; k++) {
     const z = b.min[2] + k * step;
     const dz = z - bc.z;
@@ -281,7 +289,7 @@ function extractMeshes(
         const dx = x - bc.x;
         let hit = false;
         if (dx * dx + dyz2 <= br2) {
-          hit = classifyHeart(heart, pose, x, y, z, s);
+          hit = classifyHeart(heart, classifyPose, x, y, z, s);
         }
         if (hit && s.structure === Structure.Ivc && inferiorTrimTorsoY !== undefined) {
           const p = heartToTorso(heart.frame, { x, y, z });
@@ -492,18 +500,30 @@ function applyPhysiologicalVentricularBeat(
   const esv = Math.max(5, heart.physiology.esvMl);
   const caseEf = Math.max(0.12, Math.min(0.85, (edv - esv) / edv));
   const efScale = Math.max(0.25, Math.min(1.35, caseEf / 0.6));
+  const rvScale = Math.max(0.25, Math.min(1.15, (heart.physiology.tapseCm || 2.0) / 2.2));
   const L = heart.lv.lengthCm;
   const zAnn = pose.zAnn;
   const effL = Math.max(4, L - zAnn);
   const hasRwma = heart.regionalMeanFrac > 0;
+  const smoothstep = (e0: number, e1: number, v: number) => {
+    const t = Math.max(0, Math.min(1, (v - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
 
   for (let i = 0; i < positions.length; i += 3) {
     const x = positions[i]!;
     const y = positions[i + 1]!;
     const z = positions[i + 2]!;
     const zeta = Math.max(0, Math.min(1, (z - zAnn) / effL));
-    const reg = hasRwma ? lvRegionalMotion(heart.segAmp, Math.atan2(y, x), zeta) : 1;
-    const amp = c * efScale * reg;
+    const azRaw = Math.atan2(y, x);
+    const azPos = azRaw < 0 ? azRaw + Math.PI * 2 : azRaw;
+    // Smooth weight: 1 on the RV free-wall sector (1.5..3.8 rad), 0 on the LV walls
+    const rvMask =
+      smoothstep(1.3, 1.9, azPos) * (1 - smoothstep(3.4, 4.0, azPos)) * (1 - smoothstep(0.72, 0.95, zeta));
+    const reg = hasRwma ? lvRegionalMotion(heart.segAmp, azRaw, zeta) : 1;
+    const lvAmp = c * efScale * reg;
+    const rvAmp = c * rvScale;
+    const amp = lvAmp * (1 - rvMask) + rvAmp * rvMask;
     if (amp <= 1e-4) continue;
 
     const apicalW = zeta * zeta * (3 - 2 * zeta);
@@ -511,9 +531,10 @@ function applyPhysiologicalVentricularBeat(
     const cx = -1.1 * (1 - 0.88 * zeta);
     const cy = 0.15 * (1 - 0.88 * zeta);
 
-    // 1. Balanced radial + anterior-inferior contraction so mid, anterior, inferior & apex all squeeze together
-    const sx = 1 - 0.145 * amp * apicalW;
-    const sy = 1 - (0.1 + 0.085 * apicalW) * amp;
+    // 1. Balanced radial + anterior-inferior contraction; avoid double-squeezing the RV body
+    const radialDamp = 1 - 0.65 * rvMask;
+    const sx = 1 - 0.145 * amp * apicalW * radialDamp;
+    const sy = 1 - (0.095 + 0.08 * apicalW) * amp * (1 - 0.5 * rvMask);
     const x1 = cx + (x - cx) * sx;
     const y1 = cy + (y - cy) * sy;
 
