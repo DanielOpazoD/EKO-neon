@@ -591,12 +591,12 @@ bool classifyHeart(vec3 p0, out Sample s) {
         vec3 b0 = vec3(-(rIn + 0.12), -0.2, L * 0.6);
         float rB = rOut - fw * 1.2;
         vec3 b1 = vec3(rB * cos(RV_PAP_AZ), rB * sin(RV_PAP_AZ), L * 0.68);
-        float dBand = sdRoundCone(p, b0, b1, 0.34, 0.28);
+        float dBand = sdCapsule(p, b0, b1, 0.31);
         if (dBand < 0.0) {
           setSample(s, T_MYO, dBand, vec3(0.0, 0.0, 1.0), p, 0.0, S_MOD_BAND);
           return true;
         }
-        float dRp = sdRoundCone(p, vec3(P(RVPAP_BASE), P(RVPAP_BASE + 1), P(RVPAP_BASE + 2)), vec3(P(RVPAP_BASE + 3), P(RVPAP_BASE + 4), P(RVPAP_BASE + 5)), P(RVPAP_BASE + 6), P(RVPAP_BASE + 7)) + 0.7 * papillaryFluting(x / sc3, y / sc3, z);
+        float dRp = sdRoundCone(p, vec3(P(RVPAP_BASE), P(RVPAP_BASE + 1), P(RVPAP_BASE + 2)), vec3(P(RVPAP_BASE + 3), P(RVPAP_BASE + 4), P(RVPAP_BASE + 5)), P(RVPAP_BASE + 6), P(RVPAP_BASE + 7));
         if (dRp < 0.0) {
           setSample(s, T_MYO, dRp, vec3(x, y, 0.0), p, 0.0, S_RV_PAP);
           return true;

@@ -457,13 +457,24 @@ float lvTrabecularRelief(float az, float mz, float levelFrac, float septShare, f
   }
   float w = min(1.0, (levelFrac - 0.45) / 0.32);
   float freeWeight = 0.72 + 0.44 * (1.0 - clamp(septShare, 0.0, 1.0) * (1.0 - 0.5 * w));
-  float ridge1 = sin(5.0 * az + mz * 1.35) * cos(3.0 * az - mz * 1.05);
-  float ridge2 = sin(9.0 * az - mz * 1.9);
+  float a = az * 0.15915494309189535;
+  float t1 = 5.0 * a + mz * 0.21 - 0.25;
+  float u1 = abs(t1 - floor(t1 + 0.5)) * 2.0;
+  float t2 = 3.0 * a - mz * 0.17;
+  float u2 = abs(t2 - floor(t2 + 0.5)) * 2.0;
+  float t3 = 9.0 * a - mz * 0.3 - 0.25;
+  float u3 = abs(t3 - floor(t3 + 0.5)) * 2.0;
+  float ridge1 = (1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1)) * (1.0 - 2.0 * u2 * u2 * (3.0 - 2.0 * u2));
+  float ridge2 = 1.0 - 2.0 * u3 * u3 * (3.0 - 2.0 * u3);
   return w * freeWeight * (0.19 * coarseCentered + 0.062 * ridge1 + 0.026 * w * ridge2);
 }
 // src/simulator/anatomy/lvWall.ts: papillaryFluting
 float papillaryFluting(float mx, float my, float mz) {
-  return 0.045 * sin(mx * 9.2 + my * 7.4) * cos(mx * 6.9 - my * 9.8 + mz * 1.5);
+  float t1 = mx * 1.46 + my * 1.18 - 0.25;
+  float u1 = abs(t1 - floor(t1 + 0.5)) * 2.0;
+  float t2 = mx * 1.1 - my * 1.56 + mz * 0.24;
+  float u2 = abs(t2 - floor(t2 + 0.5)) * 2.0;
+  return 0.045 * (1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1)) * (1.0 - 2.0 * u2 * u2 * (3.0 - 2.0 * u2));
 }
 // src/simulator/anatomy/rv.ts: rvTrabecularDepth
 float rvTrabecularDepth(float z, float lengthCm, float az) {
@@ -472,8 +483,12 @@ float rvTrabecularDepth(float z, float lengthCm, float az) {
     return 0.0;
   }
   float w = min(1.0, (z - 0.38 * L) / (0.34 * L));
-  float ridge = sin(6.0 * az + z * 1.3) * cos(4.0 * az - z * 0.9);
-  float mesh = 0.5 + 0.5 * sin(10.0 * az - z * 1.7);
+  float a = az * 0.15915494309189535;
+  float u1 = abs(6.0 * a + z * 0.21 - 0.25 - floor(6.0 * a + z * 0.21 + 0.25)) * 2.0;
+  float u2 = abs(4.0 * a - z * 0.14 - floor(4.0 * a - z * 0.14 + 0.5)) * 2.0;
+  float u3 = abs(10.0 * a - z * 0.27 - floor(10.0 * a - z * 0.27 + 0.5)) * 2.0;
+  float ridge = (1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1)) * (1.0 - 2.0 * u2 * u2 * (3.0 - 2.0 * u2));
+  float mesh = 1.0 - u3 * u3 * (3.0 - 2.0 * u3);
   return w * (0.14 * max(0.0, ridge) + 0.09 * w * mesh);
 }
 // src/simulator/anatomy/mitralValve.ts: mitralHalfThickness

@@ -1,8 +1,7 @@
 import { Structure, Tissue } from '../tissue';
-import { sdRoundCone, smin } from '../sdf';
+import { sdCapsule, sdRoundCone, smin } from '../sdf';
 import { skirtOffsetAt } from '../valveSkirt';
 import { rvCrescent, rvInflowSdf, rvTrabecularDepth } from '../rv';
-import { papillaryFluting } from '../lvWall';
 import { setSample, type ClassifyCtx } from './context';
 import { LV_WALL_BASAL_OVERHANG_CM } from '../heartFrame';
 import { PA_WALL_CM, pulmonaryTrunkDistance } from '../greatVessels';
@@ -127,15 +126,13 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
       const bx1 = rB * Math.cos(A.rvPapAz),
         by1 = rB * Math.sin(A.rvPapAz),
         bz1 = L * 0.68;
-      const dBand = sdRoundCone(x, y, z, bx0, by0, bz0, bx1, by1, bz1, 0.34, 0.28);
+      const dBand = sdCapsule(x, y, z, bx0, by0, bz0, bx1, by1, bz1, 0.31);
       if (dBand < 0) {
         setSample(out, Tissue.Myocardium, dBand, 0, 0, 1, x, y, z, 0, Structure.ModeratorBand);
         return true;
       }
       const P = hp.rvPap;
-      const dRp =
-        sdRoundCone(x, y, z, P[0]!, P[1]!, P[2]!, P[3]!, P[4]!, P[5]!, P[6]!, P[7]!) +
-        0.7 * papillaryFluting(x / sc3, y / sc3, z);
+      const dRp = sdRoundCone(x, y, z, P[0]!, P[1]!, P[2]!, P[3]!, P[4]!, P[5]!, P[6]!, P[7]!);
       if (dRp < 0) {
         setSample(out, Tissue.Myocardium, dRp, x, y, 0, x, y, z, 0, Structure.RvPapillary);
         return true;

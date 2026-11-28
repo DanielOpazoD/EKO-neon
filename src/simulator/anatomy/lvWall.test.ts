@@ -207,7 +207,8 @@ test('Phase B micro-anatomy: basal caliper protection, LV/RV trabeculae, rough-z
 
   // 3) RV coarse trabecular depth is 0 in basal inflow/outflow and positive on apical ridges
   assert.equal(rvTrabecularDepth(2.0, 8.0, 0.5), 0);
-  assert.ok(rvTrabecularDepth(6.4, 8.0, 0.0) > 0.08);
+  const maxRvTrab = Math.max(...[0, 0.15, 0.3, 0.45, 0.6].map((a) => rvTrabecularDepth(6.4, 8.0, a)));
+  assert.ok(maxRvTrab > 0.1, `expected apical RV trabecular ridge > 0.1 cm, got ${maxRvTrab}`);
 
   // 4) Mitral leaflet rough/coaptation zone (frac ~ 0.9) is > 1.5x thicker than mid-belly clear zone (frac = 0.35)
   const clearHalf = mitralHalfThickness(0.14, 0.35, 1);
