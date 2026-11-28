@@ -269,3 +269,12 @@ export function IconArrowPointer({ size }: { size?: number }) {
     </I>
   );
 }
+
+/** Hamburger menu icon: secondary navigation (Informe, Referencias, Currículo). */
+export function IconMenu({ size }: { size?: number }) {
+  return (
+    <I size={size}>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </I>
+  );
+}
