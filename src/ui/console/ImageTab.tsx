@@ -6,12 +6,11 @@ import { formatMHz } from '../format';
 import { activeBmodePresetId, BMODE_IMAGE_PRESETS } from './imagePresets';
 import { useTip } from './useTip';
 
-/** B-mode image controls: the frequent ones up front, the fine-tuning set under "Ajustes finos". */
+/** Streamlined 2D image controls inside «Ajustes»: essential knobs up front, everything else under «Avanzado». */
 export function ImageTab() {
   const s = useSimStore(
     useShallow((st) => ({
       autoOptimize: st.autoOptimize,
-      frozen: st.frozen,
       resetTgc: st.resetTgc,
       setSettings: st.setSettings,
       setTgc: st.setTgc,
@@ -20,33 +19,24 @@ export function ImageTab() {
   );
   const tip = useTip();
   const activePreset = activeBmodePresetId(s.settings);
+
   return (
-    <>
-      {s.frozen && (
-        <p className="small" role="status">
-          Imagen congelada: Zoom, Invertir izq/der y Tinte responden al instante; los demás ajustes
-          se aplicarán al reanudar.
-        </p>
-      )}
-      <Section title="Imagen 2D">
-      <div className="image-preset-wrap">
-        <span className="image-preset-cap">Perfil de textura 2D</span>
-        <div className="preset-grid image-preset-grid" role="group" aria-label="Perfil de textura 2D">
-          {BMODE_IMAGE_PRESETS.map((preset) => (
-            <button
-              key={preset.id}
-              type="button"
-              className={activePreset === preset.id ? 'active' : ''}
-              aria-pressed={activePreset === preset.id}
-              title={tip(preset.description)}
-              onClick={() => s.setSettings(preset.patch)}
-            >
-              <span>{preset.label}</span>
-              <small>{preset.subtitle}</small>
-            </button>
-          ))}
-        </div>
+    <Section title="Imagen 2D">
+      <div className="preset-grid image-preset-grid" role="group" aria-label="Perfil de textura 2D">
+        {BMODE_IMAGE_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            className={activePreset === preset.id ? 'active' : ''}
+            aria-pressed={activePreset === preset.id}
+            data-tip={tip(preset.description)}
+            onClick={() => s.setSettings(preset.patch)}
+          >
+            <span>{preset.label}</span>
+          </button>
+        ))}
       </div>
+
       <Slider
         label="Profundidad"
         tour="depth"
@@ -69,64 +59,20 @@ export function ImageTab() {
         onChange={(v) => s.setSettings({ gainDb: v })}
         title={tip('Exceso: la sangre se aclara hacia el gris del miocardio y sube el ruido.')}
       />
-      <Slider
-        label="Frecuencia"
-        value={s.settings.frequencyMHz}
-        min={1.5}
-        max={5}
-        step={0.25}
-        unit=" MHz"
-        format={formatMHz}
-        onChange={(v) => s.setSettings({ frequencyMHz: v })}
-        title={tip('Mayor frecuencia = más resolución, menos penetración.')}
-      />
-      <Toggle
-        label="Armónicos (THI)"
-        value={s.settings.harmonics}
-        onChange={(v) => s.setSettings({ harmonics: v })}
-        title={tip('Reduce clutter y mejora bordes; algo menos de penetración.')}
-      />
-      <Slider
-        label="Foco"
-        value={s.settings.focusCm}
-        min={2}
-        max={s.settings.depthCm}
-        step={0.5}
-        unit=" cm"
-        format={(v) => `${v.toFixed(1)} cm`}
-        onChange={(v) => s.setSettings({ focusCm: v })}
-        title={tip('Mejor resolución lateral cerca del foco.')}
-      />
-      <Slider
-        label="Zoom HD"
-        value={s.settings.zoom}
-        min={1}
-        max={2.5}
-        step={0.1}
-        format={(v) => `${v.toFixed(1)}×`}
-        onChange={(v) => s.setSettings({ zoom: v })}
-        title={tip('Write-Zoom focalizado: centra la zona focal y aumenta la densidad de líneas.')}
-      />
       <div className="row">
-        <label>Zoom rápido</label>
+        <label>Zoom HD</label>
         <Segmented
-          ariaLabel="Zoom rápido HD"
-          value={
-            s.settings.zoom >= 1.85 ? '2' : s.settings.zoom >= 1.25 ? '1.5' : '1'
-          }
+          ariaLabel="Zoom HD"
+          value={s.settings.zoom >= 1.85 ? '2' : s.settings.zoom >= 1.25 ? '1.5' : '1'}
           onChange={(v) => s.setSettings({ zoom: Number(v) })}
           options={[
             { id: '1', label: '1×' },
             { id: '1.5', label: '1,5×' },
-            { id: '2', label: '2× HD' },
+            { id: '2', label: '2×' },
           ]}
         />
       </div>
-      <Toggle
-        label="Invertir izq/der"
-        value={s.settings.invertLR}
-        onChange={(v) => s.setSettings({ invertLR: v })}
-      />
+
       <div className="tgc-head">
         <h4 className="subhead">TGC</h4>
         <div className="tgc-actions">
@@ -134,7 +80,7 @@ export function ImageTab() {
             type="button"
             className="tgc-btn tgc-btn-primary"
             onClick={() => s.autoOptimize()}
-            title={tip('Ajusta automáticamente ganancia y TGC por banda de profundidad (iScan).')}
+            data-tip={tip('Ajusta automáticamente ganancia y TGC por profundidad (iScan).')}
           >
             Auto-Opt
           </button>
@@ -142,7 +88,7 @@ export function ImageTab() {
             type="button"
             className="tgc-btn"
             onClick={() => s.resetTgc()}
-            title={tip('Restablece todas las bandas TGC a 0 dB.')}
+            data-tip={tip('Restablece todas las bandas TGC a 0 dB.')}
           >
             Reset
           </button>
@@ -162,8 +108,50 @@ export function ImageTab() {
           />
         ))}
       </div>
+
       <details className="adv">
-        <summary>Ajustes finos</summary>
+        <summary>Avanzado</summary>
+        <Slider
+          label="Frecuencia"
+          value={s.settings.frequencyMHz}
+          min={1.5}
+          max={5}
+          step={0.25}
+          unit=" MHz"
+          format={formatMHz}
+          onChange={(v) => s.setSettings({ frequencyMHz: v })}
+          title={tip('Mayor frecuencia = más resolución, menos penetración.')}
+        />
+        <Toggle
+          label="Armónicos (THI)"
+          value={s.settings.harmonics}
+          onChange={(v) => s.setSettings({ harmonics: v })}
+          title={tip('Reduce clutter y mejora bordes.')}
+        />
+        <Slider
+          label="Foco"
+          value={s.settings.focusCm}
+          min={2}
+          max={s.settings.depthCm}
+          step={0.5}
+          unit=" cm"
+          format={(v) => `${v.toFixed(1)} cm`}
+          onChange={(v) => s.setSettings({ focusCm: v })}
+        />
+        <Slider
+          label="Zoom fino"
+          value={s.settings.zoom}
+          min={1}
+          max={2.5}
+          step={0.1}
+          format={(v) => `${v.toFixed(1)}×`}
+          onChange={(v) => s.setSettings({ zoom: v })}
+        />
+        <Toggle
+          label="Invertir izq/der"
+          value={s.settings.invertLR}
+          onChange={(v) => s.setSettings({ invertLR: v })}
+        />
         <Slider
           label="Rango dinámico"
           value={s.settings.dynamicRangeDb}
@@ -180,7 +168,6 @@ export function ImageTab() {
           max={100}
           unit="°"
           onChange={(v) => s.setSettings({ sectorDeg: v })}
-          title={tip('Sector más ancho = menos frame rate.')}
         />
         <div className="row">
           <label>Densidad de líneas</label>
@@ -218,9 +205,6 @@ export function ImageTab() {
           max={1}
           step={0.05}
           onChange={(v) => s.setSettings({ sri: v })}
-          title={tip(
-            'Suavizado anisotrópico orientado a paredes (tipo XRES/SRI) sin borrar bordes endocárdicos.',
-          )}
         />
         <Slider
           label="Compounding espacial"
@@ -229,9 +213,6 @@ export function ImageTab() {
           max={1}
           step={0.05}
           onChange={(v) => s.setSettings({ spatialCompound: v })}
-          title={tip(
-            'Compounding multi-ángulo (tipo SonoCT): reduce el dropout de paredes laterales y suaviza sombras.',
-          )}
         />
         <div className="row">
           <label>Mapa de grises</label>
@@ -240,12 +221,7 @@ export function ImageTab() {
             value={s.settings.grayMap}
             onChange={(v) => s.setSettings({ grayMap: v })}
             options={[
-              {
-                id: 'clinical',
-                label: 'Clín',
-                title:
-                  'Curva exponencial en dB que expande los grises altos, medida en imágenes clínicas',
-              },
+              { id: 'clinical', label: 'Clín' },
               { id: 'linear', label: 'Lin' },
               { id: 's-curve', label: 'S' },
               { id: 'high-contrast', label: 'Alto' },
@@ -253,7 +229,7 @@ export function ImageTab() {
           />
         </div>
         <div className="row">
-          <label>Tinte (Chroma)</label>
+          <label>Tinte</label>
           <Segmented
             ariaLabel="Tinte clínico"
             value={s.settings.tintMap ?? 'gray'}
@@ -263,6 +239,5 @@ export function ImageTab() {
         </div>
       </details>
     </Section>
-    </>
   );
 }

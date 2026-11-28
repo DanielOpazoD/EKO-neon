@@ -9,11 +9,8 @@ import { IconPencil } from './icons';
 import { ANATOMY_CHOICES } from '@/simulator/core/protocol';
 
 /**
- * Slim top bar: brand and run state on the left, the screens as one segmented control in the middle, product mode
- * and quality on the right. Case, vitals and acquisition telemetry live in the on-image HUD (ImageHud) so this row
- * never truncates. The case report, the curriculum and the progress are one tab, «Informe» (decision 244). Where the
- * developer tools are allowed, the heart (analytic or Rodero) and the review mode with its notes are one click away on
- * the right (decision 376); they lived in the Dev panel and the overflow menu.
+ * Minimal top bar: brand on the left, the 3 screens in the center, and product mode on the right.
+ * Quality lives in the ⋯ menu so the header stays uncluttered; freeze state lives in ModeBar.
  */
 const SCREENS: { id: 'simulator' | 'report' | 'references'; label: string }[] = [
   { id: 'simulator', label: 'Simulador' },
@@ -25,20 +22,16 @@ export function TopBar() {
   const navRef = useRef<HTMLElement>(null);
   const s = useSimStore(
     useShallow((st) => ({
-      frozen: st.frozen,
       anatomy: st.anatomy,
       mode: st.mode,
-      quality: st.quality,
       setAnatomy: st.setAnatomy,
       setMode: st.setMode,
-      setQuality: st.setQuality,
       setUi: st.setUi,
       screen: st.ui.screen,
       devMode: st.ui.devMode,
       reviewMode: st.ui.reviewMode,
     })),
   );
-  // the curriculum and the progress are sections of the «Informe» tab
   const current = isReportSection(s.screen) ? 'report' : s.screen;
   const isSim = current === 'simulator';
   const pill = useSlidingPill(navRef, current);
@@ -49,19 +42,6 @@ export function TopBar() {
         <i className="brand-mark" aria-hidden="true" />
         EchoTwin <span className="brand-sub">TTE</span>
       </span>
-      {isSim && (
-        <span
-          className={`run-state ${s.frozen ? 'frozen' : 'live'}`}
-          data-tip={
-            s.frozen
-              ? 'Imagen congelada (Espacio reanuda)'
-              : 'Adquisición en vivo (Espacio congela)'
-          }
-        >
-          <i className="run-dot" aria-hidden="true" />
-          {s.frozen ? 'CONGELADA' : 'EN VIVO'}
-        </span>
-      )}
       <nav className="nav-seg" aria-label="Pantallas" ref={navRef}>
         {pill && <span className="seg-pill" style={pill} aria-hidden="true" />}
         {SCREENS.map((sc) => (
@@ -117,25 +97,12 @@ export function TopBar() {
         aria-label="Modo del producto"
         value={s.mode}
         onChange={(e) => s.setMode(e.target.value as typeof s.mode)}
-        data-tip="Libre: todo abierto. Guiada: una vista objetivo con ayudas. Examen: sin ayudas ni presets"
+        data-tip="Libre: todo abierto. Guiado: vista objetivo con ayudas. Examen: sin ayudas ni presets"
       >
         <option value="sandbox">Libre</option>
-        <option value="guided">Adquisición guiada</option>
+        <option value="guided">Guiado</option>
         <option value="exam">Examen</option>
       </select>
-      {isSim && (
-        <select
-          aria-label="Calidad"
-          value={s.quality}
-          onChange={(e) => s.setQuality(e.target.value as typeof s.quality)}
-          data-tip="Nivel de calidad: resolución del trazado y, en alta, el grosor del corte (tres planos de elevación); no altera la fisiología. Automática: la calibrada contra imágenes clínicas cuando la GPU forma la imagen, media con el trazador de CPU"
-        >
-          <option value="auto">Calidad automática</option>
-          <option value="low">Calidad baja</option>
-          <option value="medium">Calidad media</option>
-          <option value="high">Calidad alta</option>
-        </select>
-      )}
     </div>
   );
 }

@@ -22,7 +22,6 @@ import {
 import { captureStepPrompt, minPointsToFinish } from '../display/measurementPreview';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
-import { ViewQuickMenu } from '../ViewQuickMenu';
 import {
   captureModalityCheck,
   isFreeToolCompatible,
@@ -158,7 +157,6 @@ export function MeasureTab() {
 
   // Narrow Zustand HUD selectors: only re-render when view, frozen frameId, or 0.5 s quantized cine window changes.
   const currentViewId = useHudStore((h) => (showView ? (h.hud?.view?.bestViewId ?? null) : null));
-  const currentViewScore = useHudStore((h) => (showView ? (h.hud?.view?.score ?? null) : null));
   const displayedFrameId = useHudStore((h) => (h.hud?.frozen ? h.hud.frameId : null));
   const cineBucket = useHudStore((h) =>
     h.hud && h.hud.cineLength > 0
@@ -361,46 +359,6 @@ export function MeasureTab() {
 
       {subTab === 'medir' ? (
         <>
-          <div className="measure-ctx">
-            <div className="measure-ctx-info">
-              <span className="mod-chip match">{modalityLabel(s.modality)}</span>
-              {showView && (
-                <ViewQuickMenu placement="down-left" currentViewId={currentViewId}>
-                  <span className="measure-ctx-view">
-                    <i
-                      className={`ctx-dot ${
-                        (currentViewScore ?? 0) >= 75
-                          ? 'ok'
-                          : (currentViewScore ?? 0) >= 50
-                            ? 'warn'
-                            : 'muted'
-                      }`}
-                      aria-hidden="true"
-                    />
-                    {currentViewId ? viewLabel(currentViewId) : 'Cambiar vista'}
-                  </span>
-                </ViewQuickMenu>
-              )}
-            </div>
-            <button
-              type="button"
-              className={`measure-freeze-chip${s.frozen ? ' frozen' : ''}`}
-              disabled={s.closed}
-              onClick={() => {
-                cancelGuidedAutoMeasure();
-                setProgress(null);
-                s.toggleFreeze();
-              }}
-              data-tip={
-                s.frozen
-                  ? 'Reanudar imagen en vivo (Espacio)'
-                  : 'Congelar imagen para medir (Espacio)'
-              }
-            >
-              {s.frozen ? 'Congelada · Reanudar' : 'En vivo · Congelar'}
-            </button>
-          </div>
-
           {progress && (
             <div className="auto-run-bar" role="status" aria-live="polite">
               <span className="auto-run-main">

@@ -8,7 +8,7 @@ import { Section, Segmented, Slider } from '../controls';
 import { PresetViews } from '../PresetViews';
 import { useTip } from './useTip';
 
-/** Acquisition: the window presets, probe manipulation and patient context. */
+/** Streamlined «Vistas» tab: core canonical windows, patient context, and collapsible manual probe sliders. */
 export function AcquireTab() {
   const s = useSimStore(
     useShallow((st) => ({
@@ -26,11 +26,12 @@ export function AcquireTab() {
     })),
   );
   const tip = useTip();
+
   return (
     <>
       <PresetViews />
       {s.mode === 'guided' && (
-        <Section title="Vista objetivo (guiado)">
+        <Section title="Vista objetivo">
           <select
             aria-label="Vista objetivo"
             value={s.targetViewId ?? ''}
@@ -45,54 +46,7 @@ export function AcquireTab() {
           </select>
         </Section>
       )}
-      <Section title="Sonda" tour="sonda">
-        <Slider
-          label="Rotación"
-          hint="Q E"
-          value={s.probe.rotationDeg}
-          min={-180}
-          max={180}
-          unit="°"
-          onChange={(v) => s.setProbe({ rotationDeg: v })}
-          title={tip('Gira la sonda sobre su eje largo (Q/E).')}
-        />
-        <Slider
-          label="Tilt (abanico)"
-          hint="⌥↑↓"
-          value={s.probe.tiltDeg}
-          min={-70}
-          max={70}
-          unit="°"
-          onChange={(v) => s.setProbe({ tiltDeg: v })}
-          title={tip('Inclina el plano hacia adelante/atrás (Alt+↑↓).')}
-        />
-        <Slider
-          label="Rock"
-          hint="⌥←→"
-          value={s.probe.rockDeg}
-          min={-60}
-          max={60}
-          unit="°"
-          onChange={(v) => s.setProbe({ rockDeg: v })}
-          title={tip('Angula dentro del plano (Alt+←→).')}
-        />
-        <Slider
-          label="Presión"
-          hint="W S"
-          value={s.probe.pressure}
-          min={0}
-          max={1}
-          step={0.05}
-          onChange={(v) => s.setProbe({ pressure: v })}
-          title={tip('Poca presión = mal acoplamiento (dropout).')}
-        />
-        <div className="row end">
-          <button className="ghost" onClick={() => s.resetProbe()}>
-            Reiniciar sonda
-          </button>
-        </div>
-      </Section>
-      <Section title="Caso y paciente">
+      <Section title="Paciente">
         <div className="row stack">
           <label>Caso</label>
           <select
@@ -113,7 +67,6 @@ export function AcquireTab() {
             )}
           </select>
         </div>
-        <CaseCard />
         <div className="row">
           <label>Posición</label>
           <select
@@ -142,7 +95,64 @@ export function AcquireTab() {
             ]}
           />
         </div>
+        <details className="adv" open={s.mode === 'exam' || undefined}>
+          <summary>Historia clínica</summary>
+          <CaseCard />
+        </details>
       </Section>
+
+      <div className="section" data-tour="sonda">
+        <details className="adv" style={{ marginTop: 0, borderTop: 0, paddingTop: 0 }}>
+          <summary>Ajuste manual de sonda</summary>
+          <div style={{ marginTop: 6 }}>
+            <Slider
+              label="Rotación"
+              hint="Q E"
+              value={s.probe.rotationDeg}
+              min={-180}
+              max={180}
+              unit="°"
+              onChange={(v) => s.setProbe({ rotationDeg: v })}
+              title={tip('Gira la sonda sobre su eje largo (Q/E).')}
+            />
+            <Slider
+              label="Tilt (abanico)"
+              hint="⌥↑↓"
+              value={s.probe.tiltDeg}
+              min={-70}
+              max={70}
+              unit="°"
+              onChange={(v) => s.setProbe({ tiltDeg: v })}
+              title={tip('Inclina el plano hacia adelante/atrás (Alt+↑↓).')}
+            />
+            <Slider
+              label="Rock"
+              hint="⌥←→"
+              value={s.probe.rockDeg}
+              min={-60}
+              max={60}
+              unit="°"
+              onChange={(v) => s.setProbe({ rockDeg: v })}
+              title={tip('Angula dentro del plano (Alt+←→).')}
+            />
+            <Slider
+              label="Presión"
+              hint="W S"
+              value={s.probe.pressure}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(v) => s.setProbe({ pressure: v })}
+              title={tip('Poca presión = mal acoplamiento (dropout).')}
+            />
+            <div className="row end">
+              <button type="button" className="ghost" onClick={() => s.resetProbe()}>
+                Reiniciar sonda
+              </button>
+            </div>
+          </div>
+        </details>
+      </div>
     </>
   );
 }

@@ -1,13 +1,12 @@
 import { modePolicy } from '@/app/modePolicy';
 import { useSimStore, type ConsoleTab } from '@/app/store';
-import { MODALITIES } from '@/simulator/renderer/modality';
 import { type KeyboardEvent, type ReactNode, lazy, Suspense, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { AcquireTab } from './console/AcquireTab';
 import { DopplerTab } from './console/DopplerTab';
 import { ImageTab } from './console/ImageTab';
 import { MeasureTab } from './console/MeasureTab';
-import { IconAcquire, IconDoppler, IconImage, IconLab, IconMeasure, IconReview } from './icons';
+import { IconAcquire, IconImage, IconLab, IconMeasure, IconReview } from './icons';
 
 const LabTab = lazy(() => import('./console/LabTab').then((m) => ({ default: m.LabTab })));
 const ReviewPanel = lazy(() =>
@@ -15,9 +14,10 @@ const ReviewPanel = lazy(() =>
 );
 
 /**
- * Right-hand console, organised as tabs so only one control family is visible at a time
- * (spec 29.2). The console follows intent: entering a Doppler modality switches to the
- * Doppler tab; every control still alters the render.
+ * Right-hand console streamlined into 3 focused tabs:
+ * - «Vistas» (`adquirir`): canonical windows, patient posture/respiration, and optional probe fine-tuning.
+ * - «Ajustes» (`imagen`): contextual 2D or active Doppler/M-mode controls (replaces the old empty Doppler tab).
+ * - «Medir» (`medir`): 1-click guided auto-measurements, captures worksheet, and manual tools.
  */
 export function ConsolePanel() {
   const s = useSimStore(
@@ -35,16 +35,15 @@ export function ConsolePanel() {
   const mod = s.modality;
   const policy = modePolicy(s.mode);
 
-  // Follow the modality: enabling a Doppler mode surfaces its controls; returning to 2D
-  // leaves the Doppler tab so the user is never left on an empty panel. Stay in Measure or
-  // Review so switching 2D ↔ PW ↔ CW ↔ M while taking measurements never interrupts workflow.
+  // Follow intent: activating a Doppler/M-mode modality surfaces its contextual knobs in «Ajustes»
+  // unless the operator is actively working in «Medir» or «Revisar».
   useEffect(() => {
     const st = useSimStore.getState();
-    if (mod !== '2d') {
-      if (st.ui.consoleTab !== 'medir' && st.ui.consoleTab !== 'revisar') {
-        st.setUi({ consoleTab: 'doppler' });
-      }
-    } else if (st.ui.consoleTab === 'doppler') {
+    if (st.ui.consoleTab === 'doppler') {
+      st.setUi({ consoleTab: 'imagen' });
+      return;
+    }
+    if (mod !== '2d' && st.ui.consoleTab !== 'medir' && st.ui.consoleTab !== 'revisar') {
       st.setUi({ consoleTab: 'imagen' });
     }
   }, [mod]);
@@ -57,14 +56,13 @@ export function ConsolePanel() {
     badge?: number;
     dot?: boolean;
   }[] = [
-    { id: 'adquirir', label: 'Adquirir', icon: <IconAcquire />, show: true },
-    { id: 'imagen', label: 'Imagen', icon: <IconImage />, show: true },
+    { id: 'adquirir', label: 'Vistas', icon: <IconAcquire />, show: true },
     {
-      id: 'doppler',
-      label: 'Doppler',
-      icon: <IconDoppler />,
+      id: 'imagen',
+      label: 'Ajustes',
+      icon: <IconImage />,
       show: true,
-      dot: MODALITIES[mod].doppler,
+      dot: mod !== '2d',
     },
     {
       id: 'medir',
@@ -83,7 +81,9 @@ export function ConsolePanel() {
     },
   ];
   const visible = tabs.filter((t) => t.show);
-  const active = visible.some((t) => t.id === s.consoleTab) ? s.consoleTab : 'adquirir';
+  // Migrate any legacy persisted 'doppler' tab transparently into 'imagen' (Ajustes)
+  const normalizedTab: ConsoleTab = s.consoleTab === 'doppler' ? 'imagen' : s.consoleTab;
+  const active = visible.some((t) => t.id === normalizedTab) ? normalizedTab : 'adquirir';
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const onTabsKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -140,8 +140,7 @@ export function ConsolePanel() {
           aria-labelledby={`console-tab-${active}`}
         >
           {active === 'adquirir' && <AcquireTab />}
-          {active === 'imagen' && <ImageTab />}
-          {active === 'doppler' && <DopplerTab />}
+          {active === 'imagen' && (mod === '2d' ? <ImageTab /> : <DopplerTab />)}
           {active === 'medir' && <MeasureTab />}
           {active === 'lab' && (
             <Suspense fallback={<div className="small">Cargando laboratorio…</div>}>
