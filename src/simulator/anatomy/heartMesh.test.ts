@@ -74,6 +74,59 @@ describe('3D navigator heart meshes, AO, physiological groups & coronaries', () 
     }
   });
 
+  it('distributes 3D systolic contraction across base, mid, and apex with inward apical shortening', () => {
+    const edPose = computeHeartPose(heart, cycleStateAt(tables, 0));
+    const sysPose = computeHeartPose(heart, cycleStateAt(tables, 0.5));
+    const edLv = buildHeartMeshes(heart, edPose, {
+      stepCm: 0.35,
+      thorax,
+      includeAorta: false,
+      includeCoronaries: false,
+    }).find((g) => g.id === 'lv-myocardium')!;
+    const sysLv = buildHeartMeshes(heart, sysPose, {
+      stepCm: 0.35,
+      thorax,
+      includeAorta: false,
+      includeCoronaries: false,
+    }).find((g) => g.id === 'lv-myocardium')!;
+
+    const stats = (pos: Float32Array) => {
+      let maxZ = -Infinity,
+        minY = Infinity,
+        maxY = -Infinity,
+        apexR = 0,
+        apexN = 0;
+      for (let i = 0; i < pos.length; i += 3) {
+        const x = pos[i]!,
+          y = pos[i + 1]!,
+          z = pos[i + 2]!;
+        if (z > maxZ) maxZ = z;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (z > 7.2) {
+          apexR += Math.hypot(x, y);
+          apexN++;
+        }
+      }
+      return { maxZ, ySpan: maxY - minY, apexR: apexR / Math.max(1, apexN) };
+    };
+    const ed = stats(edLv.positions);
+    const sys = stats(sysLv.positions);
+    // Apex must contract visibly inward both longitudinally (no outward bulge) and radially
+    assert.ok(
+      ed.maxZ - sys.maxZ >= 0.25,
+      `expected systolic apical longitudinal inward motion >= 0.25 cm (ed=${ed.maxZ.toFixed(2)}, sys=${sys.maxZ.toFixed(2)})`,
+    );
+    assert.ok(
+      ed.apexR - sys.apexR >= 0.15,
+      `expected systolic apical radial contraction >= 0.15 cm (ed=${ed.apexR.toFixed(2)}, sys=${sys.apexR.toFixed(2)})`,
+    );
+    assert.ok(
+      ed.ySpan - sys.ySpan >= 0.5,
+      `expected anterior-inferior systolic shortening >= 0.5 cm (ed=${ed.ySpan.toFixed(2)}, sys=${sys.ySpan.toFixed(2)})`,
+    );
+  });
+
   it('supports omitting thoracic-aorta on secondary phases for fast 16-phase extraction', () => {
     const secondary = buildHeartMeshes(heart, pose, {
       stepCm: 0.35,

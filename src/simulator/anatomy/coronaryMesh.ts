@@ -349,12 +349,23 @@ export function buildCoronaryMeshes(
   const L = heart.lv.lengthCm;
   const zAnn = pose.zAnn;
   const effL = Math.max(4.5, L - zAnn);
+  const edv = Math.max(20, heart.physiology.edvMl);
+  const esv = Math.max(5, heart.physiology.esvMl);
+  const efScale = Math.max(0.25, Math.min(1.35, Math.max(0.12, (edv - esv) / edv) / 0.6));
+  const contr = pose.state.contraction * efScale;
 
-  const lvNode = (frac: number, az: number, r: number) => ({
-    origin: v3(0, 0, zAnn + frac * effL),
-    dir: v3(Math.cos(az), Math.sin(az), 0),
-    r,
-  });
+  // Match the systolic apical twist & shortening of `applyPhysiologicalVentricularBeat` so
+  // epicardial coronaries twist and shorten in lockstep with the underlying myocardium.
+  const lvNode = (frac: number, az: number, r: number) => {
+    const twistRad = (((-3 + 14 * frac) * Math.PI) / 180) * contr;
+    const zPos = zAnn + frac * effL - 0.85 * Math.pow(frac, 1.35) * contr;
+    const twistedAz = az + twistRad;
+    return {
+      origin: v3(0, 0, zPos),
+      dir: v3(Math.cos(twistedAz), Math.sin(twistedAz), 0),
+      r,
+    };
+  };
 
   // 1. LAD — fine organic meandering path emerging below the PA trunk along the anterior IV groove
   const ladNodes: { origin: Vec3; dir: Vec3; r: number }[] = [];
