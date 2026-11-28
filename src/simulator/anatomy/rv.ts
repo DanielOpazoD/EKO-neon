@@ -293,14 +293,12 @@ export function rvCrescent(
  */
 export function rvTrabecularDepth(z: number, lengthCm: number, az: number): number {
   const L = Math.max(1, lengthCm);
-  if (z <= 0.38 * L) return 0;
-  const w = Math.min(1, (z - 0.38 * L) / (0.34 * L));
+  const w = Math.max(0, Math.min(1, (z - 0.38 * L) / (0.34 * L)));
   const a = az * 0.15915494309189535;
   const u1 = Math.abs(6 * a + z * 0.21 - 0.25 - Math.floor(6 * a + z * 0.21 + 0.25)) * 2;
-  const u2 = Math.abs(4 * a - z * 0.14 - Math.floor(4 * a - z * 0.14 + 0.5)) * 2;
-  const u3 = Math.abs(10 * a - z * 0.27 - Math.floor(10 * a - z * 0.27 + 0.5)) * 2;
-  const ridge = (1 - 2 * u1 * u1 * (3 - 2 * u1)) * (1 - 2 * u2 * u2 * (3 - 2 * u2));
-  const mesh = 1 - u3 * u3 * (3 - 2 * u3);
-  return w * (0.14 * Math.max(0, ridge) + 0.09 * w * mesh);
+  const u2 = Math.abs(9 * a - z * 0.25 - Math.floor(9 * a - z * 0.25 + 0.5)) * 2;
+  const c1 = 1 - 2 * u1 * u1 * (3 - 2 * u1);
+  const m2 = 1 - u2 * u2 * (3 - 2 * u2);
+  return w * (0.14 * Math.max(0, c1) + 0.09 * w * m2);
 }
 

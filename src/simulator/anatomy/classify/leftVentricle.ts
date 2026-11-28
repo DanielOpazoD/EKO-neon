@@ -7,7 +7,6 @@ import {
   lvTrabecularRelief,
   papillaryFluting,
   septalCrestFactor,
-  septalShare,
   septalShiftAt,
   wallThicknessAt,
 } from '../lvWall';
@@ -67,7 +66,6 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
           az,
           mzW,
           levelFrac,
-          septalShare(az, A.rvAzA, A.rvAzP),
           latticeNoise3(mxW * 2.6 + 11.3, myW * 2.6 + 2.9, mzW * 1.1 + 6.1, m.wallNoise) - 0.5,
         )
       : 0;

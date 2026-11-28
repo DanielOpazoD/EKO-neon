@@ -195,11 +195,11 @@ test('GLSL mirror: septalShare evaluates as the TypeScript one and wallThickness
 
 test('Phase B micro-anatomy: basal caliper protection, LV/RV trabeculae, rough-zone mitral, Arantius nodule & fibrous trigones', () => {
   // 1) LV trabeculae remain strictly 0 across the entire basal/mid PLAX caliper zone (levelFrac <= 0.45)
-  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.25, 0, 0.3), 0);
-  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.45, 0, 0.3), 0);
-  // In mid-apical zone, free/lateral wall relief exceeds mid-septal relief at the same material sample
-  const freeApical = Math.abs(lvTrabecularRelief(0.4, -1.2, 0.78, 0, 0.25));
-  const septApical = Math.abs(lvTrabecularRelief(0.4, -1.2, 0.78, 1, 0.25));
+  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.25, 0.3), 0);
+  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.45, 0.3), 0);
+  // In mid-apical zone, free/lateral wall relief exceeds mid-septal relief at the same ridge phase (Δaz = π)
+  const freeApical = Math.abs(lvTrabecularRelief(0.4, -1.2, 0.78, 0.25));
+  const septApical = Math.abs(lvTrabecularRelief(0.4 - Math.PI, -1.2, 0.78, 0.25));
   assert.ok(freeApical > septApical && freeApical > 0.02);
 
   // 2) Papillary longitudinal fluting is bounded (<= 0.5 mm) and zero-mean across symmetries

@@ -122,9 +122,10 @@ bool mvInsideOutline(vec2 p) {
   return dot(d, d) < MVL_R * 0.98 * (MVL_R * 0.98) && dot(d, vec2(MVL_UX, MVL_UY)) < MVL_D * 0.98;
 }
 float mvInflowTaper(float h) {
-  if (h < 0.0) return h < -0.25 ? 2.0 * (-h - 0.25) : 0.0;
   float beyond = h - MVL_INFLOW_DEPTH;
-  return MVL_INFLOW_SLOPE * h + (beyond > 0.0 ? 3.0 * beyond * beyond : 0.0);
+  return h < 0.0
+    ? (h < -0.25 ? 2.0 * (-h - 0.25) : 0.0)
+    : MVL_INFLOW_SLOPE * h + (beyond > 0.0 ? 3.0 * beyond * beyond : 0.0);
 }
 float mvAnnulusDistance(vec3 p, float tube) {
   vec2 d = p.xy - vec2(MVL_CX, MVL_CY);

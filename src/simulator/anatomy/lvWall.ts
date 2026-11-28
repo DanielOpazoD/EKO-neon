@@ -140,16 +140,14 @@ export function lvTrabecularRelief(
   az: number,
   mz: number,
   levelFrac: number,
-  septShare: number,
   coarseCentered: number,
 ): number {
-  if (levelFrac <= 0.45) return 0;
-  const w = Math.min(1, (levelFrac - 0.45) / 0.32);
-  const freeWeight = 0.72 + 0.44 * (1 - Math.max(0, Math.min(1, septShare)) * (1 - 0.5 * w));
+  const w = Math.max(0, Math.min(1, (levelFrac - 0.45) / 0.32));
+  const freeShare = 1 - Math.min(1, Math.abs(az) * 0.3183098861837907);
+  const freeWeight = 0.74 + 0.42 * (freeShare + 0.45 * w * (1 - freeShare));
   const a = az * INV_TAU;
-  const ridge1 = cWave(5 * a + mz * 0.21 - 0.25) * cWave(3 * a - mz * 0.17);
-  const ridge2 = cWave(9 * a - mz * 0.3 - 0.25);
-  return w * freeWeight * (0.19 * coarseCentered + 0.062 * ridge1 + 0.026 * w * ridge2);
+  const ridge = 0.062 * cWave(6 * a + mz * 0.21 - 0.25) + 0.028 * w * cWave(10 * a - mz * 0.26);
+  return w * freeWeight * (0.19 * coarseCentered + ridge);
 }
 
 /**

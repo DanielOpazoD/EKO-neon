@@ -170,7 +170,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // the wall's own radial scale, so that its speckle and trabeculae stay with the tissue (leftVentricle.ts)
   float rsWall = rs + (1.0 - motion) * (1.0 - rs);
   vec3 mWall = vec3(x / rsWall, y / rsWall, (z - LV_LEN) / ls);
-  float trab = levelFrac > 0.45 ? lvTrabecularRelief(az, mWall.z, levelFrac, septalShare(az, RV_AZA, RV_AZP), lat(vec3(mWall.x * 2.6 + 11.3, mWall.y * 2.6 + 2.9, mWall.z * 1.1 + 6.1), 3) - 0.5) : 0.0;
+  float trab = levelFrac > 0.45 ? lvTrabecularRelief(az, mWall.z, levelFrac, lat(vec3(mWall.x * 2.6 + 11.3, mWall.y * 2.6 + 2.9, mWall.z * 1.1 + 6.1), 3) - 0.5) : 0.0;
   float dCavR = smax(dProf - regional + trab, zAnn - z, 0.6);
   float tFull = wallThicknessAt(az, levelFrac, motion);
   // decision 223
@@ -369,7 +369,11 @@ bool classifyHeart(vec3 p0, out Sample s) {
     float dCs = coronarySinusDistance(p, la, lr, bo, czL, rzL, zAnn, d);
     laEpi = min(laEpi, dCs - CS_WALL_CM);
     // decision 320
-    if (dLaBody < LA_WALL_CM && x > xFace && leftAtrialMouthLumen(p, la, lr, bo, czL, rzL, colDist) >= 0.0) {
+    float mouthLumen = 1.0;
+    if ((dLaBody < LA_WALL_CM && x > xFace) || (x <= xFace && x >= xFace - tIas && z < zAnn + 0.4 && dCs >= 0.0)) {
+      mouthLumen = leftAtrialMouthLumen(p, la, lr, bo, czL, rzL, colDist);
+    }
+    if (dLaBody < LA_WALL_CM && x > xFace && mouthLumen >= 0.0) {
       setSample(s, T_MYO, -min(dLaBody, LA_WALL_CM - dLaBody), vec3((x - la.x) / lr.x, (y - la.y) / lr.y, (z - czL) / rzL), p, 0.0, S_LA_WALL);
       return true;
     }
@@ -417,7 +421,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
     dFreeRa = min(dFreeRa, raSleeve);
     // decision 320
     // decision 330: over the fossa the membrane stands between the right atrium and the veins' mouths
-    float rightVeinClear = min(RA_RIGHT_VEIN_CLEARANCE_CM - rightVeinDistance(p, la, lr, bo, czL, rzL), (fo - FOSSA_REACH) * 0.6);
+    float rVeinDist = rightVeinDistance(p, la, lr, bo, czL, rzL);
+    float rightVeinClear = min(RA_RIGHT_VEIN_CLEARANCE_CM - rVeinDist, (fo - FOSSA_REACH) * 0.6);
     dFreeRa = smax(dFreeRa, rightVeinClear, 0.2);
     // decision 222
     float xRaFace = xFace - tIas;
@@ -447,13 +452,14 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // decision 324: the entry segment and the rest that rises
     float dSvc = min(sdCapsule(p, vec3(SVC_AX, SVC_AY, SVC_AZ), vec3(SVC_MX, SVC_MY, SVC_MZ), SVC_R), sdCapsule(p, vec3(SVC_MX, SVC_MY, SVC_MZ), vec3(SVC_BX, SVC_BY, SVC_BZ), SVC_R));
     float dIvc = min(sdCapsule(p, vec3(IVC_AX, IVC_AY, IVC_AZ), vec3(IVC_BX, IVC_BY, IVC_BZ), IVC_R), sdCapsule(p, vec3(IVC_BX, IVC_BY, IVC_BZ), vec3(IVC_BX + IVC_HEPATIC_X, IVC_BY + IVC_HEPATIC_Y, IVC_BZ + IVC_HEPATIC_Z), IVC_R));
+    vec2 dOC = vec2(x - TVS_CX, y - TVS_CY);
+    float tvRingDist = length(dOC) - TVS_R / tvWarpScale(dOC);
     if (!inSeptum && dFreeRa < 0.22 && septumPlane < 0.0 && dSvc >= 0.0 && dIvc >= 0.0 && dCs >= 0.0 && dRaa >= 0.0) {
       // no wall across the tricuspid orifice (decision 64): atrial blood up to the annular plane, ventricular past it
       // decision 219
       // decision 226
-      vec2 dO = vec2(x - TVS_CX, y - TVS_CY);
-      float sepS = clamp((dO.x / max(1e-6, length(dO)) - RA_VESTIBULE_SEPTAL_COS) / RA_VESTIBULE_SEPTAL_RAMP, 0.0, 1.0);
-      if (z > czR && smin(dFreeRa, length(dO) - TVS_R / tvWarpScale(dO), 1e-3 + RA_VESTIBULE_UNION_CM * sepS) < 0.0 && d > raLaMin) {
+      float sepS = clamp((dOC.x / max(1e-6, length(dOC)) - RA_VESTIBULE_SEPTAL_COS) / RA_VESTIBULE_SEPTAL_RAMP, 0.0, 1.0);
+      if (z > czR && smin(dFreeRa, tvRingDist, 1e-3 + RA_VESTIBULE_UNION_CM * sepS) < 0.0 && d > raLaMin) {
         setSample(s, T_BLOOD, dFreeRa - 0.22, vec3((x - ra.x) / rar.x, (y - ra.y) / rar.y, (z - czR) / rzR), p, 0.0, z > TV_CZ + TVZ + tvOff ? S_RV_CAV : S_RA_CAV);
         return true;
       }
@@ -461,17 +467,15 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
     // the vestibule reaches the annulus, under a roof at the equator, with its wall rising from the ring (decision 379)
-    vec2 dOC = vec2(x - TVS_CX, y - TVS_CY);
-    float dColumn = max(length(dOC) - TVS_R / tvWarpScale(dOC), czR - z);
+    float dColumn = max(tvRingDist, czR - z);
     raColumn = max(dColumn, z - (TV_CZ + TVZ + tvOff));
     if (!inSeptum && z > czR - 0.22 && z <= TV_CZ + TVZ + tvOff && septumPlane < 0.0 && dSvc >= 0.0 && dIvc >= 0.0 && dCs >= 0.0 && dRaa >= 0.0 && d > raLaMin) {
-      vec2 dO = dOC;
       if (dColumn < 0.0) {
         setSample(s, T_BLOOD, dColumn, vec3((x - ra.x) / rar.x, (y - ra.y) / rar.y, (z - czR) / rzR), p, 0.0, S_RA_CAV);
         return true;
       }
       if (dColumn < 0.22) {
-        setSample(s, T_MYO, -min(dColumn, 0.22 - dColumn), vec3(dO, 0.0), p, 0.0, S_RA_WALL);
+        setSample(s, T_MYO, -min(dColumn, 0.22 - dColumn), vec3(dOC, 0.0), p, 0.0, S_RA_WALL);
         return true;
       }
     }
@@ -485,7 +489,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
       setSample(s, T_MYO, -min(dRaa, LAA_WALL_CM - dRaa), vec3(0.0, 1.0, 0.0), p, 0.0, S_RA_WALL);
       return true;
     }
-    if (x <= xFace && x >= xFace - tIas && z < zAnn + 0.4 && dCs >= 0.0 && leftAtrialMouthLumen(p, la, lr, bo, czL, rzL, colDist) >= 0.0) {
+    if (x <= xFace && x >= xFace - tIas && z < zAnn + 0.4 && dCs >= 0.0 && mouthLumen >= 0.0) {
       if (nearLaBody || (relL < 0.5 && sdEllipsoid(vec3(xIas, y, z), vec3(ra.x, ra.y, czR), vec3(rar.x * boR * raC, rar.y * boR * raC, rzR)) < 0.45)) {
         setSample(s, T_MYO, -min(xFace - x, x - (xFace - tIas)), vec3(1.0, 0.0, 0.0), p, 0.0, S_IAS);
         return true;
@@ -533,7 +537,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // venae cavae and hepatic vein
     {
       // decision 370: the cava's lumen keeps clear of the right pulmonary veins' by both walls
-      float dSvcLumen = max(dSvc, PV_SVC_CLEARANCE_CM - rightVeinDistance(p, la, lr, bo, czL, rzL));
+      float dSvcLumen = max(dSvc, PV_SVC_CLEARANCE_CM - rVeinDist);
       if (dSvcLumen < 0.0) { setSample(s, T_BLOOD, dSvcLumen, vec3(0.0, 0.0, -1.0), p, 0.0, S_SVC); return true; }
       if (dSvcLumen < 0.12) { setSample(s, T_VESSEL, -min(dSvcLumen, 0.12 - dSvcLumen), vec3(0.0, 0.0, -1.0), p, 0.0, S_SVC); return true; }
       float dHv = sdCapsule(p, vec3(HV_AX, HV_AY, HV_AZ), vec3(HV_BX, HV_BY, HV_BZ), 0.4);
@@ -558,8 +562,9 @@ bool classifyHeart(vec3 p0, out Sample s) {
   // src/simulator/anatomy/classify/rightVentricle.ts: classifyRightVentricle
   vec3 rvc = rvCrescent(p, az);
   float dRv = rvc.x;
+  float tvOffRv = tvOffsetAt(p.xy);
   // decision 243: the inflow column inside the free wall below the hinges (rv.ts rvInflowSdf)
-  float dIn = max(tvInflowSdf(p), length(p.xy) - rvc.z - rvInflowSlack(p.z - (TVS_CZ + tvOffsetAt(p.xy))));
+  float dIn = max(tvInflowSdf(p), length(p.xy) - rvc.z - rvInflowSlack(p.z - (TVS_CZ + tvOffRv)));
   float dRvU = smin(dRv, dIn, 0.3);
   // the cavity the RV wall is drawn around, with the outflow tract: read again by the pericardium (rightVentricle.ts)
   float dCavRv = dRvU;
@@ -607,7 +612,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
       }
       float rr = length(p.xy); if (rr == 0.0) rr = 1.0;
       // the supraventricular crest between the atrial inflow column and the outflow tract (decision 334)
-      float zAnnulus = TV_CZ + TVZ + tvOffsetAt(p.xy);
+      float zAnnulus = TV_CZ + TVZ + tvOffRv;
       if (dRvot >= dRvU && dRv >= 0.0 && z <= zAnnulus && dRvot < fw) {
         setSample(s, T_MYO, -min(fw - dRvot, dRvot - dRvU), vec3(x / rr, y / rr, 0.0), p, 0.0, S_RV_WALL);
         return true;
@@ -618,7 +623,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // decision 367: the free wall ends at its tricuspid hinge
     float tvRH = TV_R * (1.0 - tvShortening(CONTRACTION, RV_RADIAL_SCALE));
     float ringH = length(vec2(x - (TV_CX + TV_R - tvRH), y - TV_CY)) - tvRH;
-    bool aboveHinge = z < TV_CZ + TVZ + tvOffsetAt(p.xy) - LV_WALL_BASAL_OVERHANG_CM && dRvot >= fw && ringH > -RV_HINGE_INNER_CM && ringH < RV_HINGE_REACH_CM;
+    bool aboveHinge = z < TV_CZ + TVZ + tvOffRv - LV_WALL_BASAL_OVERHANG_CM && dRvot >= fw && ringH > -RV_HINGE_INNER_CM && ringH < RV_HINGE_REACH_CM;
     if (dCavRv < fw && !aboveHinge) {
       float rr = length(p.xy); if (rr == 0.0) rr = 1.0;
       setSample(s, T_MYO, -min(dCavRv, fw - dCavRv), vec3(x / rr, y / rr, 0.0), vec3(x / sc3, y / sc3, z), 0.0, S_RV_WALL);
