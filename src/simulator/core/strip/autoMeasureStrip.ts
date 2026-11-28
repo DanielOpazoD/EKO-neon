@@ -217,7 +217,7 @@ export function autoMeasureMitralInflow(
   const pixelsPerColumn = (displayCols || cols) / cols;
   const spans = findSpectralBeatSpans(cols, head, stripPhase, stripBeatIndex, stripSampleTime);
   const candidates = spans
-    .filter((sp) => sp.minPhase <= phaseMarks.mitralOpen + 0.02 && sp.maxPhase >= 0.90)
+    .filter((sp) => sp.minPhase <= phaseMarks.mitralOpen + 0.02 && sp.maxPhase >= 0.85)
     .sort((a, b) => b.maxTimeS - a.maxTimeS);
 
   if (!candidates.length) {
@@ -428,8 +428,9 @@ export function autoMeasureTdiEPrime(
 
   const pixelsPerColumn = (displayCols || cols) / cols;
   const spans = findSpectralBeatSpans(cols, head, stripPhase, stripBeatIndex, stripSampleTime);
+  const reqEnd = Math.min(0.88, Math.max(phaseMarks.mitralOpen + 0.14, phaseMarks.eEnd));
   const candidates = spans
-    .filter((sp) => sp.minPhase <= phaseMarks.mitralOpen + 0.02 && sp.maxPhase >= phaseMarks.eEnd + 0.03)
+    .filter((sp) => sp.minPhase <= phaseMarks.mitralOpen + 0.03 && sp.maxPhase >= reqEnd)
     .sort((a, b) => b.maxTimeS - a.maxTimeS);
 
   if (!candidates.length) {
@@ -1018,38 +1019,57 @@ export function autoMeasureTapse(
       smEs[k] = s2 * inv;
     }
 
-    // 1. Locate ED annular band near validHint [validHint - 0.65, validHint + 0.65]:
-    //    bright at ED and vacating at ES (high smEd and positive smEd - smEs)
+    // Adaptive dark RV cavity blood floor above the tricuspid excursion window
+    const bgLo = 0;
+    const bgHi = Math.min(nS - 1, Math.max(2, Math.floor(0.55 / sampleCm)));
+    let bgSum = 0;
+    for (let k = bgLo; k <= bgHi; k++) bgSum += Math.min(smEd[k]!, smEs[k]!);
+    const bloodFloor = bgSum / (bgHi - bgLo + 1);
+    const edgeThr = Math.max(58, bloodFloor + 16);
+
+    // 1. Locate ED tricuspid annular echo ridge tightly around validHint [validHint - 0.65, validHint + 0.35]
+    //    (restricting below validHint + 0.35 prevents locking onto the deeper RA posterior wall / pericardium),
+    //    then walk shallowward to its blood-to-tissue leading edge so ED and ES use the exact same fiducial.
     const edLo = Math.max(0, Math.floor((validHint - 0.65 - rTopCm) / sampleCm));
-    const edHi = Math.min(nS - 1, Math.ceil((validHint + 0.65 - rTopCm) / sampleCm));
-    let bestEdK = -1;
+    const edHi = Math.min(nS - 1, Math.ceil((validHint + 0.35 - rTopCm) / sampleCm));
+    let bestEdPeakK = -1;
     let bestEdScore = -Infinity;
     for (let k = edLo; k <= edHi; k++) {
       const r = (sTop + k + 0.5) * sampleCm;
       const drop = Math.max(0, smEd[k]! - smEs[k]!);
-      const score = smEd[k]! * 0.55 + drop * 1.1 - Math.abs(r - validHint) * 14;
+      const score = smEd[k]! * 0.65 + drop * 1.4 - Math.abs(r - validHint) * 18;
       if (score > bestEdScore) {
         bestEdScore = score;
-        bestEdK = k;
+        bestEdPeakK = k;
       }
     }
-    if (bestEdK < 0 || smEd[bestEdK]! < 75) continue;
+    if (bestEdPeakK < 0 || smEd[bestEdPeakK]! < edgeThr - 4) continue;
+    let edLeadK = bestEdPeakK;
+    const edLeadMin = Math.max(edLo, bestEdPeakK - Math.round(0.45 / sampleCm));
+    for (let j = bestEdPeakK - 1; j >= edLeadMin; j--) {
+      if (smEd[j]! >= edgeThr) edLeadK = j;
+      else break;
+    }
+    const bestEdK = Math.round(0.5 * (edLeadK + bestEdPeakK));
     const edCm = (sTop + bestEdK + 0.5) * sampleCm;
 
-    // 2. Locate ES annular arrival [edCm - 2.75, edCm - 0.45]:
-    //    sharpest positive arrival (smEs - smEd) where tissue enters previously dark RV blood cavity
+    // 2. Locate ES tricuspid annular arrival scanning shallow -> deep in [edCm - 2.75, edCm - 0.45]:
+    //    pick the shallowest genuine systolic tissue leading edge rising out of dark ED RV blood
+    //    (prevents locking onto deeper stationary RA wall or pericardium).
     const esLo = Math.max(0, Math.floor((edCm - 2.75 - rTopCm) / sampleCm));
     const esHi = Math.min(nS - 1, Math.ceil((edCm - 0.45 - rTopCm) / sampleCm));
     let bestEsK = -1;
-    let bestEsScore = -Infinity;
     for (let k = esLo; k <= esHi; k++) {
       const rise = smEs[k]! - smEd[k]!;
-      if (rise < 18 || smEs[k]! < 85) continue;
-      // Prefer strong tissue arrival emerging out of dark ED blood cavity
-      const score = rise * 1.3 + (smEs[k]! - 70) * 0.4;
-      if (score > bestEsScore) {
-        bestEsScore = score;
-        bestEsK = k;
+      if (smEs[k]! >= edgeThr && rise >= 6) {
+        // Walk forward up to 0.3 cm to the local systolic leading-edge crest for exact depth
+        let peakK = k;
+        const crestHi = Math.min(esHi, k + Math.round(0.3 / sampleCm));
+        for (let j = k + 1; j <= crestHi; j++) {
+          if (smEs[j]! > smEs[peakK]!) peakK = j;
+        }
+        bestEsK = Math.round(0.5 * (k + peakK));
+        break;
       }
     }
     if (bestEsK < 0) continue;

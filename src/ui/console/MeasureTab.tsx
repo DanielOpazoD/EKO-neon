@@ -1,13 +1,10 @@
 import { examClosed, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
 import { formatCaptureCaption } from '@/app/studyCapture';
 import { useHudStore, useSimStore, type SimStore } from '@/app/store';
-import { loadCaseById } from '@/cases';
 import { strokeVolume } from '@/clinical/formulas';
 import { aggregateProtocolMeasurement, deriveCalculations } from '@/education/report';
-import { Structure } from '@/simulator/anatomy/tissue';
 import {
   MEASUREMENT_SPECS,
-  type MeasurementSpec,
   type MeasurementTool,
 } from '@/simulator/measurements/protocol';
 import { modalityLabel } from '@/simulator/renderer/modality';
@@ -15,29 +12,22 @@ import { viewLabel } from '@/simulator/windows/viewLabels';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 import { Section } from '../controls';
-import { captureStepPrompt, minPointsToFinish } from '../display/measurementPreview';
 import {
-  runAutoChamberVolume,
-  runAutoDopplerTarget,
-  runAutoIvc,
-  runAutoLaVolume,
-  runAutoLvotGate,
-  runAutoPlax,
-  runAutoSpectralVti,
-  runAutoStripMeasure,
-} from '../display/measurementTools';
-import type { AutoStripMeasureTarget } from '@/simulator/core/strip/autoMeasureStrip';
-import type { DopplerTargetId } from '@/simulator/measurements/autoDopplerTarget';
+  AUTO_MEASURE_SPECS,
+  cancelGuidedAutoMeasure,
+  runGuidedAutoMeasure,
+  type AutoMeasureActionId,
+  type OrchestratorProgress,
+} from '../display/autoMeasureOrchestrator';
+import { captureStepPrompt, minPointsToFinish } from '../display/measurementPreview';
 import { pendingSession, usePendingPointCount } from '../display/pendingSession';
 import { MeasurementPanel } from '../MeasurementPanel';
 import { ViewQuickMenu } from '../ViewQuickMenu';
 import {
   captureModalityCheck,
-  computeQuickStudySteps,
   isFreeToolCompatible,
   isTimeInCineWindow,
   phaseTag,
-  specsForView,
   summarizeAutoEf,
 } from './measureContext';
 import { useTip } from './useTip';
@@ -122,12 +112,11 @@ function techniqueBadge(
 }
 
 /**
- * Context-first clinical measurement workspace:
- * - «Medir»: current context strip, view-matched quick measurements, guided Auto-FE VI/VD,
- *   full protocol catalogue, and modality-grouped free tools.
- * - «Capturas (N)»: live derived calculations (FEVI, FEVD, CAF, AVA, E/e′, PSAP…) +
- *   interactive measurement worksheet with frame jump, copy, and direct link to Informe.
- * - «Midiendo»: step-by-step guided capture card with 1-click modality/freeze/phase helpers.
+ * Simplified 1-click clinical measurement workspace:
+ * - «Medir»: compact context bar + unified 1-click «Automedición» hub (auto-switches window,
+ *   posture, and modality while deactivating conflicting modes) + collapsible manual protocol/tools.
+ * - «Capturas (N)»: live derived calculations + measurement worksheet with frame jump, copy & Informe.
+ * - «Midiendo»: step-by-step guided capture card when using manual caliper/trace tools.
  */
 export function MeasureTab() {
   const s = useSimStore(
@@ -149,16 +138,23 @@ export function MeasureTab() {
       setActiveTool: st.setActiveTool,
       setModality: st.setModality,
       setUi: st.setUi,
-      startPresetView: st.startPresetView,
       toggleFreeze: st.toggleFreeze,
       closed: examClosed(st),
     })),
   );
   const [subTab, setSubTab] = useState<MeasureSubTab>('medir');
+  const [progress, setProgress] = useState<OrchestratorProgress | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const tip = useTip();
   const policy = modePolicy(s.mode);
   const showView = policy.showViewFeedback;
   const showIdentity = showsCaseIdentity(s.mode, s.examFinished);
+
+  // Cancel any running guided auto-measurement on unmount or exam closure
+  useEffect(() => () => cancelGuidedAutoMeasure(), []);
+  useEffect(() => {
+    if (s.closed) cancelGuidedAutoMeasure();
+  }, [s.closed]);
 
   // Narrow Zustand HUD selectors: only re-render when view, frozen frameId, or 0.5 s quantized cine window changes.
   const currentViewId = useHudStore((h) => (showView ? (h.hud?.view?.bestViewId ?? null) : null));
@@ -176,24 +172,20 @@ export function MeasureTab() {
   }, [cineBucket]);
   const pendingCount = usePendingPointCount();
 
-  const quickStudy = useMemo(
-    () =>
-      policy.presetsEnabled && showView
-        ? computeQuickStudySteps(s.measurements, currentViewId)
-        : null,
-    [policy.presetsEnabled, showView, s.measurements, currentViewId],
-  );
-
-  const jumpQuickStudyView = (targetViewId: string) => {
-    if (s.closed || !policy.presetsEnabled) return;
-    if (currentViewId !== targetViewId && s.modality !== '2d') {
-      s.setModality('2d');
+  const runAction = async (actionId: AutoMeasureActionId) => {
+    if (s.closed) return;
+    setNotice(null);
+    const res = await runGuidedAutoMeasure(actionId, setProgress);
+    setProgress(null);
+    if (!res.cancelled) {
+      setNotice({ kind: res.ok ? 'ok' : 'err', text: res.message });
     }
-    s.startPresetView(targetViewId);
   };
 
   const inspectFrame = (frameId: number, target: 'ed' | 'es' = 'ed') => {
     if (s.closed) return;
+    cancelGuidedAutoMeasure();
+    setProgress(null);
     if (!s.frozen) s.toggleFreeze();
     s.jumpCinePhase(target, frameId);
   };
@@ -220,7 +212,10 @@ export function MeasureTab() {
     const showPhaseJump =
       s.frozen &&
       (s.modality === '2d' || s.modality === 'color') &&
-      (spec?.phase === 'ed' || spec?.phase === 'es' || s.activeTool === 'caliper' || s.activeTool === 'simpson');
+      (spec?.phase === 'ed' ||
+        spec?.phase === 'es' ||
+        s.activeTool === 'caliper' ||
+        s.activeTool === 'simpson');
     const cancel = () =>
       s.activeMeasurementId ? s.setActiveMeasurement(null) : s.setActiveTool('none');
 
@@ -311,9 +306,7 @@ export function MeasureTab() {
             </div>
 
             <p className="capture-hint">
-              {spec
-                ? spec.instruction
-                : FREE_TOOL_HINT[s.activeTool as MeasurementTool]}
+              {spec ? spec.instruction : FREE_TOOL_HINT[s.activeTool as MeasurementTool]}
             </p>
           </div>
           <button className="capture-cancel ghost" onClick={cancel}>
@@ -393,141 +386,121 @@ export function MeasureTab() {
               type="button"
               className={`measure-freeze-chip${s.frozen ? ' frozen' : ''}`}
               disabled={s.closed}
-              onClick={() => s.toggleFreeze()}
-              data-tip={s.frozen ? 'Reanudar imagen en vivo (Espacio)' : 'Congelar imagen para medir (Espacio)'}
+              onClick={() => {
+                cancelGuidedAutoMeasure();
+                setProgress(null);
+                s.toggleFreeze();
+              }}
+              data-tip={
+                s.frozen
+                  ? 'Reanudar imagen en vivo (Espacio)'
+                  : 'Congelar imagen para medir (Espacio)'
+              }
             >
               {s.frozen ? 'Congelada · Reanudar' : 'En vivo · Congelar'}
             </button>
           </div>
 
-          {quickStudy && !s.closed && (
+          {progress && (
+            <div className="auto-run-bar" role="status" aria-live="polite">
+              <span className="auto-run-main">
+                <span className="capture-dot" aria-hidden="true" />
+                <span className="auto-run-text">{progress.phaseLabel}</span>
+              </span>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  cancelGuidedAutoMeasure();
+                  setProgress(null);
+                }}
+              >
+                Cancelar
+              </button>
+            </div>
+          )}
+
+          {notice && !progress && (
             <div
-              className="quick-study-strip"
-              role="group"
-              aria-label="Estudio rápido en 4 pasos"
-              data-quick-study="strip"
+              className={`auto-ef-notice auto-notice-row ${notice.kind === 'err' ? 'err' : 'ok'}`}
+              role="status"
             >
-              <div className="quick-study-head">
-                <span>Estudio rápido</span>
-                <span className={`quick-study-count${quickStudy.completedCount === 4 ? ' complete' : ''}`}>
-                  {quickStudy.completedCount}/4
-                </span>
-              </div>
-              <div className="quick-study-pills">
-                {quickStudy.steps.map((step) => (
-                  <button
-                    key={step.id}
-                    type="button"
-                    className={`qs-pill ${step.status}${step.active ? ' active' : ''}`}
-                    onClick={() => jumpQuickStudyView(step.targetViewId)}
-                    data-tip={step.tip}
-                  >
-                    <span className="qs-label">
-                      {step.status === 'done' ? '✓ ' : ''}
-                      {step.label}
-                    </span>
-                    {step.detail && <span className="qs-detail">{step.detail}</span>}
-                  </button>
-                ))}
-              </div>
+              <span>{notice.text}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Cerrar aviso"
+                onClick={() => setNotice(null)}
+              >
+                ×
+              </button>
             </div>
           )}
 
-          {showView && currentViewId && (
-            <ViewQuickSection
-              viewId={currentViewId}
-              modality={s.modality}
-              caseId={s.caseId}
-              showIdentity={showIdentity}
-              showFeedback={showView}
-              measurements={s.measurements}
-              closed={s.closed}
-              onArm={(id) => s.setActiveMeasurement(id)}
-            />
+          {policy.presetsEnabled ? (
+            <>
+              <Section
+                title="Automedición (1 clic)"
+                tip={tip(
+                  'Un solo clic cambia automáticamente a la ventana correcta, activa el modo necesario (2D, PW, CW, TDI o M), desactiva los demás y coloca la medición editable.',
+                )}
+              >
+                <OneClickAutoHub
+                  measurements={s.measurements}
+                  modality={s.modality}
+                  currentViewId={currentViewId}
+                  displayedFrameId={displayedFrameId}
+                  cineWindow={cineWindow}
+                  showViewFeedback={showView}
+                  showIdentity={showIdentity}
+                  truth={s.truth}
+                  closed={s.closed}
+                  runningActionId={progress?.actionId ?? null}
+                  onRun={(id) => void runAction(id)}
+                  onInspect={inspectFrame}
+                />
+              </Section>
+
+              <details className="adv manual-details">
+                <summary>Medición manual (Protocolo y herramientas)</summary>
+                <div className="manual-details-body">
+                  <Section title="Protocolo completo">
+                    <MeasurementPanel />
+                  </Section>
+                  <FreeToolsSection
+                    modality={s.modality}
+                    closed={s.closed}
+                    tip={tip}
+                    onArmTool={(t) => {
+                      cancelGuidedAutoMeasure();
+                      setProgress(null);
+                      s.setActiveTool(t);
+                    }}
+                  />
+                </div>
+              </details>
+            </>
+          ) : (
+            <>
+              <Section title="Auto sobre vista actual">
+                <ExamAutoRow
+                  modality={s.modality}
+                  closed={s.closed}
+                  runningActionId={progress?.actionId ?? null}
+                  onRun={(id) => void runAction(id)}
+                />
+              </Section>
+              <Section title="Protocolo completo">
+                <MeasurementPanel />
+              </Section>
+              <FreeToolsSection
+                modality={s.modality}
+                closed={s.closed}
+                tip={tip}
+                onArmTool={(t) => s.setActiveTool(t)}
+              />
+            </>
           )}
-
-          <Section
-            title="Mediciones 2D automáticas"
-            tip={tip(
-              'PLAX 2D, Simpson biplano VI, volumen AI (LAVI), VD 2D + basal y VCI con colapso inspiratorio (PAD) directamente desde la imagen 2D.',
-            )}
-          >
-            <AutoEfPanel
-              currentViewId={currentViewId}
-              displayedFrameId={displayedFrameId}
-              cineWindow={cineWindow}
-              showViewFeedback={showView}
-              presetsEnabled={policy.presetsEnabled}
-            />
-          </Section>
-
-          <Section
-            title="Asistente Doppler y Modo M"
-            tip={tip(
-              'Coloca el gate o cursor a partir de la anatomía 2D visible (Mitral E/A, TDI e′ septal/lateral, TAPSE, IT CW y TSVI con Auto-VTI).',
-            )}
-          >
-            <AutoLvotVtiPanel
-              currentViewId={currentViewId}
-              showViewFeedback={showView}
-              showIdentity={showIdentity}
-              presetsEnabled={policy.presetsEnabled}
-            />
-          </Section>
-
-          <Section title="Protocolo completo">
-            <MeasurementPanel />
-          </Section>
-
-          <Section
-            title="Herramientas libres"
-            tip={tip('Medidas directas sin evaluación de técnica. Se activan según la modalidad en pantalla.')}
-          >
-            <div className="free-tool-group">
-              <span className="free-tool-cap">Imagen 2D</span>
-              <div className="tool-grid two" role="group" aria-label="Herramientas 2D">
-                {TOOLS_2D.map((t) => {
-                  const compat = isFreeToolCompatible(t.id, s.modality);
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      className={compat ? '' : 'tool-dim'}
-                      data-tip={compat ? t.title : `${t.title} · óptima en 2D`}
-                      onClick={() => s.setActiveTool(t.id)}
-                      disabled={s.closed}
-                    >
-                      {t.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            <div className="free-tool-group">
-              <span className="free-tool-cap">Doppler y modo M</span>
-              <div className="tool-grid" role="group" aria-label="Herramientas Doppler y modo M">
-                {TOOLS_STRIP.map((t) => {
-                  const compat = isFreeToolCompatible(t.id, s.modality);
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      className={compat ? '' : 'tool-dim'}
-                      data-tip={
-                        compat
-                          ? t.title
-                          : `${t.title} · requiere ${t.id === 'tapse' ? 'Modo M' : 'Doppler espectral (PW/CW/TDI)'}`
-                      }
-                      onClick={() => s.setActiveTool(t.id)}
-                      disabled={s.closed}
-                    >
-                      {t.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </Section>
         </>
       ) : (
         <CapturasWorksheet
@@ -545,107 +518,630 @@ export function MeasureTab() {
   );
 }
 
-/** Context-matched 1-click measurements for the currently recognized view (hidden during exam). */
-function ViewQuickSection({
-  viewId,
-  modality,
-  caseId,
-  showIdentity,
-  showFeedback,
+/** Unified 5-group 1-click auto-measurement hub for Practice & Guided modes. */
+function OneClickAutoHub({
   measurements,
+  modality,
+  currentViewId,
+  displayedFrameId,
+  cineWindow,
+  showViewFeedback,
+  showIdentity,
+  truth,
   closed,
-  onArm,
+  runningActionId,
+  onRun,
+  onInspect,
 }: {
-  viewId: string;
-  modality: SimStore['modality'];
-  caseId: string;
-  showIdentity: boolean;
-  showFeedback: boolean;
   measurements: SimStore['measurements'];
+  modality: SimStore['modality'];
+  currentViewId: string | null;
+  displayedFrameId: number | null;
+  cineWindow: { startS: number; endS: number } | null;
+  showViewFeedback: boolean;
+  showIdentity: boolean;
+  truth: SimStore['truth'];
   closed: boolean;
-  onArm: (id: string) => void;
+  runningActionId: AutoMeasureActionId | null;
+  onRun: (id: AutoMeasureActionId) => void;
+  onInspect: (frameId: number, target?: 'ed' | 'es') => void;
 }) {
-  const requiredIds = useMemo(() => {
-    if (!showIdentity) return [];
-    return loadCaseById(caseId).requiredMeasurements.map((r) => r.measurementId);
-  }, [caseId, showIdentity]);
-  const specs = useMemo(
-    () => specsForView(viewId, modality, requiredIds),
-    [viewId, modality, requiredIds],
+  const summary = useMemo(
+    () => summarizeAutoEf(measurements, currentViewId, modality, showViewFeedback),
+    [measurements, currentViewId, modality, showViewFeedback],
   );
-  const [showOtherMods, setShowOtherMods] = useState(false);
-  useEffect(() => {
-    setShowOtherMods(false);
-  }, [viewId, modality]);
-  if (!specs.length) return null;
+  const bsaM2 = truth?.bsaM2 && truth.bsaM2 > 0 ? truth.bsaM2 : null;
+  const lvmi = summary.plax.massG !== null && bsaM2 ? summary.plax.massG / bsaM2 : null;
+  const lavi = summary.la.volumeMl !== null && bsaM2 ? summary.la.volumeMl / bsaM2 : null;
 
-  const sameMod = specs.filter((spec) => spec.modalities.includes(modality));
-  const otherMod = specs.filter((spec) => !spec.modalities.includes(modality));
-  // Show active-modality measurements immediately; keep other modalities collapsed when there are many so
-  // Auto-FE stays above the fold on views like A4C without scrolling.
-  const visibleSpecs =
-    sameMod.length > 0 && otherMod.length > 0 && !showOtherMods ? sameMod : specs;
+  const agg = useMemo(
+    () => ({
+      lvotVti: aggregateProtocolMeasurement(measurements, 'lvot-vti'),
+      avVti: aggregateProtocolMeasurement(measurements, 'av-vti'),
+      lvotDiam: aggregateProtocolMeasurement(measurements, 'lvot-diameter'),
+      mitralE: aggregateProtocolMeasurement(measurements, 'mitral-e'),
+      mitralA: aggregateProtocolMeasurement(measurements, 'mitral-a'),
+      mitralDt: aggregateProtocolMeasurement(measurements, 'mitral-dt'),
+      epSept: aggregateProtocolMeasurement(measurements, 'e-prime-septal'),
+      epLat: aggregateProtocolMeasurement(measurements, 'e-prime-lateral'),
+      rvSPrime: aggregateProtocolMeasurement(measurements, 'rv-s-prime'),
+      rvotAt: aggregateProtocolMeasurement(measurements, 'rvot-acceleration-time'),
+      trVmax: aggregateProtocolMeasurement(measurements, 'tr-vmax'),
+      tapse: aggregateProtocolMeasurement(measurements, 'tapse'),
+    }),
+    [measurements],
+  );
 
-  const reqSet = new Set(requiredIds);
-  const latestOf = (id: string) => {
-    for (let i = measurements.length - 1; i >= 0; i--) {
-      if (measurements[i]!.measurementId === id) return measurements[i]!;
-    }
-    return null;
+  const dopplerSvMl =
+    agg.lvotVti && agg.lvotDiam && agg.lvotDiam.value > 0
+      ? strokeVolume(agg.lvotDiam.value, agg.lvotVti.value)
+      : null;
+  const continuityAvaCm2 =
+    dopplerSvMl !== null && agg.avVti && agg.avVti.value > 0
+      ? dopplerSvMl / agg.avVti.value
+      : null;
+  const velocityRatio =
+    agg.lvotVti && agg.avVti && agg.avVti.value > 0
+      ? agg.lvotVti.value / agg.avVti.value
+      : null;
+
+  const eaRatio =
+    agg.mitralE && agg.mitralA && agg.mitralA.value > 0
+      ? agg.mitralE.value / agg.mitralA.value
+      : null;
+  const ePrimeAvgCmps =
+    agg.epSept && agg.epLat
+      ? 0.5 * (agg.epSept.value + agg.epLat.value)
+      : (agg.epSept?.value ?? agg.epLat?.value ?? null);
+  const eOverEPrime =
+    agg.mitralE && ePrimeAvgCmps && ePrimeAvgCmps > 0
+      ? (agg.mitralE.value * 100) / ePrimeAvgCmps
+      : null;
+
+  const trGradMmHg = agg.trVmax ? 4 * agg.trVmax.value * agg.trVmax.value : null;
+  const psvdMmHg =
+    trGradMmHg !== null
+      ? trGradMmHg + (summary.ivc.rapMmHg ?? 5)
+      : null;
+
+  const inCine = (frameId: number | null, timeS: number | null) =>
+    frameId !== null && (displayedFrameId === frameId || isTimeInCineWindow(timeS, cineWindow));
+
+  const showAfHint = showIdentity && truth?.rhythm === 'atrial-fibrillation';
+
+  const renderTile = (
+    id: AutoMeasureActionId,
+    opts: {
+      value?: string | null;
+      idleSub: string;
+      wide?: boolean;
+    },
+  ) => {
+    const spec = AUTO_MEASURE_SPECS[id];
+    const running = runningActionId === id;
+    const done = Boolean(opts.value);
+    return (
+      <button
+        key={id}
+        type="button"
+        className={`auto-tile${opts.wide ? ' wide' : ''}${done ? ' done' : ''}${running ? ' running' : ''}`}
+        disabled={closed || (runningActionId !== null && !running)}
+        data-auto-action={id}
+        data-tip={spec.tip}
+        onClick={() => onRun(id)}
+      >
+        <span className="auto-tile-top">
+          <span className="auto-tile-name">{spec.label}</span>
+          <span className={`mod-chip${running ? ' match' : ''}`}>{spec.modalityBadge}</span>
+        </span>
+        <span className="auto-tile-sub">
+          {running ? 'Midiendo…' : done ? `✓ ${opts.value}` : opts.idleSub}
+        </span>
+      </button>
+    );
   };
 
+  const plaxEdReady = inCine(summary.plax.edFrameId, summary.plax.edTimeS);
+  const plaxMidReady = inCine(summary.plax.midSysFrameId, summary.plax.midSysTimeS);
+  const plaxEsReady = inCine(summary.plax.esFrameId, summary.plax.esTimeS);
+  const lvEdReady = inCine(summary.lv.edFrameId, summary.lv.edTimeS);
+  const lvEsReady = inCine(summary.lv.esFrameId, summary.lv.esTimeS);
+  const laEsReady = inCine(summary.la.esFrameId, summary.la.esTimeS);
+  const rvEdReady = inCine(summary.rv.edFrameId, summary.rv.edTimeS);
+  const rvEsReady = inCine(summary.rv.esFrameId, summary.rv.esTimeS);
+  const ivcExpReady = inCine(summary.ivc.expFrameId, summary.ivc.expTimeS);
+  const ivcInspReady = inCine(summary.ivc.inspFrameId, summary.ivc.inspTimeS);
+
   return (
-    <Section title={`En esta vista · ${viewLabel(viewId)}`}>
-      <div className="view-quick-grid">
-        {visibleSpecs.map((spec: MeasurementSpec) => {
-          const m = latestOf(spec.id);
-          const modMatch = spec.modalities.includes(modality);
-          const isReq = reqSet.has(spec.id);
-          const phase = phaseTag(spec.phase);
-          const badge = m ? techniqueBadge(m, showFeedback) : null;
-          return (
-            <button
-              key={spec.id}
-              type="button"
-              className={`quick-meas-btn${modMatch ? ' ready' : ''}${m ? ' done' : ''}${isReq && !m ? ' req' : ''}`}
-              disabled={closed}
-              data-tip={spec.instruction}
-              onClick={() => onArm(spec.id)}
-            >
-              <span className="qm-top">
-                <span className="qm-name">
-                  {isReq && <i className="qm-req-dot" aria-label="Requerida" />}
-                  {spec.shortLabel}
-                </span>
-                <span className={`mod-chip${modMatch ? ' match' : ''}`}>
-                  {modalityLabel(spec.modalities[0] ?? '2d')}
-                </span>
-              </span>
-              <span className="qm-bottom">
-                {m ? (
-                  <>
-                    <span className="qm-val">{primaryValue(m)}</span>
-                    {badge && <i className={`qm-status ${badge.level}`} aria-hidden="true" />}
-                  </>
-                ) : (
-                  <span className="qm-phase">{phase ?? 'Medir'}</span>
-                )}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      {sameMod.length > 0 && otherMod.length > 0 && (
-        <button
-          type="button"
-          className="view-quick-more ghost"
-          onClick={() => setShowOtherMods((v) => !v)}
-        >
-          {showOtherMods
-            ? `Mostrar solo ${modalityLabel(modality)}`
-            : `+ ${otherMod.length} en otras modalidades (Doppler / M)`}
-        </button>
+    <div className="auto-hub" data-auto-hub="one-click">
+      {showAfHint && (
+        <p className="small" role="note">
+          FA activa: repetir un botón Doppler en 3–5 latidos calcula automáticamente el promedio ASE.
+        </p>
       )}
+
+      {/* 1. PLAX 2D */}
+      <div className="auto-group">
+        <div className="auto-group-head">
+          <span className="auto-group-title">PLAX · Dimensiones</span>
+          {summary.plax.hasResult && summary.plax.lvEddCm !== null && (
+            <span className="auto-group-kpi">
+              DTD {summary.plax.lvEddCm.toFixed(1)}
+              {summary.plax.fsPct !== null ? ` · FA ${summary.plax.fsPct.toFixed(0)}%` : ''}
+            </span>
+          )}
+        </div>
+        <div className="auto-tile-grid">
+          {renderTile('plax-all', {
+            wide: true,
+            idleSub: 'PLAX · SIV, DTDVI, PP, DTSVI, TSVI, Ao, AI',
+            value: summary.plax.hasResult
+              ? [
+                  summary.plax.lvEddCm !== null ? `DTD ${summary.plax.lvEddCm.toFixed(1)}` : null,
+                  summary.plax.lvEsdCm !== null ? `DTS ${summary.plax.lvEsdCm.toFixed(1)}` : null,
+                  summary.plax.lvotCm !== null ? `TSVI ${summary.plax.lvotCm.toFixed(2)} cm` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : null,
+          })}
+        </div>
+        {summary.plax.hasResult && (
+          <div className="auto-group-foot">
+            <div className="auto-ef-metrics">
+              {summary.plax.ivsdCm !== null && <span>SIV {summary.plax.ivsdCm.toFixed(2)}</span>}
+              {summary.plax.lvpwdCm !== null && <span>PP {summary.plax.lvpwdCm.toFixed(2)}</span>}
+              {summary.plax.aoRootCm !== null && <span>Ao {summary.plax.aoRootCm.toFixed(1)}</span>}
+              {summary.plax.laApCm !== null && <span>AI {summary.plax.laApCm.toFixed(1)}</span>}
+              {lvmi !== null ? (
+                <span>IMVI {lvmi.toFixed(0)} g/m²</span>
+              ) : summary.plax.massG !== null ? (
+                <span>Masa {summary.plax.massG.toFixed(0)} g</span>
+              ) : null}
+              {summary.plax.rwt !== null && <span>GPR {summary.plax.rwt.toFixed(2)}</span>}
+            </div>
+            {(plaxEdReady || plaxMidReady || plaxEsReady) && (
+              <div className="auto-ef-jump">
+                {summary.plax.edFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.plax.edFrameId ? ' active' : ''}`}
+                    disabled={closed || !plaxEdReady}
+                    onClick={() => onInspect(summary.plax.edFrameId!, 'ed')}
+                  >
+                    Ver TD
+                  </button>
+                )}
+                {summary.plax.midSysFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.plax.midSysFrameId ? ' active' : ''}`}
+                    disabled={closed || !plaxMidReady}
+                    onClick={() => onInspect(summary.plax.midSysFrameId!, 'ed')}
+                  >
+                    Ver TSVI
+                  </button>
+                )}
+                {summary.plax.esFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.plax.esFrameId ? ' active' : ''}`}
+                    disabled={closed || !plaxEsReady}
+                    onClick={() => onInspect(summary.plax.esFrameId!, 'es')}
+                  >
+                    Ver TS
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 2. VI y AI Volúmenes (Apical) */}
+      <div className="auto-group">
+        <div className="auto-group-head">
+          <span className="auto-group-title">VI y AI · Volúmenes</span>
+          {summary.lv.hasResult && summary.lv.efPct !== null ? (
+            <span className="auto-group-kpi">
+              FEVI {summary.lv.biplane ? 'bipl. ' : ''}
+              {summary.lv.efPct.toFixed(0)}%
+            </span>
+          ) : lavi !== null ? (
+            <span className="auto-group-kpi">LAVI {lavi.toFixed(0)} mL/m²</span>
+          ) : null}
+        </div>
+        <div className="auto-tile-grid">
+          {renderTile('lv-a4c', {
+            idleSub: 'Apical 4C',
+            value: summary.lv.a4c
+              ? `${summary.lv.a4c.efPct.toFixed(0)}% · ${summary.lv.a4c.edvMl.toFixed(0)}/${summary.lv.a4c.esvMl.toFixed(0)}`
+              : null,
+          })}
+          {renderTile('lv-a2c', {
+            idleSub: 'Apical 2C',
+            value: summary.lv.a2c
+              ? `${summary.lv.a2c.efPct.toFixed(0)}% · ${summary.lv.a2c.edvMl.toFixed(0)}/${summary.lv.a2c.esvMl.toFixed(0)}`
+              : null,
+          })}
+          {renderTile('la-a4c', {
+            idleSub: 'Apical 4C',
+            value: summary.la.a4c ? `${summary.la.a4c.volumeMl.toFixed(0)} mL` : null,
+          })}
+          {renderTile('la-a2c', {
+            idleSub: 'Apical 2C',
+            value: summary.la.a2c ? `${summary.la.a2c.volumeMl.toFixed(0)} mL` : null,
+          })}
+        </div>
+        {(summary.lv.hasResult || summary.la.hasResult) && (
+          <div className="auto-group-foot">
+            <div className="auto-ef-metrics">
+              {summary.lv.edvMl !== null && summary.lv.esvMl !== null && (
+                <span>
+                  VI {summary.lv.edvMl.toFixed(0)}/{summary.lv.esvMl.toFixed(0)} mL (VS{' '}
+                  {(summary.lv.svMl ?? 0).toFixed(0)})
+                </span>
+              )}
+              {summary.la.volumeMl !== null && (
+                <span>
+                  {lavi !== null
+                    ? `LAVI ${lavi.toFixed(0)} mL/m²`
+                    : `AI ${summary.la.volumeMl.toFixed(0)} mL`}
+                  {summary.la.biplane ? ' bipl.' : ''}
+                </span>
+              )}
+            </div>
+            {(summary.lv.lengthMismatch || summary.la.lengthMismatch) && (
+              <div className="biplane-warn" role="status">
+                ⚠ Longitud dispar entre A4C y A2C (revisa acortamiento apical).
+              </div>
+            )}
+            {(lvEdReady || lvEsReady || laEsReady) && (
+              <div className="auto-ef-jump">
+                {lvEdReady && summary.lv.edFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.lv.edFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.lv.edFrameId!, 'ed')}
+                  >
+                    VI TD
+                  </button>
+                )}
+                {lvEsReady && summary.lv.esFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.lv.esFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.lv.esFrameId!, 'es')}
+                  >
+                    VI TS
+                  </button>
+                )}
+                {laEsReady && summary.la.esFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.la.esFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.la.esFrameId!, 'es')}
+                  >
+                    AI TS
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 3. TSVI y Válvula Aórtica (Continuidad A5C) */}
+      <div className="auto-group">
+        <div className="auto-group-head">
+          <span className="auto-group-title">TSVI y Aorta · A5C</span>
+          {continuityAvaCm2 !== null ? (
+            <span className="auto-group-kpi">AVA {continuityAvaCm2.toFixed(2)} cm²</span>
+          ) : dopplerSvMl !== null ? (
+            <span className="auto-group-kpi">VS {dopplerSvMl.toFixed(0)} mL</span>
+          ) : null}
+        </div>
+        <div className="auto-tile-grid">
+          {renderTile('lvot-vti', {
+            idleSub: 'A5C · PW TSVI',
+            value: agg.lvotVti
+              ? `${agg.lvotVti.value.toFixed(1)} cm${agg.lvotVti.isAveraged ? ` (${agg.lvotVti.beatCount}l)` : ''}`
+              : null,
+          })}
+          {renderTile('av-vti', {
+            idleSub: 'A5C · CW VAo',
+            value: agg.avVti
+              ? `${agg.avVti.latest.derived?.vmaxMps ? `${agg.avVti.latest.derived.vmaxMps.toFixed(2)} m/s` : `${agg.avVti.value.toFixed(1)} cm`}`
+              : null,
+          })}
+        </div>
+        {(agg.lvotVti || agg.avVti) && (
+          <div className="auto-group-foot">
+            <div className="auto-ef-metrics">
+              {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
+              {agg.avVti && <span>VTI VAo {agg.avVti.value.toFixed(1)} cm</span>}
+              {agg.avVti?.latest.derived?.meanGradientMmHg !== undefined && (
+                <span>ΔPm {agg.avVti.latest.derived.meanGradientMmHg.toFixed(0)} mmHg</span>
+              )}
+              {velocityRatio !== null && <span>DVI {velocityRatio.toFixed(2)}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4. Diástole VI (A4C) */}
+      <div className="auto-group">
+        <div className="auto-group-head">
+          <span className="auto-group-title">Diástole VI · A4C</span>
+          {eOverEPrime !== null ? (
+            <span className="auto-group-kpi">E/e′ {eOverEPrime.toFixed(1)}</span>
+          ) : eaRatio !== null ? (
+            <span className="auto-group-kpi">E/A {eaRatio.toFixed(2)}</span>
+          ) : null}
+        </div>
+        <div className="auto-tile-grid">
+          {renderTile('mitral-ea', {
+            wide: true,
+            idleSub: 'A4C · PW puntas mitrales',
+            value: agg.mitralE
+              ? [
+                  `E ${agg.mitralE.value.toFixed(2)}`,
+                  agg.mitralA ? `A ${agg.mitralA.value.toFixed(2)}` : null,
+                  agg.mitralDt ? `TD ${Math.round(agg.mitralDt.value)} ms` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : null,
+          })}
+          {renderTile('tdi-septal', {
+            idleSub: 'A4C · TDI sept.',
+            value: agg.epSept ? `${agg.epSept.value.toFixed(1)} cm/s` : null,
+          })}
+          {renderTile('tdi-lateral', {
+            idleSub: 'A4C · TDI lat.',
+            value: agg.epLat ? `${agg.epLat.value.toFixed(1)} cm/s` : null,
+          })}
+        </div>
+        {(eaRatio !== null || eOverEPrime !== null) && (
+          <div className="auto-group-foot">
+            <div className="auto-ef-metrics">
+              {eaRatio !== null && <span>E/A {eaRatio.toFixed(2)}</span>}
+              {eOverEPrime !== null && <span>E/e′ prom {eOverEPrime.toFixed(1)}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 5. VD, Pulmonar y VCI */}
+      <div className="auto-group">
+        <div className="auto-group-head">
+          <span className="auto-group-title">VD, Pulmonar y VCI</span>
+          {psvdMmHg !== null ? (
+            <span className="auto-group-kpi">PSVD {psvdMmHg.toFixed(0)} mmHg</span>
+          ) : summary.ivc.rapMmHg !== null ? (
+            <span className="auto-group-kpi">PAD {summary.ivc.rapMmHg} mmHg</span>
+          ) : summary.rv.efPct !== null ? (
+            <span className="auto-group-kpi">FEVD {summary.rv.efPct.toFixed(0)}%</span>
+          ) : null}
+        </div>
+        <div className="auto-tile-grid">
+          {renderTile('rv-2d', {
+            idleSub: 'Enf. VD · 2D',
+            value: summary.rv.hasResult
+              ? [
+                  summary.rv.efPct !== null ? `${summary.rv.efPct.toFixed(0)}%` : null,
+                  summary.rv.facPct !== null ? `CAF ${summary.rv.facPct.toFixed(0)}%` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || (summary.rv.basalCm !== null ? `${summary.rv.basalCm.toFixed(1)} cm` : null)
+              : null,
+          })}
+          {renderTile('tapse', {
+            idleSub: 'Enf. VD · M',
+            value: agg.tapse ? `${agg.tapse.value.toFixed(2)} cm` : null,
+          })}
+          {renderTile('rv-s-prime', {
+            idleSub: 'Enf. VD · TDI',
+            value: agg.rvSPrime ? `${agg.rvSPrime.value.toFixed(1)} cm/s` : null,
+          })}
+          {renderTile('tr-vmax', {
+            idleSub: 'Enf. VD · CW',
+            value: agg.trVmax ? `${agg.trVmax.value.toFixed(2)} m/s` : null,
+          })}
+          {renderTile('rvot-at', {
+            idleSub: 'PSAX Ao · PW',
+            value: agg.rvotAt ? `${Math.round(agg.rvotAt.value)} ms` : null,
+          })}
+          {renderTile('ivc-full', {
+            idleSub: 'Subc. VCI · Esp+Insp',
+            value: summary.ivc.hasResult
+              ? summary.ivc.rapMmHg !== null && summary.ivc.collapsePct !== null
+                ? `PAD ${summary.ivc.rapMmHg} · ${summary.ivc.collapsePct.toFixed(0)}%`
+                : `${(summary.ivc.expCm ?? summary.ivc.inspCm ?? 0).toFixed(2)} cm`
+              : null,
+          })}
+        </div>
+        {(summary.rv.hasResult || summary.ivc.hasResult || psvdMmHg !== null) && (
+          <div className="auto-group-foot">
+            <div className="auto-ef-metrics">
+              {summary.rv.basalCm !== null && <span>Basal {summary.rv.basalCm.toFixed(1)} cm</span>}
+              {summary.ivc.expCm !== null && (
+                <span>
+                  VCI {summary.ivc.expCm.toFixed(2)}
+                  {summary.ivc.inspCm !== null ? `→${summary.ivc.inspCm.toFixed(2)}` : ''} cm
+                </span>
+              )}
+              {summary.ivc.rapMmHg !== null && <span>PAD {summary.ivc.rapMmHg} mmHg</span>}
+              {psvdMmHg !== null && <span>PSVD {psvdMmHg.toFixed(0)} mmHg</span>}
+            </div>
+            {(rvEdReady || rvEsReady || ivcExpReady || ivcInspReady) && (
+              <div className="auto-ef-jump">
+                {rvEdReady && summary.rv.edFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.rv.edFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.rv.edFrameId!, 'ed')}
+                  >
+                    VD TD
+                  </button>
+                )}
+                {rvEsReady && summary.rv.esFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.rv.esFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.rv.esFrameId!, 'es')}
+                  >
+                    VD TS
+                  </button>
+                )}
+                {ivcExpReady && summary.ivc.expFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.ivc.expFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.ivc.expFrameId!, 'ed')}
+                  >
+                    VCI Esp
+                  </button>
+                )}
+                {ivcInspReady && summary.ivc.inspFrameId !== null && (
+                  <button
+                    type="button"
+                    className={`ghost${displayedFrameId === summary.ivc.inspFrameId ? ' active' : ''}`}
+                    onClick={() => onInspect(summary.ivc.inspFrameId!, 'ed')}
+                  >
+                    VCI Insp
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Exam-mode pure-signal auto-measure row: NEVER moves probe, NEVER switches views/modalities,
+ * and NEVER leaks view labels — strictly offers actions valid for the modality currently on screen.
+ */
+function ExamAutoRow({
+  modality,
+  closed,
+  runningActionId,
+  onRun,
+}: {
+  modality: SimStore['modality'];
+  closed: boolean;
+  runningActionId: AutoMeasureActionId | null;
+  onRun: (id: AutoMeasureActionId) => void;
+}) {
+  const items: { id: AutoMeasureActionId; label: string }[] =
+    modality === '2d' || modality === 'color'
+      ? [
+          { id: 'plax-all', label: 'Auto PLAX' },
+          { id: 'lv-a4c', label: 'Auto FE VI' },
+          { id: 'la-a4c', label: 'Auto Vol AI' },
+          { id: 'rv-2d', label: 'Auto FE VD' },
+          { id: 'ivc-full', label: 'Auto VCI' },
+        ]
+      : modality === 'pw'
+        ? [
+            { id: 'lvot-vti', label: 'Auto VTI TSVI' },
+            { id: 'mitral-ea', label: 'Auto E / A / TD' },
+            { id: 'rvot-at', label: 'Auto TAc pulm.' },
+          ]
+        : modality === 'cw'
+          ? [
+              { id: 'av-vti', label: 'Auto VTI VAo' },
+              { id: 'tr-vmax', label: 'Auto Vmáx IT' },
+            ]
+          : modality === 'tdi'
+            ? [
+                { id: 'tdi-septal', label: 'Auto e′ sept' },
+                { id: 'tdi-lateral', label: 'Auto e′ lat' },
+                { id: 'rv-s-prime', label: 'Auto S′ VD' },
+              ]
+            : [{ id: 'tapse', label: 'Auto TAPSE' }];
+
+  return (
+    <div className="exam-auto-row">
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className="ghost"
+          disabled={closed || runningActionId !== null}
+          onClick={() => onRun(item.id)}
+        >
+          {runningActionId === item.id ? 'Midiendo…' : item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Manual free measurement tools grouped by 2D vs Doppler/M-mode. */
+function FreeToolsSection({
+  modality,
+  closed,
+  tip,
+  onArmTool,
+}: {
+  modality: SimStore['modality'];
+  closed: boolean;
+  tip: (t: string) => string | undefined;
+  onArmTool: (t: MeasurementTool) => void;
+}) {
+  return (
+    <Section
+      title="Herramientas libres"
+      tip={tip('Medidas directas sin evaluación de técnica. Se activan según la modalidad en pantalla.')}
+    >
+      <div className="free-tool-group">
+        <span className="free-tool-cap">Imagen 2D</span>
+        <div className="tool-grid two" role="group" aria-label="Herramientas 2D">
+          {TOOLS_2D.map((t) => {
+            const compat = isFreeToolCompatible(t.id, modality);
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={compat ? '' : 'tool-dim'}
+                data-tip={compat ? t.title : `${t.title} · óptima en 2D`}
+                onClick={() => onArmTool(t.id)}
+                disabled={closed}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="free-tool-group">
+        <span className="free-tool-cap">Doppler y modo M</span>
+        <div className="tool-grid" role="group" aria-label="Herramientas Doppler y modo M">
+          {TOOLS_STRIP.map((t) => {
+            const compat = isFreeToolCompatible(t.id, modality);
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={compat ? '' : 'tool-dim'}
+                data-tip={
+                  compat
+                    ? t.title
+                    : `${t.title} · requiere ${t.id === 'tapse' ? 'Modo M' : 'Doppler espectral (PW/CW/TDI)'}`
+                }
+                onClick={() => onArmTool(t.id)}
+                disabled={closed}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </Section>
   );
 }
@@ -710,7 +1206,10 @@ function CapturasWorksheet({
           <div className="capture-gallery" data-capture-gallery="worksheet">
             {s.captures.map((cap, idx) => (
               <figure key={cap.id} className="capture-thumb">
-                <img src={cap.dataUrl} alt={`Captura ${idx + 1}: ${formatCaptureCaption(cap, showIdentity)}`} />
+                <img
+                  src={cap.dataUrl}
+                  alt={`Captura ${idx + 1}: ${formatCaptureCaption(cap, showIdentity)}`}
+                />
                 <figcaption>
                   <span>{formatCaptureCaption(cap, showIdentity)}</span>
                   {!s.closed && (
@@ -839,7 +1338,11 @@ function MeasureList({
               <span className="m-title-line">
                 {m.label}
                 {badge && (
-                  <span className={`m-tech-dot ${badge.level}`} data-tip={badge.tip} aria-label={badge.label} />
+                  <span
+                    className={`m-tech-dot ${badge.level}`}
+                    data-tip={badge.tip}
+                    aria-label={badge.label}
+                  />
                 )}
               </span>
               <span className="m-meta-line">
@@ -875,1585 +1378,6 @@ function MeasureList({
           </div>
         );
       })}
-    </div>
-  );
-}
-
-/** Guided one-click automatic 2D measurements: PLAX linear dimensions, LV Simpson, LA volume (LAVI), and RV 2D. */
-function AutoEfPanel({
-  currentViewId,
-  displayedFrameId,
-  cineWindow,
-  showViewFeedback,
-  presetsEnabled,
-}: {
-  currentViewId: string | null;
-  displayedFrameId: number | null;
-  cineWindow: { startS: number; endS: number } | null;
-  showViewFeedback: boolean;
-  presetsEnabled: boolean;
-}) {
-  const s = useSimStore(
-    useShallow((st) => ({
-      measurements: st.measurements,
-      modality: st.modality,
-      frozen: st.frozen,
-      truth: st.truth,
-      respiration: st.patient.respiration,
-      closed: examClosed(st),
-      setModality: st.setModality,
-      setPatient: st.setPatient,
-      startPresetView: st.startPresetView,
-      toggleFreeze: st.toggleFreeze,
-      jumpCinePhase: st.jumpCinePhase,
-    })),
-  );
-  const [busy, setBusy] = useState<'plax' | 'lv' | 'la' | 'rv' | 'ivc' | null>(null);
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-
-  const summary = useMemo(
-    () => summarizeAutoEf(s.measurements, currentViewId, s.modality, showViewFeedback),
-    [s.measurements, currentViewId, s.modality, showViewFeedback],
-  );
-  const bsaM2 = s.truth?.bsaM2 && s.truth.bsaM2 > 0 ? s.truth.bsaM2 : null;
-  const lvmi = summary.plax.massG !== null && bsaM2 ? summary.plax.massG / bsaM2 : null;
-  const lavi = summary.la.volumeMl !== null && bsaM2 ? summary.la.volumeMl / bsaM2 : null;
-
-  const runIvc = async () => {
-    if (busy || s.closed) return;
-    setBusy('ivc');
-    setNotice(null);
-    try {
-      const res = await runAutoIvc();
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else if (res.measurementId === 'ivc-diameter-inspiration') {
-        const exp = summary.ivc.expCm;
-        const colText =
-          exp !== null && exp > 0
-            ? ` (colapso ${Math.max(0, (1 - res.valueCm / exp) * 100).toFixed(0)} %)`
-            : '';
-        setNotice({
-          kind: 'ok',
-          text: `VCI inspiración: ${res.valueCm.toFixed(2)} cm${colText}.`,
-        });
-      } else {
-        setNotice({
-          kind: 'ok',
-          text: `VCI espiración: ${res.valueCm.toFixed(2)} cm. Pulsa «Insp (olfateo)» y repite Auto-VCI para calcular el colapso y la PAD.`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al medir la VCI automáticamente.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const setRespirationLive = (resp: 'expiration' | 'inspiration') => {
-    if (s.closed) return;
-    setNotice(null);
-    if (s.frozen) s.toggleFreeze();
-    s.setPatient({ respiration: resp });
-  };
-
-  const runPlax = async () => {
-    if (busy || s.closed) return;
-    setBusy('plax');
-    setNotice(null);
-    try {
-      const res = await runAutoPlax();
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else {
-        const byId = new Map(res.calipers.map((c) => [c.measurementId, c.valueCm]));
-        const parts: string[] = [];
-        if (byId.has('lv-edd')) parts.push(`DTDVI ${byId.get('lv-edd')!.toFixed(1)} cm`);
-        if (byId.has('lvot-diameter')) parts.push(`TSVI ${byId.get('lvot-diameter')!.toFixed(2)} cm`);
-        if (byId.has('la-ap')) parts.push(`AI ${byId.get('la-ap')!.toFixed(1)} cm`);
-        setNotice({
-          kind: 'ok',
-          text: `PLAX: ${res.calipers.length} dimensiones trazadas${parts.length ? ` (${parts.join(' · ')})` : ''}.`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al calcular dimensiones PLAX.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const runLa = async () => {
-    if (busy || s.closed) return;
-    setBusy('la');
-    setNotice(null);
-    try {
-      const res = await runAutoLaVolume();
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else {
-        const idxText = bsaM2 ? ` · LAVI ${(res.volumeMl / bsaM2).toFixed(0)} mL/m²` : '';
-        const depthWarn = res.cutByDepth
-          ? ' ⚠ Fondo de AI recortado por profundidad: aumenta Profundidad.'
-          : '';
-        setNotice({
-          kind: 'ok',
-          text: `AI trazada en TS (${res.volumeMl.toFixed(0)} mL${idxText}).${depthWarn}`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al calcular el volumen de la AI.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const run = async (chamber: 'lv' | 'rv') => {
-    if (busy || s.closed) return;
-    setBusy(chamber);
-    setNotice(null);
-    try {
-      const res = await runAutoChamberVolume(chamber);
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else {
-        setNotice({
-          kind: 'ok',
-          text:
-            chamber === 'lv'
-              ? `VI trazado en TD y TS (FEVI ${res.efPct.toFixed(0)} %).`
-              : `VD trazado en TD y TS (FEVD ${res.efPct.toFixed(0)} %, CAF ${res.facPct.toFixed(0)} %${res.rvBasal ? `, basal ${res.rvBasal.valueCm.toFixed(1)} cm` : ''}).`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al calcular volumen automático.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const inspectFrame = (target: 'ed' | 'es', frameId: number) => {
-    if (s.closed) return;
-    if (!s.frozen) s.toggleFreeze();
-    s.jumpCinePhase(target, frameId);
-  };
-
-  const jumpPreset = (viewId: string) => {
-    if (s.closed || !presetsEnabled) return;
-    setNotice(null);
-    if (!summary.is2dReady) s.setModality('2d');
-    s.startPresetView(viewId);
-  };
-
-  const showQuickViewShortcuts =
-    presetsEnabled &&
-    showViewFeedback &&
-    summary.is2dReady &&
-    !summary.plax.viewReady &&
-    !summary.lv.viewReady &&
-    !summary.rv.viewReady &&
-    !summary.ivc.viewReady;
-  const showIvcPrompt =
-    presetsEnabled &&
-    showViewFeedback &&
-    summary.is2dReady &&
-    !summary.ivc.viewReady &&
-    !summary.ivc.hasResult;
-  const ivcExpInCine =
-    displayedFrameId === summary.ivc.expFrameId ||
-    isTimeInCineWindow(summary.ivc.expTimeS, cineWindow);
-  const ivcInspInCine =
-    displayedFrameId === summary.ivc.inspFrameId ||
-    isTimeInCineWindow(summary.ivc.inspTimeS, cineWindow);
-  const showBiplanePrompt =
-    presetsEnabled &&
-    showViewFeedback &&
-    summary.lv.a4cDone &&
-    !summary.lv.a2cDone &&
-    currentViewId !== 'a2c';
-
-  const showRvPrompt =
-    presetsEnabled &&
-    showViewFeedback &&
-    summary.is2dReady &&
-    !summary.rv.hasResult &&
-    !summary.rv.viewReady &&
-    summary.lv.hasResult;
-  const showPlaxPrompt =
-    presetsEnabled &&
-    showViewFeedback &&
-    summary.is2dReady &&
-    !summary.plax.viewReady &&
-    !summary.plax.hasResult;
-  const plaxEdInCine =
-    displayedFrameId === summary.plax.edFrameId ||
-    isTimeInCineWindow(summary.plax.edTimeS, cineWindow);
-  const plaxMidInCine =
-    displayedFrameId === summary.plax.midSysFrameId ||
-    isTimeInCineWindow(summary.plax.midSysTimeS, cineWindow);
-  const plaxEsInCine =
-    displayedFrameId === summary.plax.esFrameId ||
-    isTimeInCineWindow(summary.plax.esTimeS, cineWindow);
-  const lvA4cEdInCine =
-    summary.lv.a4c !== null &&
-    (displayedFrameId === summary.lv.a4c.edFrameId ||
-      isTimeInCineWindow(summary.lv.a4c.edTimeS, cineWindow));
-  const lvA4cEsInCine =
-    summary.lv.a4c !== null &&
-    (displayedFrameId === summary.lv.a4c.esFrameId ||
-      isTimeInCineWindow(summary.lv.a4c.esTimeS, cineWindow));
-  const lvA2cEdInCine =
-    summary.lv.a2c !== null &&
-    (displayedFrameId === summary.lv.a2c.edFrameId ||
-      isTimeInCineWindow(summary.lv.a2c.edTimeS, cineWindow));
-  const lvA2cEsInCine =
-    summary.lv.a2c !== null &&
-    (displayedFrameId === summary.lv.a2c.esFrameId ||
-      isTimeInCineWindow(summary.lv.a2c.esTimeS, cineWindow));
-  const lvEdInCine =
-    displayedFrameId === summary.lv.edFrameId || isTimeInCineWindow(summary.lv.edTimeS, cineWindow);
-  const lvEsInCine =
-    displayedFrameId === summary.lv.esFrameId || isTimeInCineWindow(summary.lv.esTimeS, cineWindow);
-  const laA4cInCine =
-    summary.la.a4c !== null &&
-    (displayedFrameId === summary.la.a4c.frameId ||
-      isTimeInCineWindow(summary.la.a4c.timeS, cineWindow));
-  const laA2cInCine =
-    summary.la.a2c !== null &&
-    (displayedFrameId === summary.la.a2c.frameId ||
-      isTimeInCineWindow(summary.la.a2c.timeS, cineWindow));
-  const laEsInCine =
-    displayedFrameId === summary.la.esFrameId || isTimeInCineWindow(summary.la.esTimeS, cineWindow);
-  const rvEdInCine =
-    displayedFrameId === summary.rv.edFrameId || isTimeInCineWindow(summary.rv.edTimeS, cineWindow);
-  const rvEsInCine =
-    displayedFrameId === summary.rv.esFrameId || isTimeInCineWindow(summary.rv.esTimeS, cineWindow);
-
-  const plaxCard = (
-    <div className="auto-ef-card" data-auto-ef="plax">
-      <div className="auto-ef-row-head">
-        <div className="auto-ef-chamber">
-          <span className="auto-ef-title">PLAX · Dimensiones 2D</span>
-          <span className="plane-pills" aria-label="Vista PLAX">
-            <span
-              className={`plane-pill${summary.plax.hasResult ? ' done' : summary.plax.viewReady ? ' here' : ''}`}
-            >
-              {summary.plax.hasResult ? '✓ PLAX' : 'PLAX'}
-            </span>
-          </span>
-        </div>
-        <div className="auto-ef-presets">
-          {showPlaxPrompt && (
-            <button
-              type="button"
-              className="ghost"
-              disabled={s.closed}
-              onClick={() => jumpPreset('plax')}
-              data-tip="Mueve la sonda a la vista paraesternal eje largo (PLAX)"
-            >
-              Ir a PLAX
-            </button>
-          )}
-          <button
-            type="button"
-            className={summary.plax.viewReady ? 'btn-primary-soft' : ''}
-            onClick={() => void runPlax()}
-            disabled={s.closed || busy !== null}
-            data-tip="Mide SIVd, DTDVI, PPd y raíz Ao en TD, TSVI ⌀ en mesosístole y DTSVI + AI en TS desde la imagen 2D"
-          >
-            {busy === 'plax' ? 'Midiendo…' : 'Auto-PLAX'}
-          </button>
-        </div>
-      </div>
-
-      {summary.plax.hasResult && (
-        <>
-          <div className="auto-ef-result-line">
-            <span className="auto-ef-primary">
-              {summary.plax.lvEddCm !== null
-                ? `DTDVI ${summary.plax.lvEddCm.toFixed(1)} cm`
-                : summary.plax.lvotCm !== null
-                  ? `TSVI ${summary.plax.lvotCm.toFixed(2)} cm`
-                  : 'PLAX medido'}
-              {summary.plax.fsPct !== null ? ` · FA ${summary.plax.fsPct.toFixed(0)} %` : ''}
-            </span>
-            <span className="auto-ef-metrics">
-              {lvmi !== null ? (
-                <span>IMVI {lvmi.toFixed(0)} g/m²</span>
-              ) : summary.plax.massG !== null ? (
-                <span>Masa {summary.plax.massG.toFixed(0)} g</span>
-              ) : null}
-              {summary.plax.rwt !== null && <span>GPR {summary.plax.rwt.toFixed(2)}</span>}
-            </span>
-          </div>
-          <div className="auto-ef-metrics">
-            {summary.plax.ivsdCm !== null && <span>SIVd {summary.plax.ivsdCm.toFixed(2)}</span>}
-            {summary.plax.lvpwdCm !== null && <span>PPd {summary.plax.lvpwdCm.toFixed(2)}</span>}
-            {summary.plax.lvEsdCm !== null && <span>DTSVI {summary.plax.lvEsdCm.toFixed(1)}</span>}
-            {summary.plax.lvotCm !== null && <span>TSVI {summary.plax.lvotCm.toFixed(2)}</span>}
-            {summary.plax.aoRootCm !== null && <span>Ao {summary.plax.aoRootCm.toFixed(1)}</span>}
-            {summary.plax.laApCm !== null && <span>AI {summary.plax.laApCm.toFixed(1)} cm</span>}
-          </div>
-          {(summary.plax.edFrameId !== null ||
-            summary.plax.midSysFrameId !== null ||
-            summary.plax.esFrameId !== null) && (
-            <div className="auto-ef-jump">
-              {summary.plax.edFrameId !== null && (
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.plax.edFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !plaxEdInCine}
-                  data-tip={
-                    plaxEdInCine
-                      ? 'Ver y ajustar SIVd, DTDVI, PPd y raíz Ao en TD'
-                      : 'El cuadro TD salió del bucle de cine actual'
-                  }
-                  onClick={() => inspectFrame('ed', summary.plax.edFrameId!)}
-                >
-                  Ver TD
-                </button>
-              )}
-              {summary.plax.midSysFrameId !== null && (
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.plax.midSysFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !plaxMidInCine}
-                  data-tip={
-                    plaxMidInCine
-                      ? 'Ver y ajustar el diámetro del TSVI en mesosístole'
-                      : 'El cuadro mesosistólico salió del bucle de cine actual'
-                  }
-                  onClick={() => inspectFrame('ed', summary.plax.midSysFrameId!)}
-                >
-                  Ver TSVI
-                </button>
-              )}
-              {summary.plax.esFrameId !== null && (
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.plax.esFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !plaxEsInCine}
-                  data-tip={
-                    plaxEsInCine
-                      ? 'Ver y ajustar DTSVI y diámetro AP de AI en TS'
-                      : 'El cuadro TS salió del bucle de cine actual'
-                  }
-                  onClick={() => inspectFrame('es', summary.plax.esFrameId!)}
-                >
-                  Ver TS
-                </button>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-
-  const laCard = (
-    <div className="auto-ef-card" data-auto-ef="la">
-      <div className="auto-ef-row-head">
-        <div className="auto-ef-chamber">
-          <span className="auto-ef-title">
-            AI · {summary.la.biplane ? 'Biplano' : 'Volumen'}
-          </span>
-          <span className="plane-pills" aria-label="Planos capturados de la AI">
-            <span
-              className={`plane-pill${summary.la.a4cDone ? ' done' : currentViewId === 'a4c' ? ' here' : ''}`}
-            >
-              {summary.la.a4cDone ? '✓ A4C' : 'A4C'}
-            </span>
-            <span
-              className={`plane-pill${summary.la.a2cDone ? ' done' : currentViewId === 'a2c' ? ' here' : ''}`}
-            >
-              {summary.la.a2cDone ? '✓ A2C' : 'A2C'}
-            </span>
-          </span>
-        </div>
-        <button
-          type="button"
-          className={summary.la.viewReady ? 'btn-primary-soft' : ''}
-          onClick={() => void runLa()}
-          disabled={s.closed || busy !== null}
-          data-tip="Traza el endocardio de la AI en TS (excluyendo orejuela y venas pulmonares) sobre A4C o A2C; repite en ambos para LAVI biplano"
-        >
-          {busy === 'la' ? 'Midiendo…' : 'Auto-Vol AI'}
-        </button>
-      </div>
-
-      {summary.la.hasResult && summary.la.volumeMl !== null && (
-        <>
-          <div className="auto-ef-result-line">
-            <span className="auto-ef-primary">
-              {lavi !== null
-                ? `LAVI ${lavi.toFixed(0)} mL/m²`
-                : `Vol AI ${summary.la.volumeMl.toFixed(0)} mL`}
-            </span>
-            <span className="auto-ef-metrics">
-              <span>Vol {summary.la.volumeMl.toFixed(0)} mL</span>
-              <span>{summary.la.biplane ? 'Biplano' : 'Monoplano'}</span>
-            </span>
-          </div>
-
-          {(summary.la.a4c || summary.la.a2c) && (
-            <div className="biplane-breakdown" aria-label="Desglose volumen AI A4C y A2C">
-              {([
-                {
-                  id: 'a4c' as const,
-                  label: 'A4C',
-                  plane: summary.la.a4c,
-                  inCine: laA4cInCine,
-                },
-                {
-                  id: 'a2c' as const,
-                  label: 'A2C',
-                  plane: summary.la.a2c,
-                  inCine: laA2cInCine,
-                },
-              ]).map(({ id, label, plane, inCine }) => (
-                <div key={id} className={`biplane-row${plane ? ' done' : ''}`}>
-                  <span className="bp-tag">{plane ? `✓ ${label}` : `○ ${label}`}</span>
-                  {plane ? (
-                    <>
-                      <span className="bp-vals">
-                        <b>{plane.volumeMl.toFixed(0)} mL</b>
-                        {plane.areaCm2 !== null ? ` · ${plane.areaCm2.toFixed(1)} cm²` : ''}
-                        {plane.longAxisCm !== null ? ` · L ${plane.longAxisCm.toFixed(1)}` : ''}
-                      </span>
-                      <span className="bp-jumps">
-                        <button
-                          type="button"
-                          className={`ghost${displayedFrameId === plane.frameId ? ' active' : ''}`}
-                          disabled={s.closed || !inCine}
-                          data-tip={inCine ? `Ver AI ${label} en TS` : 'Fuera del cine actual'}
-                          onClick={() => inspectFrame('es', plane.frameId)}
-                        >
-                          TS
-                        </button>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="bp-pending">Pendiente para biplano</span>
-                      {presetsEnabled && showViewFeedback && !s.closed && (
-                        <button
-                          type="button"
-                          className="ghost bp-go"
-                          onClick={() => jumpPreset(id)}
-                        >
-                          Ir a {label}
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              ))}
-              {summary.la.lengthMismatch && (
-                <div className="biplane-warn" role="status">
-                  ⚠ Longitud AI dispar (&gt;0,5 cm) entre A4C y A2C (criterio ASE).
-                </div>
-              )}
-            </div>
-          )}
-
-          {!summary.la.a4c && !summary.la.a2c && summary.la.esFrameId !== null && (
-            <div className="auto-ef-jump">
-              <button
-                type="button"
-                className={`ghost${displayedFrameId === summary.la.esFrameId ? ' active' : ''}`}
-                disabled={s.closed || !laEsInCine}
-                data-tip={
-                  laEsInCine
-                    ? 'Inspeccionar contorno de la AI en TS'
-                    : 'El cuadro TS salió del bucle de cine actual'
-                }
-                onClick={() => inspectFrame('es', summary.la.esFrameId!)}
-              >
-                Ver TS
-              </button>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-
-  const isInsp = s.respiration === 'inspiration';
-  const ivcCard = (
-    <div className="auto-ef-card" data-auto-ef="ivc">
-      <div className="auto-ef-row-head">
-        <div className="auto-ef-chamber">
-          <span className="auto-ef-title">VCI · Presión AD</span>
-          <span className="plane-pills" aria-label="Fases respiratorias de VCI">
-            <span
-              className={`plane-pill${summary.ivc.expCm !== null ? ' done' : summary.ivc.viewReady && !isInsp ? ' here' : ''}`}
-            >
-              {summary.ivc.expCm !== null ? '✓ Esp' : 'Esp'}
-            </span>
-            <span
-              className={`plane-pill${summary.ivc.inspCm !== null ? ' done' : summary.ivc.viewReady && isInsp ? ' here' : ''}`}
-            >
-              {summary.ivc.inspCm !== null ? '✓ Insp' : 'Insp'}
-            </span>
-          </span>
-        </div>
-        <div className="auto-ef-presets">
-          {showIvcPrompt && (
-            <button
-              type="button"
-              className="ghost"
-              disabled={s.closed}
-              onClick={() => jumpPreset('subcostal-ivc')}
-              data-tip="Mueve la sonda a la vista subcostal VCI en eje largo"
-            >
-              Ir a VCI
-            </button>
-          )}
-          <button
-            type="button"
-            className={summary.ivc.viewReady ? 'btn-primary-soft' : ''}
-            onClick={() => void runIvc()}
-            disabled={s.closed || busy !== null}
-            data-tip="Mide el lumen de la VCI en el cuadro actual (espiración o inspiración/olfateo) para estimar el colapso y la PAD"
-          >
-            {busy === 'ivc' ? 'Midiendo…' : 'Auto-VCI'}
-          </button>
-        </div>
-      </div>
-
-      {(summary.ivc.viewReady || (summary.ivc.expCm !== null && summary.ivc.inspCm === null)) &&
-        !s.closed && (
-          <div className="auto-ef-jump">
-            <button
-              type="button"
-              className={!isInsp ? 'ghost active' : 'ghost'}
-              onClick={() => setRespirationLive('expiration')}
-              data-tip="Poner al paciente en espiración (VCI basal máxima)"
-            >
-              Espiración
-            </button>
-            <button
-              type="button"
-              className={
-                isInsp
-                  ? 'ghost active'
-                  : summary.ivc.expCm !== null && summary.ivc.inspCm === null
-                    ? 'btn-primary-soft'
-                    : 'ghost'
-              }
-              onClick={() => setRespirationLive('inspiration')}
-              data-tip="Simular inspiración brusca (olfateo) para medir el colapso inspiratorio de la VCI"
-            >
-              Insp (olfateo)
-            </button>
-          </div>
-        )}
-
-      {summary.ivc.hasResult && (
-        <>
-          <div className="auto-ef-result-line">
-            <span className="auto-ef-primary">
-              {summary.ivc.rapMmHg !== null
-                ? `PAD ${summary.ivc.rapMmHg} mmHg`
-                : `VCI ${summary.ivc.inspCm?.toFixed(2)} cm`}
-              {summary.ivc.collapsePct !== null
-                ? ` · Colapso ${summary.ivc.collapsePct.toFixed(0)} %`
-                : ''}
-            </span>
-            <span className="auto-ef-metrics">
-              {summary.ivc.expCm !== null && <span>Esp {summary.ivc.expCm.toFixed(2)} cm</span>}
-              {summary.ivc.inspCm !== null && <span>Insp {summary.ivc.inspCm.toFixed(2)} cm</span>}
-            </span>
-          </div>
-          {(summary.ivc.expFrameId !== null || summary.ivc.inspFrameId !== null) && (
-            <div className="auto-ef-jump">
-              {summary.ivc.expFrameId !== null && (
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.ivc.expFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !ivcExpInCine}
-                  data-tip={
-                    ivcExpInCine
-                      ? 'Ver caliper VCI en espiración'
-                      : 'El cuadro espiratorio salió del cine actual'
-                  }
-                  onClick={() => inspectFrame('ed', summary.ivc.expFrameId!)}
-                >
-                  Ver Esp
-                </button>
-              )}
-              {summary.ivc.inspFrameId !== null && (
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.ivc.inspFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !ivcInspInCine}
-                  data-tip={
-                    ivcInspInCine
-                      ? 'Ver caliper VCI en inspiración'
-                      : 'El cuadro inspiratorio salió del cine actual'
-                  }
-                  onClick={() => inspectFrame('ed', summary.ivc.inspFrameId!)}
-                >
-                  Ver Insp
-                </button>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-
-  const onPlaxFirst = showViewFeedback && currentViewId === 'plax';
-  const onIvcFirst = showViewFeedback && currentViewId === 'subcostal-ivc';
-
-  return (
-    <div className="auto-ef">
-      {onPlaxFirst && plaxCard}
-      {onIvcFirst && ivcCard}
-
-      {/* LV chamber block */}
-      <div className="auto-ef-card" data-auto-ef="lv">
-        <div className="auto-ef-row-head">
-          <div className="auto-ef-chamber">
-            <span className="auto-ef-title">
-              VI · {summary.lv.biplane ? 'Simpson biplano' : 'Simpson'}
-            </span>
-            <span className="plane-pills" aria-label="Planos capturados del VI">
-              <span
-                className={`plane-pill${summary.lv.a4cDone ? ' done' : currentViewId === 'a4c' ? ' here' : ''}`}
-              >
-                {summary.lv.a4cDone ? '✓ A4C' : 'A4C'}
-              </span>
-              <span
-                className={`plane-pill${summary.lv.a2cDone ? ' done' : currentViewId === 'a2c' ? ' here' : ''}`}
-              >
-                {summary.lv.a2cDone ? '✓ A2C' : 'A2C'}
-              </span>
-            </span>
-          </div>
-          <button
-            type="button"
-            className={summary.lv.viewReady ? 'btn-primary-soft' : ''}
-            onClick={() => void run('lv')}
-            disabled={s.closed || busy !== null}
-            data-tip="Traza el endocardio del VI en TD y TS sobre A4C o A2C; repite en ambos planos para Simpson biplano"
-          >
-            {busy === 'lv' ? 'Midiendo…' : 'Auto-FE VI'}
-          </button>
-        </div>
-
-        {summary.lv.hasResult &&
-          summary.lv.efPct !== null &&
-          summary.lv.edvMl !== null &&
-          summary.lv.esvMl !== null &&
-          summary.lv.svMl !== null && (
-            <>
-              <div className="auto-ef-result-line">
-                <span className="auto-ef-primary">FEVI {summary.lv.efPct.toFixed(0)} %</span>
-                <span className="auto-ef-metrics">
-                  <span>VTD {summary.lv.edvMl.toFixed(0)}</span>
-                  <span>VTS {summary.lv.esvMl.toFixed(0)}</span>
-                  <span>VS {summary.lv.svMl.toFixed(0)} mL</span>
-                </span>
-              </div>
-
-              {/* Explicit A4C & A2C component breakdown so biplane provenance is crystal clear */}
-              {(summary.lv.a4c || summary.lv.a2c) && (
-                <div className="biplane-breakdown" aria-label="Desglose Simpson A4C y A2C">
-                  {([
-                    {
-                      id: 'a4c' as const,
-                      label: 'A4C',
-                      plane: summary.lv.a4c,
-                      edIn: lvA4cEdInCine,
-                      esIn: lvA4cEsInCine,
-                    },
-                    {
-                      id: 'a2c' as const,
-                      label: 'A2C',
-                      plane: summary.lv.a2c,
-                      edIn: lvA2cEdInCine,
-                      esIn: lvA2cEsInCine,
-                    },
-                  ]).map(({ id, label, plane, edIn, esIn }) => (
-                    <div key={id} className={`biplane-row${plane ? ' done' : ''}`}>
-                      <span className="bp-tag">{plane ? `✓ ${label}` : `○ ${label}`}</span>
-                      {plane ? (
-                        <>
-                          <span className="bp-vals">
-                            {plane.edvMl.toFixed(0)}/{plane.esvMl.toFixed(0)} mL ·{' '}
-                            <b>{plane.efPct.toFixed(0)}%</b>
-                            {plane.edLengthCm !== null ? ` · L ${plane.edLengthCm.toFixed(1)}` : ''}
-                          </span>
-                          <span className="bp-jumps">
-                            <button
-                              type="button"
-                              className={`ghost${displayedFrameId === plane.edFrameId ? ' active' : ''}`}
-                              disabled={s.closed || !edIn}
-                              data-tip={edIn ? `Ver ${label} en TD` : 'Fuera del cine actual'}
-                              onClick={() => inspectFrame('ed', plane.edFrameId)}
-                            >
-                              TD
-                            </button>
-                            <button
-                              type="button"
-                              className={`ghost${displayedFrameId === plane.esFrameId ? ' active' : ''}`}
-                              disabled={s.closed || !esIn}
-                              data-tip={esIn ? `Ver ${label} en TS` : 'Fuera del cine actual'}
-                              onClick={() => inspectFrame('es', plane.esFrameId)}
-                            >
-                              TS
-                            </button>
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="bp-pending">Pendiente para biplano</span>
-                          {presetsEnabled && showViewFeedback && !s.closed && (
-                            <button
-                              type="button"
-                              className="ghost bp-go"
-                              onClick={() => jumpPreset(id)}
-                            >
-                              Ir a {label}
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  ))}
-                  {summary.lv.lengthMismatch && (
-                    <div className="biplane-warn" role="status">
-                      ⚠ Longitud dispar entre A4C y A2C: revisa acortamiento apical.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Fallback TD/TS buttons when LV Simpson was traced outside A4C/A2C (e.g. exam mode or A3C) */}
-              {!summary.lv.a4c &&
-                !summary.lv.a2c &&
-                summary.lv.edFrameId !== null &&
-                summary.lv.esFrameId !== null && (
-                  <div className="auto-ef-jump">
-                    <button
-                      type="button"
-                      className={`ghost${displayedFrameId === summary.lv.edFrameId ? ' active' : ''}`}
-                      disabled={s.closed || !lvEdInCine}
-                      data-tip={lvEdInCine ? 'Inspeccionar contorno en TD' : 'El cuadro TD salió del bucle de cine actual'}
-                      onClick={() => inspectFrame('ed', summary.lv.edFrameId!)}
-                    >
-                      Ver TD
-                    </button>
-                    <button
-                      type="button"
-                      className={`ghost${displayedFrameId === summary.lv.esFrameId ? ' active' : ''}`}
-                      disabled={s.closed || !lvEsInCine}
-                      data-tip={lvEsInCine ? 'Inspeccionar contorno en TS' : 'El cuadro TS salió del bucle de cine actual'}
-                      onClick={() => inspectFrame('es', summary.lv.esFrameId!)}
-                    >
-                      Ver TS
-                    </button>
-                    {showBiplanePrompt && (
-                      <button
-                        type="button"
-                        className="ghost auto-ef-next"
-                        disabled={s.closed}
-                        onClick={() => jumpPreset('a2c')}
-                        data-tip="Mueve la sonda a A2C para completar Simpson biplano"
-                      >
-                        + A2C biplano
-                      </button>
-                    )}
-                  </div>
-                )}
-            </>
-          )}
-      </div>
-
-      {/* LA chamber block */}
-      {laCard}
-
-      {/* RV chamber block */}
-      <div className="auto-ef-card" data-auto-ef="rv">
-        <div className="auto-ef-row-head">
-          <div className="auto-ef-chamber">
-            <span className="auto-ef-title">VD · 2D</span>
-            <span className="plane-pills" aria-label="Vista del VD">
-              <span
-                className={`plane-pill${summary.rv.hasResult ? ' done' : summary.rv.viewReady ? ' here' : ''}`}
-              >
-                {summary.rv.hasResult ? '✓ Enf. VD' : 'Enf. VD'}
-              </span>
-            </span>
-          </div>
-          <div className="auto-ef-presets">
-            {showRvPrompt && (
-              <button
-                type="button"
-                className="ghost"
-                disabled={s.closed}
-                onClick={() => jumpPreset('rv-focused')}
-                data-tip="Mueve la sonda a la vista apical enfocada en VD"
-              >
-                Ir a VD
-              </button>
-            )}
-            <button
-              type="button"
-              className={summary.rv.viewReady ? 'btn-primary-soft' : ''}
-              onClick={() => void run('rv')}
-              disabled={s.closed || busy !== null}
-              data-tip="Traza el endocardio del VD en TD y TS sobre apical enfocada en VD o A4C (calcula FEVD estimada y CAF)"
-            >
-              {busy === 'rv' ? 'Midiendo…' : 'Auto-FE VD'}
-            </button>
-          </div>
-        </div>
-
-        {summary.rv.hasResult && (
-          <>
-            {summary.rv.efPct !== null &&
-            summary.rv.edvMl !== null &&
-            summary.rv.esvMl !== null &&
-            summary.rv.svMl !== null ? (
-              <>
-                <div className="auto-ef-result-line">
-                  <span className="auto-ef-primary">
-                    FEVD {summary.rv.efPct.toFixed(0)} %
-                    {summary.rv.facPct !== null ? ` · CAF ${summary.rv.facPct.toFixed(0)} %` : ''}
-                  </span>
-                </div>
-                <div className="auto-ef-metrics">
-                  {summary.rv.basalCm !== null && (
-                    <span>Basal {summary.rv.basalCm.toFixed(1)} cm</span>
-                  )}
-                  <span>VTD {summary.rv.edvMl.toFixed(0)} mL</span>
-                  <span>VTS {summary.rv.esvMl.toFixed(0)} mL</span>
-                  <span>VS {summary.rv.svMl.toFixed(0)} mL</span>
-                  {summary.rv.edAreaCm2 !== null && summary.rv.esAreaCm2 !== null && (
-                    <span>
-                      Área {summary.rv.edAreaCm2.toFixed(1)}/{summary.rv.esAreaCm2.toFixed(1)} cm²
-                    </span>
-                  )}
-                </div>
-              </>
-            ) : summary.rv.basalCm !== null ? (
-              <div className="auto-ef-result-line">
-                <span className="auto-ef-primary">
-                  VD basal {summary.rv.basalCm.toFixed(1)} cm
-                </span>
-              </div>
-            ) : null}
-            {summary.rv.edFrameId !== null && summary.rv.esFrameId !== null && (
-              <div className="auto-ef-jump">
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.rv.edFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !rvEdInCine}
-                  data-tip={rvEdInCine ? 'Inspeccionar contorno y basal del VD en TD' : 'El cuadro TD salió del bucle de cine actual'}
-                  onClick={() => inspectFrame('ed', summary.rv.edFrameId!)}
-                >
-                  Ver TD
-                </button>
-                <button
-                  type="button"
-                  className={`ghost${displayedFrameId === summary.rv.esFrameId ? ' active' : ''}`}
-                  disabled={s.closed || !rvEsInCine}
-                  data-tip={rvEsInCine ? 'Inspeccionar contorno del VD en TS' : 'El cuadro TS salió del bucle de cine actual'}
-                  onClick={() => inspectFrame('es', summary.rv.esFrameId!)}
-                >
-                  Ver TS
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {!onPlaxFirst && plaxCard}
-      {!onIvcFirst && ivcCard}
-
-      {/* Contextual one-click helpers when not yet in 2D or target window */}
-      {!summary.is2dReady && !s.closed && (
-        <div className="auto-ef-helper">
-          <span>Las mediciones 2D requieren imagen 2D</span>
-          <button type="button" className="ghost" onClick={() => s.setModality('2d')}>
-            Volver a 2D
-          </button>
-        </div>
-      )}
-      {showQuickViewShortcuts && !s.closed && (
-        <div className="auto-ef-helper">
-          <span>Vista rápida:</span>
-          <div className="auto-ef-presets">
-            <button type="button" className="ghost" onClick={() => jumpPreset('plax')}>
-              PLAX
-            </button>
-            <button type="button" className="ghost" onClick={() => jumpPreset('a4c')}>
-              A4C
-            </button>
-            <button type="button" className="ghost" onClick={() => jumpPreset('a2c')}>
-              A2C
-            </button>
-            <button type="button" className="ghost" onClick={() => jumpPreset('rv-focused')}>
-              VD
-            </button>
-            <button type="button" className="ghost" onClick={() => jumpPreset('subcostal-ivc')}>
-              VCI
-            </button>
-          </div>
-        </div>
-      )}
-
-      {notice && (
-        <div
-          className={`auto-ef-notice ${notice.kind === 'err' ? 'err' : 'ok'}`}
-          role="status"
-        >
-          {notice.text}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface ViewDopplerPreset {
-  id: Exclude<DopplerTargetId, 'lvot'>;
-  label: string;
-  tip: string;
-}
-
-const VIEW_DOPPLER_TARGETS: Record<string, readonly ViewDopplerPreset[]> = {
-  a4c: [
-    {
-      id: 'mitral-inflow',
-      label: 'Mitral PW',
-      tip: 'Coloca el gate PW en las puntas mitrales para E/A y TD',
-    },
-    {
-      id: 'tdi-septal',
-      label: 'e′ sept TDI',
-      tip: 'Coloca el gate TDI en el anillo mitral septal',
-    },
-    {
-      id: 'tdi-lateral',
-      label: 'e′ lat TDI',
-      tip: 'Coloca el gate TDI en el anillo mitral lateral',
-    },
-    {
-      id: 'tapse',
-      label: 'TAPSE M',
-      tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
-    },
-    {
-      id: 'rv-s-prime',
-      label: 'S′ VD TDI',
-      tip: 'Coloca el gate TDI en el anillo tricuspídeo lateral para S′ VD',
-    },
-    {
-      id: 'tr-cw',
-      label: 'IT CW',
-      tip: 'Alinea el cursor CW a través de la válvula tricúspide para Vmax IT',
-    },
-  ],
-  'rv-focused': [
-    {
-      id: 'tapse',
-      label: 'TAPSE M',
-      tip: 'Alinea el cursor de Modo M con el anillo tricuspídeo lateral',
-    },
-    {
-      id: 'rv-s-prime',
-      label: 'S′ VD TDI',
-      tip: 'Coloca el gate TDI en el anillo tricuspídeo lateral para S′ VD',
-    },
-    {
-      id: 'tr-cw',
-      label: 'IT CW',
-      tip: 'Alinea el cursor CW a través de la válvula tricúspide para Vmax IT',
-    },
-  ],
-  a2c: [
-    {
-      id: 'mitral-inflow',
-      label: 'Mitral PW',
-      tip: 'Coloca el gate PW en las puntas mitrales',
-    },
-  ],
-  a3c: [
-    {
-      id: 'mitral-inflow',
-      label: 'Mitral PW',
-      tip: 'Coloca el gate PW en las puntas mitrales',
-    },
-  ],
-  'psax-av': [
-    {
-      id: 'rvot-pw',
-      label: 'TSVD PW',
-      tip: 'Coloca el gate PW en el TSVD / válvula pulmonar para medir el tiempo de aceleración pulmonar',
-    },
-    {
-      id: 'tr-cw',
-      label: 'IT CW',
-      tip: 'Alinea el cursor CW a través de la válvula tricúspide',
-    },
-  ],
-  'subcostal-4c': [
-    {
-      id: 'tr-cw',
-      label: 'IT CW',
-      tip: 'Alinea el cursor CW a través de la válvula tricúspide',
-    },
-  ],
-};
-
-/** Guided pure-2D Doppler/M-mode cursor placement + LVOT PW gate and 1-click Auto-VTI tracing. */
-function AutoLvotVtiPanel({
-  currentViewId,
-  showViewFeedback,
-  showIdentity,
-  presetsEnabled,
-}: {
-  currentViewId: string | null;
-  showViewFeedback: boolean;
-  showIdentity: boolean;
-  presetsEnabled: boolean;
-}) {
-  const s = useSimStore(
-    useShallow((st) => ({
-      measurements: st.measurements,
-      modality: st.modality,
-      truth: st.truth,
-      closed: examClosed(st),
-      startPresetView: st.startPresetView,
-      setModality: st.setModality,
-    })),
-  );
-  // Quantized gate status selector (re-renders only when gate structure or rounded angle actually changes)
-  const gateState = useHudStore(
-    useShallow((h) => {
-      const g = h.hud?.gate;
-      if (!g) {
-        return {
-          inLvot: false,
-          inRvot: false,
-          angleDeg: null as number | null,
-          tdiLateral: false,
-          tdiRv: false,
-        };
-      }
-      return {
-        inLvot: g.structure === Structure.Lvot || g.peakFlowStructure === Structure.Lvot,
-        inRvot:
-          g.structure === Structure.Rvot ||
-          g.structure === Structure.PulmonaryArtery ||
-          g.structure === Structure.PulmonaryValve ||
-          g.peakFlowStructure === Structure.Rvot ||
-          g.peakFlowStructure === Structure.PulmonaryArtery ||
-          g.peakFlowStructure === Structure.PulmonaryValve,
-        angleDeg: g.flowAngleDeg !== null ? Math.round(g.flowAngleDeg) : null,
-        tdiLateral:
-          g.structure === Structure.LvWallLateral || g.peakFlowStructure === Structure.LvWallLateral,
-        tdiRv:
-          g.structure === Structure.RvWall ||
-          g.structure === Structure.TricuspidAnnulus ||
-          g.peakFlowStructure === Structure.RvWall ||
-          g.peakFlowStructure === Structure.TricuspidAnnulus,
-      };
-    }),
-  );
-  const [busy, setBusy] = useState<
-    'gate' | 'vti' | 'av-vti' | DopplerTargetId | AutoStripMeasureTarget | 'tdi-lat-m' | null
-  >(null);
-  const [tdiSiteHint, setTdiSiteHint] = useState<'septal' | 'lateral' | 'rv'>('septal');
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-
-  const isPw = s.modality === 'pw';
-  const isCw = s.modality === 'cw';
-  const isTdi = s.modality === 'tdi';
-  const isMmode = s.modality === 'm-mode' || s.modality === 'cmm';
-  const onOutflowView = currentViewId === 'a5c' || currentViewId === 'a3c';
-  const onPulmonaryView = currentViewId === 'psax-av' || gateState.inRvot;
-  const viewTargets =
-    presetsEnabled && showViewFeedback && currentViewId
-      ? (VIEW_DOPPLER_TARGETS[currentViewId] ?? [])
-      : [];
-  const aggOfId = (id: string) => aggregateProtocolMeasurement(s.measurements, id);
-  const latestVti = useMemo(() => aggOfId('lvot-vti'), [s.measurements]);
-  const latestAvVti = useMemo(() => aggOfId('av-vti'), [s.measurements]);
-  const latestLvotDiam = useMemo(() => aggOfId('lvot-diameter'), [s.measurements]);
-  const latestE = useMemo(() => aggOfId('mitral-e'), [s.measurements]);
-  const latestA = useMemo(() => aggOfId('mitral-a'), [s.measurements]);
-  const latestEpSept = useMemo(() => aggOfId('e-prime-septal'), [s.measurements]);
-  const latestEpLat = useMemo(() => aggOfId('e-prime-lateral'), [s.measurements]);
-  const latestRvSPrime = useMemo(() => aggOfId('rv-s-prime'), [s.measurements]);
-  const latestRvotAt = useMemo(() => aggOfId('rvot-acceleration-time'), [s.measurements]);
-  const latestTr = useMemo(() => aggOfId('tr-vmax'), [s.measurements]);
-  const latestTapse = useMemo(() => aggOfId('tapse'), [s.measurements]);
-  const showAfHint = showIdentity && s.truth?.rhythm === 'atrial-fibrillation';
-  const dopplerSvMl =
-    latestVti && latestLvotDiam && latestLvotDiam.value > 0
-      ? strokeVolume(latestLvotDiam.value, latestVti.value)
-      : null;
-  const continuityAvaCm2 =
-    dopplerSvMl !== null && latestAvVti && latestAvVti.value > 0
-      ? dopplerSvMl / latestAvVti.value
-      : null;
-  const velocityRatio =
-    latestVti && latestAvVti && latestAvVti.value > 0 ? latestVti.value / latestAvVti.value : null;
-  const activeTdiSite: 'septal' | 'lateral' | 'rv' = gateState.tdiRv
-    ? 'rv'
-    : gateState.tdiLateral
-      ? 'lateral'
-      : tdiSiteHint;
-
-  const placeTarget = async (target: Exclude<DopplerTargetId, 'lvot'>) => {
-    if (busy || s.closed || !presetsEnabled) return;
-    if (target === 'tdi-septal') setTdiSiteHint('septal');
-    else if (target === 'tdi-lateral') setTdiSiteHint('lateral');
-    else if (target === 'rv-s-prime') setTdiSiteHint('rv');
-    setBusy(target);
-    setNotice(null);
-    try {
-      const res = await runAutoDopplerTarget(target);
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else {
-        setNotice({ kind: 'ok', text: res.summary });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al posicionar el cursor.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const measureStrip = async (
-    target: AutoStripMeasureTarget,
-    tdiSite?: 'septal' | 'lateral',
-  ) => {
-    if (busy || s.closed) return;
-    setBusy(target === 'tdi-e-prime' && tdiSite === 'lateral' ? 'tdi-lat-m' : target);
-    setNotice(null);
-    try {
-      const res = await runAutoStripMeasure(target, tdiSite ? { tdiSite } : undefined);
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else if (res.target === 'mitral-inflow') {
-        const parts = [`E ${Math.abs(res.e.velocityMps).toFixed(2)} m/s`];
-        if (res.a) parts.push(`A ${Math.abs(res.a.velocityMps).toFixed(2)} m/s`);
-        if (res.dt) parts.push(`TD ${Math.round(res.dt.dtMs)} ms`);
-        setNotice({ kind: 'ok', text: `Llenado mitral: ${parts.join(' · ')}.` });
-      } else if (res.target === 'tdi-e-prime') {
-        const siteLabel = tdiSite === 'lateral' ? 'lateral' : 'septal';
-        setNotice({
-          kind: 'ok',
-          text: `e′ ${siteLabel}: ${(Math.abs(res.ePrime.velocityMps) * 100).toFixed(1)} cm/s.`,
-        });
-      } else if (res.target === 'rv-s-prime') {
-        setNotice({
-          kind: 'ok',
-          text: `S′ tricuspídea (VD): ${(Math.abs(res.sPrime.velocityMps) * 100).toFixed(1)} cm/s.`,
-        });
-      } else if (res.target === 'rvot-at') {
-        setNotice({
-          kind: 'ok',
-          text: `TAc pulmonar: ${Math.round(res.atMs)} ms (VTI TSVD ${res.vtiCm.toFixed(1)} cm${res.atMs < 105 ? ' · <105 ms sugiere HTP' : ''}).`,
-        });
-      } else if (res.target === 'tr-vmax') {
-        setNotice({
-          kind: 'ok',
-          text: `Vmax IT ${Math.abs(res.vmax.velocityMps).toFixed(2)} m/s (ΔP ${res.vmax.peakGradientMmHg.toFixed(0)} mmHg).`,
-        });
-      } else {
-        setNotice({ kind: 'ok', text: `TAPSE ${res.tapseCm.toFixed(2)} cm.` });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al medir automáticamente sobre la tira.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const placeGate = async () => {
-    if (busy || s.closed || !presetsEnabled) return;
-    setBusy('gate');
-    setNotice(null);
-    try {
-      const res = await runAutoLvotGate();
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else {
-        setNotice({
-          kind: 'ok',
-          text: `Gate PW colocado en TSVI (${res.rCm.toFixed(1)} cm · ~${res.distToAvCm.toFixed(1)} cm proximal a VAo). Espera 1 latido y pulsa Auto-VTI.`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al colocar el gate en el TSVI.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const traceVti = async (id: 'lvot-vti' | 'av-vti' = 'lvot-vti') => {
-    if (busy || s.closed) return;
-    setBusy(id === 'av-vti' ? 'av-vti' : 'vti');
-    setNotice(null);
-    try {
-      const res = await runAutoSpectralVti(id);
-      if (!res.ok) {
-        setNotice({ kind: 'err', text: res.message });
-      } else if (id === 'av-vti') {
-        setNotice({
-          kind: 'ok',
-          text: `VTI VAo ${res.vtiCm.toFixed(1)} cm · Vmáx ${res.vmaxMps.toFixed(2)} m/s · ΔPm ${res.meanGradientMmHg.toFixed(0)} mmHg.`,
-        });
-      } else {
-        setNotice({
-          kind: 'ok',
-          text: `VTI TSVI ${res.vtiCm.toFixed(1)} cm (Vmáx ${Math.round(res.vmaxMps * 100)} cm/s).`,
-        });
-      }
-    } catch (e: unknown) {
-      setNotice({
-        kind: 'err',
-        text: e instanceof Error ? e.message : 'Error al trazar el VTI automático.',
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const goA5c = () => {
-    if (s.closed || !presetsEnabled) return;
-    setNotice(null);
-    if (s.modality !== '2d' && s.modality !== 'pw' && s.modality !== 'cw') s.setModality('2d');
-    s.startPresetView('a5c');
-  };
-
-  const showStripAutoCard = isPw || isTdi || isCw || isMmode;
-  const hasStripSummary = Boolean(
-    latestE || latestEpSept || latestEpLat || latestRvSPrime || latestRvotAt || latestTr || latestTapse,
-  );
-  const viewTargetsCard =
-    viewTargets.length > 0 || showStripAutoCard || hasStripSummary ? (
-      <div className="auto-ef-card" data-auto-doppler="view-targets">
-        {viewTargets.length > 0 && (
-          <>
-            <div className="auto-ef-row-head">
-              <span className="auto-ef-title">
-                Alineación rápida · {currentViewId ? viewLabel(currentViewId) : ''}
-              </span>
-            </div>
-            <div className="doppler-assist-grid">
-              {viewTargets.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className="ghost"
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void placeTarget(t.id)}
-                  data-tip={t.tip}
-                >
-                  {busy === t.id ? 'Buscando…' : t.label}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-        {showStripAutoCard && (
-          <div className="auto-lvot-actions" data-auto-strip="actions">
-            {isPw && (
-              <>
-                <button
-                  type="button"
-                  className={!onOutflowView && !onPulmonaryView ? 'btn-primary-soft' : 'ghost'}
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void measureStrip('mitral-inflow')}
-                  data-tip="Congela la tira PW y mide automáticamente onda E, onda A y tiempo de desaceleración (TD E)"
-                >
-                  {busy === 'mitral-inflow' ? 'Midiendo…' : 'Auto E / A / TD'}
-                </button>
-                <button
-                  type="button"
-                  className={onPulmonaryView ? 'btn-primary-soft' : 'ghost'}
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void measureStrip('rvot-at')}
-                  data-tip="Congela la tira PW en el TSVD y mide el tiempo de aceleración pulmonar (TAc < 105 ms apoya HTP)"
-                >
-                  {busy === 'rvot-at' ? 'Midiendo…' : 'Auto TAc pulm'}
-                </button>
-              </>
-            )}
-            {isTdi && (
-              <>
-                <button
-                  type="button"
-                  className={activeTdiSite === 'septal' ? 'btn-primary-soft' : 'ghost'}
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void measureStrip('tdi-e-prime', 'septal')}
-                  data-tip="Congela la tira TDI y detecta automáticamente el pico e′ septal"
-                >
-                  {busy === 'tdi-e-prime' ? 'Midiendo…' : 'Auto e′ sept'}
-                </button>
-                <button
-                  type="button"
-                  className={activeTdiSite === 'lateral' ? 'btn-primary-soft' : 'ghost'}
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void measureStrip('tdi-e-prime', 'lateral')}
-                  data-tip="Congela la tira TDI y detecta automáticamente el pico e′ lateral"
-                >
-                  {busy === 'tdi-lat-m' ? 'Midiendo…' : 'Auto e′ lat'}
-                </button>
-                <button
-                  type="button"
-                  className={activeTdiSite === 'rv' ? 'btn-primary-soft' : 'ghost'}
-                  disabled={s.closed || busy !== null}
-                  onClick={() => void measureStrip('rv-s-prime')}
-                  data-tip="Congela la tira TDI sobre el anillo tricuspídeo lateral y detecta el pico sistólico S′ VD"
-                >
-                  {busy === 'rv-s-prime' ? 'Midiendo…' : 'Auto S′ VD'}
-                </button>
-              </>
-            )}
-            {isCw && (
-              <button
-                type="button"
-                className={!onOutflowView ? 'btn-primary-soft' : 'ghost'}
-                disabled={s.closed || busy !== null}
-                onClick={() => void measureStrip('tr-vmax')}
-                data-tip="Congela la tira CW y detecta automáticamente la Vmax de la insuficiencia tricuspídea"
-              >
-                {busy === 'tr-vmax' ? 'Midiendo…' : 'Auto Vmáx IT'}
-              </button>
-            )}
-            {isMmode && (
-              <button
-                type="button"
-                className="btn-primary-soft"
-                disabled={s.closed || busy !== null}
-                onClick={() => void measureStrip('tapse')}
-                data-tip="Congela la tira Modo M y mide automáticamente la excursión sistólica del anillo tricuspídeo (TAPSE)"
-              >
-                {busy === 'tapse' ? 'Midiendo…' : 'Auto TAPSE'}
-              </button>
-            )}
-          </div>
-        )}
-        {hasStripSummary && (
-          <div className="auto-ef-metrics">
-            {latestE && (
-              <span>
-                E {latestE.value.toFixed(2)}
-                {latestE.isAveraged ? ` (${latestE.beatCount}l)` : ''}
-                {latestA ? ` / A ${latestA.value.toFixed(2)}` : ''} m/s
-              </span>
-            )}
-            {latestEpSept && (
-              <span>
-                e′s {latestEpSept.value.toFixed(1)}
-                {latestEpSept.isAveraged ? ` (${latestEpSept.beatCount}l)` : ''}
-              </span>
-            )}
-            {latestEpLat && (
-              <span>
-                e′l {latestEpLat.value.toFixed(1)}
-                {latestEpLat.isAveraged ? ` (${latestEpLat.beatCount}l)` : ''}
-              </span>
-            )}
-            {latestRvSPrime && (
-              <span>
-                S′ VD {latestRvSPrime.value.toFixed(1)} cm/s
-                {latestRvSPrime.isAveraged ? ` (${latestRvSPrime.beatCount}l)` : ''}
-              </span>
-            )}
-            {latestRvotAt && (
-              <span>
-                TAc {Math.round(latestRvotAt.value)} ms
-                {latestRvotAt.isAveraged ? ` (${latestRvotAt.beatCount}l)` : ''}
-              </span>
-            )}
-            {latestTr && (
-              <span>
-                IT {latestTr.value.toFixed(2)} m/s
-                {latestTr.isAveraged ? ` (${latestTr.beatCount}l)` : ''}
-              </span>
-            )}
-            {latestTapse && (
-              <span>
-                TAPSE {latestTapse.value.toFixed(2)} cm
-                {latestTapse.isAveraged ? ` (${latestTapse.beatCount}l)` : ''}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-    ) : null;
-
-  const lvotCard = (
-    <div className="auto-ef-card">
-      <div className="auto-ef-row-head">
-        <span className="auto-ef-title">TSVI / VAo · Continuidad</span>
-        {showViewFeedback && isPw && (
-          <span
-            className={`plane-pill${
-              gateState.inLvot && (gateState.angleDeg ?? 0) <= 20
-                ? ' done'
-                : gateState.inLvot
-                  ? ' here'
-                  : ''
-            }`}
-          >
-            {gateState.inLvot
-              ? `✓ Gate TSVI${gateState.angleDeg !== null ? ` · θ ${gateState.angleDeg}°` : ''}`
-              : 'Gate fuera TSVI'}
-          </span>
-        )}
-      </div>
-      <div className="auto-lvot-actions">
-        {presetsEnabled && showViewFeedback && !onOutflowView && (
-          <button
-            type="button"
-            className="ghost"
-            disabled={s.closed || busy !== null}
-            onClick={goA5c}
-            data-tip="Mueve la sonda a A5C para alinear el TSVI y la válvula aórtica"
-          >
-            Ir a A5C
-          </button>
-        )}
-        {presetsEnabled && (
-          <button
-            type="button"
-            className={onOutflowView && !isPw && !isCw ? 'btn-primary-soft' : ''}
-            disabled={s.closed || busy !== null}
-            onClick={() => void placeGate()}
-            data-tip="Detecta el TSVI en el corte 2D actual, coloca el gate PW a ~0,5 cm de la válvula aórtica y activa PW"
-          >
-            {busy === 'gate' ? 'Buscando…' : 'Gate TSVI'}
-          </button>
-        )}
-        <button
-          type="button"
-          className={isPw ? 'btn-primary-soft' : ''}
-          disabled={s.closed || busy !== null}
-          onClick={() => void traceVti('lvot-vti')}
-          data-tip="Congela la tira PW y traza automáticamente el latido sistólico más reciente (VTI TSVI)"
-        >
-          {busy === 'vti' ? 'Trazando…' : 'Auto-VTI TSVI'}
-        </button>
-      </div>
-      <div className="auto-lvot-actions">
-        {presetsEnabled && (
-          <button
-            type="button"
-            className={onOutflowView && latestVti && !isCw ? 'btn-primary-soft' : 'ghost'}
-            disabled={s.closed || busy !== null}
-            onClick={() => void placeTarget('av-cw')}
-            data-tip="Alinea el cursor CW a través de la válvula aórtica en A5C/A3C y activa Doppler continuo"
-          >
-            {busy === 'av-cw' ? 'Buscando…' : 'CW VAo'}
-          </button>
-        )}
-        <button
-          type="button"
-          className={isCw ? 'btn-primary-soft' : ''}
-          disabled={s.closed || busy !== null}
-          onClick={() => void traceVti('av-vti')}
-          data-tip="Congela la tira CW y traza automáticamente VTI, Vmáx y gradientes transaórticos"
-        >
-          {busy === 'av-vti' ? 'Trazando…' : 'Auto-VTI VAo'}
-        </button>
-      </div>
-
-      {(latestVti || latestAvVti) && (
-        <div className="auto-ef-result-line">
-          {continuityAvaCm2 !== null ? (
-            <span className="auto-ef-primary">AVA {continuityAvaCm2.toFixed(2)} cm²</span>
-          ) : latestAvVti ? (
-            <span className="auto-ef-primary">VTI VAo {latestAvVti.value.toFixed(1)} cm</span>
-          ) : (
-            <span className="auto-ef-primary">VTI TSVI {latestVti!.value.toFixed(1)} cm</span>
-          )}
-          <span className="auto-ef-metrics">
-            {latestVti && (
-              <span>
-                TSVI {latestVti.value.toFixed(1)} cm
-                {latestVti.isAveraged ? ` (${latestVti.beatCount}l)` : ''}
-              </span>
-            )}
-            {dopplerSvMl !== null && <span>VS {dopplerSvMl.toFixed(0)} mL</span>}
-            {latestAvVti && (
-              <span>
-                VAo {latestAvVti.value.toFixed(1)} cm
-                {latestAvVti.isAveraged ? ` (${latestAvVti.beatCount}l)` : ''}
-                {latestAvVti.latest.derived?.vmaxMps !== undefined
-                  ? ` · ${latestAvVti.latest.derived.vmaxMps.toFixed(2)} m/s`
-                  : ''}
-                {latestAvVti.latest.derived?.meanGradientMmHg !== undefined
-                  ? ` · ΔPm ${latestAvVti.latest.derived.meanGradientMmHg.toFixed(0)}`
-                  : ''}
-              </span>
-            )}
-            {velocityRatio !== null && <span>DVI {velocityRatio.toFixed(2)}</span>}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-
-  return (
-    <div className="auto-ef" data-auto-lvot="panel">
-      {showAfHint && (
-        <p className="small" role="note">
-          FA activa: mide 3–5 latidos distintos; se promedian automáticamente (ASE).
-        </p>
-      )}
-      {onOutflowView ? (
-        <>
-          {lvotCard}
-          {viewTargetsCard}
-        </>
-      ) : (
-        <>
-          {viewTargetsCard}
-          {lvotCard}
-        </>
-      )}
-
-      {notice && (
-        <div
-          className={`auto-ef-notice ${notice.kind === 'err' ? 'err' : 'ok'}`}
-          role="status"
-        >
-          {notice.text}
-        </div>
-      )}
     </div>
   );
 }
