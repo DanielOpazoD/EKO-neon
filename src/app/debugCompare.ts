@@ -5,7 +5,10 @@ import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 import { buildCaseModels, REST_PATIENT } from '@/simulator/anatomy/caseModels';
 import { scenePhysicsFor } from '@/simulator/renderer/scenePhysics';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
-import { createWebgl2Renderer } from '@/simulator/renderer/gpu/webgl2Renderer';
+import {
+  createWebgl2Renderer,
+  type Webgl2Renderer,
+} from '@/simulator/renderer/gpu/webgl2Renderer';
 import { enumDefinesGlsl } from '@/simulator/renderer/gpu/glslCommon';
 import {
   allocPolarFrame,
@@ -97,6 +100,25 @@ export interface BackendComparison {
 }
 
 type Tier = 'low' | 'medium' | 'high';
+
+let sharedGpu: Webgl2Renderer | null = null;
+
+/**
+ * Reuse one WebGL2 context across QA parity checks so software rasterisers (SwiftShader in CI)
+ * compile the B-mode and Deferred Doppler shader pipelines once instead of 18× per test run,
+ * avoiding GPU-process JIT memory exhaustion and WEBGL_lose_context churn.
+ */
+function acquireSharedGpu(): { gpu: Webgl2Renderer | null; reason: string } {
+  if (sharedGpu && !sharedGpu.contextLost) {
+    sharedGpu.resetSessionState();
+    return { gpu: sharedGpu, reason: 'ok' };
+  }
+  sharedGpu = null;
+  const g = createWebgl2Renderer(undefined, { allowSoftware: true });
+  if (!g.renderer) return { gpu: null, reason: g.reason };
+  sharedGpu = g.renderer;
+  return { gpu: sharedGpu, reason: 'ok' };
+}
 
 /** Canonical view of a case at a phase, with the scene the renderers take. */
 function canonicalSetup(
@@ -229,14 +251,13 @@ function compareFrames(
   const t0 = performance.now();
   cpu.render(scene, beam, spec, phase, fa);
   const cpuMs = performance.now() - t0;
-  const g = createWebgl2Renderer(undefined, { allowSoftware: true }); // the check runs on SwiftShader in Playwright
-  if (!g.renderer) return { ...empty, error: g.reason, cpuMs };
+  const { gpu, reason } = acquireSharedGpu(); // the check runs on SwiftShader in Playwright
+  if (!gpu) return { ...empty, error: reason, cpuMs };
   const fb = allocPolarFrame(spec);
-  g.renderer.render(scene, beam, spec, phase, fb); // warm-up (shader compile, textures)
+  gpu.render(scene, beam, spec, phase, fb); // warm-up (shader compile, textures)
   const t1 = performance.now();
-  g.renderer.render(scene, beam, spec, phase, fb);
+  gpu.render(scene, beam, spec, phase, fb);
   const gpuMs = performance.now() - t1;
-  g.renderer.dispose();
   const n = spec.lines * spec.samples;
   let sAgree = 0,
     tAgree = 0,
@@ -401,9 +422,8 @@ export function compareImageChain(
     gpuDisplayMs: 0,
     cpuConsoleMs: 0,
   };
-  const g = createWebgl2Renderer(undefined, { allowSoftware: true });
-  if (!g.renderer) return { ...result, error: g.reason };
-  const gpu = g.renderer;
+  const { gpu, reason } = acquireSharedGpu();
+  if (!gpu) return { ...result, error: reason };
   const refState = createConsoleState(c.seed);
   const mixState = createConsoleState(c.seed);
   const fFloat = allocPolarFrame(spec);
@@ -501,7 +521,6 @@ export function compareImageChain(
     tintMap: settings.tintMap,
     readback: gpuRgba,
   });
-  gpu.dispose();
   let pMax = 0,
     pOver = 0,
     colored = 0,
@@ -596,10 +615,9 @@ export function compareDeferredDoppler(
     kasaiWf: { ...emptyStats },
     kasaiMinWf: { ...emptyStats },
   };
-  const g = createWebgl2Renderer(undefined, { allowSoftware: true });
-  if (!g.renderer) return { ...empty, error: g.reason };
-  const gpu = g.renderer;
-  try {
+  const { gpu, reason } = acquireSharedGpu();
+  if (!gpu) return { ...empty, error: reason };
+  {
     const settings: AcquisitionSettings = { ...DEFAULT_ACQUISITION };
     const { c, heart, thorax, tables, beam, spec, scene } = canonicalSetup(
       viewId,
@@ -872,7 +890,5 @@ export function compareDeferredDoppler(
       kasaiWf,
       kasaiMinWf,
     };
-  } finally {
-    gpu.dispose();
   }
 }

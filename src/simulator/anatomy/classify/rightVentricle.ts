@@ -113,6 +113,7 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
   rvTmp[0] = dCavRv;
   if (dCavRv < 0) {
     const sc3 = 1 - 0.3 * s;
+    let rvTrab = false;
     if (dRv < 0) {
       // moderator band: tapering muscular trabecula from the lower septomarginal band (0.34 cm) to the base of
       // the anterior papillary muscle (0.28 cm)
@@ -138,25 +139,8 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
         return true;
       }
       // coarse RV endocardial trabecular meshwork along the free wall and RV apex (clear of septal gap)
-      const rrRaw = Math.hypot(x, y);
       const trabDepth = rvTrabecularDepth(z, L, az);
-      if (trabDepth > 0 && rrRaw > rIn + 0.12 && dRv + trabDepth > 0) {
-        const rrT = rrRaw || 1;
-        setSample(
-          out,
-          Tissue.Myocardium,
-          -fw,
-          x / rrT,
-          y / rrT,
-          0,
-          x / sc3,
-          y / sc3,
-          z,
-          0,
-          Structure.RvWall,
-        );
-        return true;
-      }
+      rvTrab = trabDepth > 0 && Math.hypot(x, y) > rIn + 0.12 && dRv + trabDepth > 0;
     }
     const rr = Math.hypot(x, y) || 1;
     // the supraventricular crest (decision 334): above the annulus the inflow column is atrium, and between it and the
@@ -183,21 +167,23 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
     }
     setSample(
       out,
-      Tissue.Blood,
-      dCavRv,
+      rvTrab ? Tissue.Myocardium : Tissue.Blood,
+      rvTrab ? -fw : dCavRv,
       x / rr,
       y / rr,
       0,
-      x / (1 - 0.3 * s),
-      y / (1 - 0.3 * s),
+      x / sc3,
+      y / sc3,
       z,
       0,
-      dRvot < dRvU
-        ? Structure.Rvot
-        : // the inflow column above the annulus is atrium (the annulus level itself since decisions 133 and 138)
-          dRv >= 0 && z <= zAnnulus
-          ? Structure.RaCavity
-          : Structure.RvCavity,
+      rvTrab
+        ? Structure.RvWall
+        : dRvot < dRvU
+          ? Structure.Rvot
+          : // the inflow column above the annulus is atrium (the annulus level itself since decisions 133 and 138)
+            dRv >= 0 && z <= zAnnulus
+            ? Structure.RaCavity
+            : Structure.RvCavity,
     );
     return true;
   }

@@ -22,6 +22,8 @@ const browser = await chromium.launch({
     '--enable-webgl',
     '--enable-unsafe-swiftshader',
     '--ignore-gpu-blocklist',
+    '--disable-gpu-watchdog',
+    '--disable-dev-shm-usage',
   ],
 });
 

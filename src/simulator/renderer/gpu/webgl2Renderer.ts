@@ -365,6 +365,14 @@ export class Webgl2Renderer implements RendererBackend {
     this.doppler.resetHistory();
   }
 
+  /** Reset transient history/present state so a shared QA renderer starts each parity check cleanly. */
+  resetSessionState(): void {
+    this.histValid = false;
+    this.packedFresh = false;
+    this.gbufferReady = false;
+    this.doppler.onGBufferResize();
+  }
+
   /**
    * Optional on-demand readback of the shaded Doppler ROI box for verification or freeze snapshots
    * (`ColorFieldDriver.readbackDeferredGpu`); `powOut` takes the colour power the CPU overlay blends like the present pass.

@@ -585,6 +585,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     dCavRv = smin(dRvU, dRvot, RV_OUTFLOW_BLEND_CM);
     float sc3 = 1.0 - 0.3 * sc;
     if (dCavRv < 0.0) {
+      bool rvTrab = false;
       if (dRv < 0.0) {
         float L = LV_LEN;
         float rIn = rvc.y, rOut = rvc.z;
@@ -601,13 +602,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
           setSample(s, T_MYO, dRp, vec3(x, y, 0.0), p, 0.0, S_RV_PAP);
           return true;
         }
-        float rrRaw = length(p.xy);
         float trabDepth = rvTrabecularDepth(z, L, az);
-        if (trabDepth > 0.0 && rrRaw > rIn + 0.12 && dRv + trabDepth > 0.0) {
-          float rrT = rrRaw == 0.0 ? 1.0 : rrRaw;
-          setSample(s, T_MYO, -fw, vec3(x / rrT, y / rrT, 0.0), vec3(x / sc3, y / sc3, z), 0.0, S_RV_WALL);
-          return true;
-        }
+        rvTrab = trabDepth > 0.0 && length(p.xy) > rIn + 0.12 && dRv + trabDepth > 0.0;
       }
       float rr = length(p.xy); if (rr == 0.0) rr = 1.0;
       // the supraventricular crest between the atrial inflow column and the outflow tract (decision 334)
@@ -616,7 +612,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
         setSample(s, T_MYO, -min(fw - dRvot, dRvot - dRvU), vec3(x / rr, y / rr, 0.0), p, 0.0, S_RV_WALL);
         return true;
       }
-      setSample(s, T_BLOOD, dCavRv, vec3(x / rr, y / rr, 0.0), vec3(x / sc3, y / sc3, z), 0.0, dRvot < dRvU ? S_RVOT : ((dRv >= 0.0 && z <= zAnnulus) ? S_RA_CAV : S_RV_CAV));
+      setSample(s, rvTrab ? T_MYO : T_BLOOD, rvTrab ? -fw : dCavRv, vec3(x / rr, y / rr, 0.0), vec3(x / sc3, y / sc3, z), 0.0, rvTrab ? S_RV_WALL : (dRvot < dRvU ? S_RVOT : ((dRv >= 0.0 && z <= zAnnulus) ? S_RA_CAV : S_RV_CAV)));
       return true;
     }
     // decision 367: the free wall ends at its tricuspid hinge
