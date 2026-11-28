@@ -39,6 +39,7 @@ import { createHeartMeshes } from './navigatorHeart';
 import { attachNavigatorInput } from './navigatorInput';
 import { buildProbe, updateFan } from './navigatorProbe';
 import { createReviewMarkers } from './navigatorReview';
+import { anteriorLiftAt } from './thoraxClearance';
 
 export { narrowPanelFovDeg, type NavigatorZoom };
 
@@ -70,6 +71,7 @@ export function mountNavigatorScene(
 ): () => void {
   let thorax: ThoraxModel | null = null;
   let heartFrame: HeartFrame | null = null;
+  let ribClearanceCm = 0;
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, stencil: true });
   const softwareGl = isSoftwareWebglContext(renderer.getContext());
   renderer.localClippingEnabled = true;
@@ -164,13 +166,14 @@ export function mountNavigatorScene(
     useSimStore.getState().setNavigatorReady(true);
     thorax = model.thorax;
     heartFrame = model.frame;
-    skin = buildSkin(model.thorax);
+    ribClearanceCm = model.ribClearanceCm ?? 0;
+    skin = buildSkin(model.thorax, ribClearanceCm);
     scene.add(skin);
-    skeleton = buildSkeleton(model.thorax);
+    skeleton = buildSkeleton(model.thorax, ribClearanceCm);
     scene.add(skeleton);
     ghost = buildHeartGhost(model);
     scene.add(ghost);
-    windowMarks = buildWindowMarks(model.thorax, model.windows);
+    windowMarks = buildWindowMarks(model.thorax, model.windows, ribClearanceCm);
     scene.add(windowMarks.group);
     rebuildBadges(windowMarks.badges);
     dirty = true;
@@ -423,13 +426,22 @@ export function mountNavigatorScene(
     shownPhasesReady = phasesReady;
     const pose = poseFromControl(thorax, st.probe);
     const beam = beamFrameFromPose(pose);
-    probe.position.set(pose.position.x, pose.position.y, pose.position.z);
+    const probeLiftZ = anteriorLiftAt(thorax, pose.position.x, ribClearanceCm);
+    const visualProbePos = {
+      x: pose.position.x,
+      y: pose.position.y,
+      z: pose.position.z + probeLiftZ,
+    };
+    probe.position.set(visualProbePos.x, visualProbePos.y, visualProbePos.z);
     basisLat.set(beam.lateral.x, beam.lateral.y, beam.lateral.z);
     basisNorm.set(beam.normal.x, beam.normal.y, beam.normal.z);
     basisFwd.set(beam.forward.x, beam.forward.y, beam.forward.z);
     basisMat.makeBasis(basisLat, basisNorm, basisFwd);
     probe.quaternion.setFromRotationMatrix(basisMat);
-    updateFan(fan, fanEdges, beam, st.settings.depthCm, st.settings.sectorDeg);
+    const visualBeam = probeLiftZ
+      ? { ...beam, origin: { x: beam.origin.x, y: beam.origin.y, z: beam.origin.z + probeLiftZ } }
+      : beam;
+    updateFan(fan, fanEdges, visualBeam, st.settings.depthCm, st.settings.sectorDeg);
     cutPlane.normal.set(beam.normal.x, beam.normal.y, beam.normal.z);
     cutPlane.constant = -(
       beam.normal.x * beam.origin.x +
@@ -456,7 +468,7 @@ export function mountNavigatorScene(
     review.sync(st.reviewMarkers, st.reviewSelectedId);
     review.group.visible = st.ui.reviewMode;
     if (layers.axes) {
-      axisOrigin.set(beam.origin.x, beam.origin.y, beam.origin.z);
+      axisOrigin.set(visualProbePos.x, visualProbePos.y, visualProbePos.z);
       setAxisEndpoints(beamAxis, beam.forward, st.settings.depthCm);
       setAxisEndpoints(elevAxis, beam.normal, 4);
       setAxisEndpoints(latAxis, beam.lateral, 4);
@@ -467,7 +479,7 @@ export function mountNavigatorScene(
     }
     if (windowMarks) {
       windowMarks.group.visible = layers.windows;
-      if (layers.windows) windowMarks.setActiveProbe(pose.position);
+      if (layers.windows) windowMarks.setActiveProbe(visualProbePos);
     }
     if (skin) {
       skin.visible = layers.skin;
@@ -489,7 +501,7 @@ export function mountNavigatorScene(
       .join(' ');
     if (el.dataset['drawn'] !== drawn) el.dataset['drawn'] = drawn;
     renderer.render(scene, camera);
-    syncWindowBadges(layers.windows && anatomy, pose.position);
+    syncWindowBadges(layers.windows && anatomy, visualProbePos);
     lastCostMs = performance.now() - now;
   };
   tick();

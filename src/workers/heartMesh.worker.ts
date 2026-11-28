@@ -13,6 +13,7 @@ import type { HeartFrame } from '@/simulator/anatomy/heartFrame';
 import type { ThoraxModel } from '@/simulator/anatomy/thoraxModel';
 import type { PatientState } from '@/simulator/anatomy/thoraxModel';
 import { canonicalControl, VIEW_TARGETS, type WindowId } from '@/simulator/windows/viewTargets';
+import { computeAnteriorRibClearanceCm } from '@/ui/navigator/thoraxClearance';
 
 /**
  * Builds the navigator's heart surfaces off the UI thread (decision 57). Extraction samples the implicit
@@ -52,6 +53,8 @@ export interface NavigatorModel {
   windows: WindowMark[];
   /** Named points of the anatomy (torso cm) the cut view labels when the plane passes near them (decision 137). */
   landmarks: { id: string; label: string; p: { x: number; y: number; z: number } }[];
+  /** Anterior clearance lift (cm, >= 0) so the 3D rib cage never clips the beating heart. */
+  ribClearanceCm: number;
 }
 
 /** Short names for the cut face; the landmark's own label otherwise. */
@@ -122,6 +125,9 @@ function buildAllPhases(
 ): void {
   const caseId = caseDef.id;
   const { heart, thorax, tables } = buildCaseModels(caseDef, patient);
+  const edPose = computeHeartPose(heart, cycleStateAt(tables, 0));
+  const sysPose = computeHeartPose(heart, cycleStateAt(tables, 0.28));
+  const ribClearanceCm = computeAnteriorRibClearanceCm(heart, thorax, [edPose, sysPose]);
   const model: NavigatorModel = {
     kind: 'model',
     caseId,
@@ -140,6 +146,7 @@ function buildAllPhases(
         label: SHORT_LABELS[l.id] ?? l.label,
         p: heartToTorso(heart.frame, l.p),
       })),
+    ribClearanceCm,
   };
   (self as unknown as Worker).postMessage(model);
   for (let i = 0; i < phases.length; i++) {
