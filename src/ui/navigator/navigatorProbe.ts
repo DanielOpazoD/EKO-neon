@@ -5,51 +5,48 @@ import type { BeamFrame } from '@/simulator/probe/pose';
 /** The transducer of the 3D navigator and the imaging sector it casts. */
 
 /**
- * Phased-array cardiac transducer. The footprint is taken from published probe specifications — 17×28 mm
- * on a GE M5S-D, 19×27 on a 3S-RS, 20×28 on an M4S-RS, 24×17 on an M3S — so the head is 2,85 cm along the
- * array (the imaging plane) by 1,90 cm in elevation, small enough to sit between two ribs. The length is
- * *not* a measured figure: no manufacturer sheet found gives it, so the 11,4 cm from the lens to the end of
- * the strain relief is plausible ergonomics (a barrel held like a thick pen), not a specification. Real probes also carry an index marker on
- * one side of the head and a tapered strain relief where the cable leaves the handle; here the marker is
- * also the pickable handle that rotates the probe, so it stays blue and grabbable on purpose.
- * Local frame: x lateral (marker side), y elevation, z ALONG THE BEAM, into the patient (the probe group's
- * third basis vector is beam.forward), so the lens sits at z = 0 and the whole body extends along −z.
+ * Phased-array cardiac transducer (GE M5S-D / 3S-RS proportions: 2.85 × 1.90 cm footprint).
+ * Local frame: x lateral (marker side), y elevation, z ALONG THE BEAM into the patient
+ * (the lens sits at z = 0 and the handle extends along −z).
  */
 export function buildProbe(): { probe: THREE.Group; marker: THREE.Group } {
   const probe = new THREE.Group();
-  // a clear-coated shell and lens (decision 202): the probe reads as moulded plastic under the room light
   const shell = new THREE.MeshPhysicalMaterial({
-    color: 0xdadfe4,
-    roughness: 0.45,
-    metalness: 0.04,
-    clearcoat: 0.55,
-    clearcoatRoughness: 0.3,
+    color: 0xe1e6ec,
+    roughness: 0.36,
+    metalness: 0.05,
+    clearcoat: 0.65,
+    clearcoatRoughness: 0.24,
+    envMapIntensity: 1.0,
   });
   const collar = new THREE.MeshStandardMaterial({
-    color: 0x8b939c,
-    roughness: 0.5,
-    metalness: 0.3,
+    color: 0x8b95a0,
+    roughness: 0.42,
+    metalness: 0.38,
   });
   const lens = new THREE.MeshPhysicalMaterial({
-    color: 0x1f2429,
-    roughness: 0.2,
-    clearcoat: 0.9,
-    clearcoatRoughness: 0.15,
+    color: 0x1a1f26,
+    roughness: 0.18,
+    clearcoat: 0.92,
+    clearcoatRoughness: 0.12,
   });
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x2a2e34, roughness: 0.8 });
-  // head: 2,8 × 1,8 cm footprint, the array running along x
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x262b32, roughness: 0.78 });
+
+  // Head: 2.85 × 1.9 cm footprint, phased array running along x
   const head = new THREE.Mesh(new RoundedBoxGeometry(2.85, 1.9, 1.5, 4, 0.3), shell);
   head.position.z = -0.76;
-  // the acoustic lens is convex, not flat: a shallow spherical cap flattened in elevation
+
+  // Convex acoustic lens cap
   const capR = 2.4;
   const lensMesh = new THREE.Mesh(
     new THREE.SphereGeometry(capR, 32, 12, 0, Math.PI * 2, 0, Math.asin(1.36 / capR)),
     lens,
   );
-  lensMesh.rotation.x = Math.PI / 2; // the cap sits around +y: a positive turn points it at +z, into the patient
-  lensMesh.scale.set(1, 1, 0.66); // scale is applied before the rotation, so local z becomes elevation: 1,8 cm
-  lensMesh.position.z = -capR + 0.04; // cap apex ends up 0.4 mm proud of the contact face
-  // shoulders: the head widens into the barrel instead of meeting it in a step
+  lensMesh.rotation.x = Math.PI / 2;
+  lensMesh.scale.set(1, 1, 0.66);
+  lensMesh.position.z = -capR + 0.04;
+
+  // Shoulder transition into ergonomic barrel
   const shoulder = new THREE.Mesh(
     new THREE.LatheGeometry(
       [
@@ -62,19 +59,20 @@ export function buildProbe(): { probe: THREE.Group; marker: THREE.Group } {
     ),
     shell,
   );
-  shoulder.rotation.x = -Math.PI / 2; // lathe axis (+y) → −z, out of the patient
-  shoulder.scale.set(1, 1, 0.72); // oval section, flattened in elevation
+  shoulder.rotation.x = -Math.PI / 2;
+  shoulder.scale.set(1, 1, 0.72);
   shoulder.position.z = -1.5;
-  // barrel with a waist where the fingers sit
+
+  // Ergonomic barrel with finger waist
   const rs = [1.04, 1.12, 1.1, 1.0, 0.93, 0.93, 1.0, 1.06, 1.02, 0.86];
   const profile = rs.map((r, i) => new THREE.Vector2(r, (i / (rs.length - 1)) * 7.4));
-  // close the far end: a lathe has no caps, and seen end-on the barrel is a black hole where the cable leaves
   profile.push(new THREE.Vector2(0.6, 7.5), new THREE.Vector2(0, 7.56));
   const handle = new THREE.Mesh(new THREE.LatheGeometry(profile, 32), shell);
   handle.rotation.x = -Math.PI / 2;
   handle.scale.set(1, 1, 0.74);
   handle.position.z = -2.65;
-  // strain relief: the tapered, ribbed collar that takes the pull of the cable
+
+  // Tapered, ribbed strain relief
   const relief = new THREE.Group();
   for (let i = 0; i < 5; i++) {
     const t = i / 4;
@@ -89,45 +87,73 @@ export function buildProbe(): { probe: THREE.Group; marker: THREE.Group } {
   reliefCone.rotation.x = -Math.PI / 2;
   reliefCone.position.z = -10.75;
   relief.add(reliefCone);
+
   const band = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.86, 0.32, 24), collar);
   band.rotation.x = Math.PI / 2;
   band.scale.set(1, 1, 0.78);
   band.position.z = -9.95;
+
+  // Extended, naturally draped cord curving gracefully out of frame instead of ending bluntly mid-air
   const cable = new THREE.Mesh(
     new THREE.TubeGeometry(
       new THREE.CatmullRomCurve3([
-        new THREE.Vector3(0, 0, -11.4),
-        new THREE.Vector3(0.2, 0.5, -13.2),
-        new THREE.Vector3(0.7, 2.2, -15.4),
+        new THREE.Vector3(0, 0, -11.35),
+        new THREE.Vector3(0.3, 0.9, -14.2),
+        new THREE.Vector3(1.6, 3.8, -18.5),
+        new THREE.Vector3(4.5, 9.5, -24.5),
+        new THREE.Vector3(9.5, 17.5, -31.0),
       ]),
-      14,
-      0.3,
+      28,
+      0.27,
       10,
       false,
     ),
     rubber,
   );
-  // index marker: the ridge and dot on the +x (screen-right) side, and the handle the mouse grabs to rotate
+
+  // Index marker (+x, screen-right orientation): pickable handle + luminous cyan 360°-readable accent
   const marker = new THREE.Group();
-  const ridge = new THREE.Mesh(
-    new RoundedBoxGeometry(0.26, 0.62, 1.0, 2, 0.1),
-    new THREE.MeshStandardMaterial({ color: 0x2f7fd0, roughness: 0.45 }),
-  );
-  ridge.position.set(1.42, 0, -0.8);
+  const markerMat = new THREE.MeshStandardMaterial({
+    color: 0x38bdf8,
+    emissive: 0x0c4a6e,
+    emissiveIntensity: 0.75,
+    roughness: 0.3,
+  });
+  const ridge = new THREE.Mesh(new RoundedBoxGeometry(0.32, 0.72, 1.15, 2, 0.12), markerMat);
+  ridge.position.set(1.44, 0, -0.82);
   const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.26, 16, 12),
-    new THREE.MeshStandardMaterial({ color: 0x5cb0ee, emissive: 0x123c5e, roughness: 0.35 }),
+    new THREE.SphereGeometry(0.3, 16, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0x7dd3fc,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.9,
+      roughness: 0.25,
+    }),
   );
-  dot.position.set(1.32, 0, -2.1);
-  marker.add(ridge, dot);
-  // the seam where the head meets the barrel, as on a moulded shell
+  dot.position.set(1.34, 0, -2.15);
+  // Subtle wrap-around cyan collar stripe on the +x hemisphere of the barrel so orientation reads from straight-on views
+  const stripe = new THREE.Mesh(
+    new THREE.TorusGeometry(1.06, 0.085, 8, 24, Math.PI * 0.58),
+    markerMat,
+  );
+  stripe.scale.set(1, 0.75, 1);
+  stripe.rotation.z = -Math.PI * 0.29;
+  stripe.position.z = -2.85;
+  marker.add(ridge, dot, stripe);
+
   const seam = new THREE.Mesh(new THREE.TorusGeometry(1.38, 0.035, 8, 48), collar);
   seam.scale.set(1, 0.72, 1);
   seam.position.z = -1.5;
+
   probe.add(head, lensMesh, shoulder, handle, relief, band, cable, marker, seam);
   return { probe, marker };
 }
 
+/**
+ * Updates the 3D ultrasound imaging fan with a vertex-colored radial falloff and
+ * orientation-coded border lines (bright sky-cyan on the +lateral index-marker side,
+ * cooler slate-cyan on the opposite side and far arc).
+ */
 export function updateFan(
   fan: THREE.Mesh,
   edges: THREE.LineSegments,
@@ -136,9 +162,8 @@ export function updateFan(
   sectorDeg: number,
 ): void {
   const half = (sectorDeg * Math.PI) / 360;
-  const verts: number[] = [];
   const o = beam.origin;
-  const n = 16;
+  const n = 20;
   const at = (a: number, r: number) => {
     const c = Math.cos(a),
       s = Math.sin(a);
@@ -148,26 +173,81 @@ export function updateFan(
       o.z + (beam.forward.z * c + beam.lateral.z * s) * r,
     ] as const;
   };
-  for (let i = 0; i < n; i++) {
-    const p0 = at(-half + (2 * half * i) / n, depth),
-      p1 = at(-half + (2 * half * (i + 1)) / n, depth);
-    verts.push(o.x, o.y, o.z, ...p0, ...p1);
+
+  // Multi-ring fan so vertex colors create a crisp near-to-far cyan beam gradient
+  const rings = 4;
+  const verts: number[] = [];
+  const cols: number[] = [];
+  const pushCol = (rFrac: number, aFrac: number) => {
+    // Brighter cyan near the probe and along the +lateral marker edge, fading gently at max depth
+    const markerBias = 0.5 + 0.5 * aFrac; // 0 on −lat, 1 on +lat (marker side)
+    const bright = (1 - 0.58 * rFrac) * (0.72 + 0.28 * markerBias);
+    cols.push(0.22 * bright, 0.74 * bright, 0.97 * bright);
+  };
+
+  for (let ri = 0; ri < rings; ri++) {
+    const r0 = (depth * ri) / rings;
+    const r1 = (depth * (ri + 1)) / rings;
+    const f0 = ri / rings;
+    const f1 = (ri + 1) / rings;
+    for (let i = 0; i < n; i++) {
+      const a0 = -half + (2 * half * i) / n;
+      const a1 = -half + (2 * half * (i + 1)) / n;
+      const af0 = -1 + (2 * i) / n;
+      const af1 = -1 + (2 * (i + 1)) / n;
+      const p00 = at(a0, r0);
+      const p10 = at(a1, r0);
+      const p01 = at(a0, r1);
+      const p11 = at(a1, r1);
+      if (ri === 0) {
+        verts.push(o.x, o.y, o.z, ...p01, ...p11);
+        pushCol(0, 0.5 * (af0 + af1));
+        pushCol(f1, af0);
+        pushCol(f1, af1);
+      } else {
+        verts.push(...p00, ...p01, ...p11, ...p00, ...p11, ...p10);
+        pushCol(f0, af0);
+        pushCol(f1, af0);
+        pushCol(f1, af1);
+        pushCol(f0, af0);
+        pushCol(f1, af1);
+        pushCol(f0, af1);
+      }
+    }
   }
+
   fan.geometry.dispose();
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   fan.geometry = g;
+
+  // Color-coded fan borders: +lateral (marker side) bright electric sky-blue, −lateral subtle slate-cyan
   const ev: number[] = [];
-  const l = at(-half, depth),
-    r = at(half, depth);
-  ev.push(o.x, o.y, o.z, ...l, o.x, o.y, o.z, ...r);
+  const ec: number[] = [];
+  const l = at(-half, depth);
+  const r = at(half, depth);
+  const mid = at(0, depth);
+  // −lateral border (dimmer slate-blue)
+  ev.push(o.x, o.y, o.z, ...l);
+  ec.push(0.45, 0.66, 0.82, 0.28, 0.44, 0.58);
+  // +lateral border (bright index-marker cyan!)
+  ev.push(o.x, o.y, o.z, ...r);
+  ec.push(0.35, 0.85, 1.0, 0.16, 0.72, 0.98);
+  // Subtle centerline beam ray
+  ev.push(o.x, o.y, o.z, ...mid);
+  ec.push(0.3, 0.72, 0.9, 0.12, 0.35, 0.48);
+  // Far depth arc
   for (let i = 0; i < n; i++) {
-    const p0 = at(-half + (2 * half * i) / n, depth),
-      p1 = at(-half + (2 * half * (i + 1)) / n, depth);
+    const p0 = at(-half + (2 * half * i) / n, depth);
+    const p1 = at(-half + (2 * half * (i + 1)) / n, depth);
+    const f = i / n;
     ev.push(...p0, ...p1);
+    ec.push(0.28 + 0.12 * f, 0.54 + 0.22 * f, 0.72 + 0.24 * f, 0.28 + 0.12 * f, 0.54 + 0.22 * f, 0.72 + 0.24 * f);
   }
   edges.geometry.dispose();
   const eg = new THREE.BufferGeometry();
   eg.setAttribute('position', new THREE.Float32BufferAttribute(ev, 3));
+  eg.setAttribute('color', new THREE.Float32BufferAttribute(ec, 3));
   edges.geometry = eg;
 }

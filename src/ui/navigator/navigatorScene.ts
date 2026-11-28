@@ -1,5 +1,6 @@
 import { loadCaseById } from '@/cases';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   navigatorLayers,
   segmentLayerOn,
@@ -17,7 +18,16 @@ import {
   navigatorStoreChanged,
   shouldRenderNavigatorFrame,
 } from './navigatorBudget';
-import { buildHeartGhost, buildSkeleton, buildSkin, buildWindowMarks } from './navigatorBody';
+import {
+  buildHeartGhost,
+  buildSkeleton,
+  buildSkin,
+  buildWindowMarks,
+  updateSkeletonStyle,
+  updateSkinOpacity,
+  type WindowBadgeAnchor,
+  type WindowMarksRig,
+} from './navigatorBody';
 import {
   createCameraRig,
   narrowPanelFovDeg,
@@ -44,11 +54,9 @@ export interface NavigatorSceneOptions {
 }
 
 /**
- * Builds the 3D navigator (torso, probe, fan, heart) in `el` and runs it until the returned cleanup: renderer, scene,
- * mesh worker, pointer handling and the render-on-change loop. Framework-free, so the React component only mounts it.
- * The pieces live in their own modules: the body (`navigatorBody`), the probe and its fan (`navigatorProbe`), the heart
- * surfaces (`navigatorHeart`), the review markers (`navigatorReview`), the camera (`navigatorCamera`) and the pointer
- * (`navigatorInput`); this module wires them to the stores and draws when something they show has changed.
+ * Builds the 3D navigator (torso, probe, fan, heart) in `el` and runs it until the returned cleanup:
+ * WebGL2 renderer with studio PMREM environment lighting, sculpted X-ray rib cage, physiological
+ * beating 3D heart meshes, safe-clamped acoustic window badges, and render-on-change budgeting.
  */
 export function mountNavigatorScene(
   el: HTMLDivElement,
@@ -60,26 +68,51 @@ export function mountNavigatorScene(
     camera: cameraStateRef,
   }: NavigatorSceneOptions,
 ): () => void {
-  // the models arrive from the mesh worker as data (NavigatorModel, audit B7): until then the scene has the
-  // probe, the fan and the lights, and the pose-dependent parts wait
   let thorax: ThoraxModel | null = null;
   let heartFrame: HeartFrame | null = null;
-  // transparent over the panel's own radial backdrop (decision 202): the scene reads as lit in a room, not on a card
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, stencil: true });
   const softwareGl = isSoftwareWebglContext(renderer.getContext());
-  renderer.localClippingEnabled = true; // the heart is cut by the imaging plane (decision 57)
+  renderer.localClippingEnabled = true;
   renderer.setPixelRatio(softwareGl ? 1 : Math.min(2, window.devicePixelRatio || 1));
   renderer.setClearColor(0x0f1319, 0);
   el.appendChild(renderer.domElement);
+
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(35, 1, 1, 300);
-  // render-on-change bookkeeping for the navigator (see tick)
+
+  // Studio PBR reflection environment: gives clearcoat tissue, vascular walls, translucent ribs,
+  // and the moulded probe shell authentic specular highlights and perceived 3D depth.
+  let pmrem: THREE.PMREMGenerator | null = null;
+  let envRT: THREE.WebGLRenderTarget | null = null;
+  if (!softwareGl) {
+    try {
+      pmrem = new THREE.PMREMGenerator(renderer);
+      const room = new RoomEnvironment();
+      envRT = pmrem.fromScene(room, 0.04);
+      scene.environment = envRT.texture;
+      scene.environmentIntensity = 0.46;
+      room.dispose();
+    } catch {
+      /* fallback cleanly to directional lights if PMREM fails on exotic drivers */
+    }
+  }
+
+  // Projected HTML overlay layer for acoustic window pills: always crisp, clamped inside safe margins
+  // away from Sonda|Cámara & RotationDial, and auto-faded when the probe rests directly on a window.
+  const badgeLayer = document.createElement('div');
+  badgeLayer.className = 'nav-win-layer';
+  badgeLayer.setAttribute('aria-hidden', 'true');
+  el.appendChild(badgeLayer);
+  const badgeEls: { anchor: WindowBadgeAnchor; el: HTMLDivElement }[] = [];
+
+  // render-on-change bookkeeping
   let dirty = true;
   let contextLost = false;
   let lastRenderAt = 0;
   let lastCostMs = 0;
   let shownPhaseIdx = -1;
   let shownPhasesReady = -1;
+
   // Hoisted scratch math objects so `tick()` allocates nothing per draw.
   const basisMat = new THREE.Matrix4();
   const basisLat = new THREE.Vector3();
@@ -87,31 +120,46 @@ export function mountNavigatorScene(
   const basisFwd = new THREE.Vector3();
   const axisOrigin = new THREE.Vector3();
   const axisTip = new THREE.Vector3();
-  // Filmic tone mapping and a rim light: the anatomy is read by its volume, and flat linear output made
-  // the myocardial shells look like cut-outs. The geometry itself stays the one the beam cuts — importing
-  // a sculpted heart mesh would look better and stop matching the image, which is the whole point.
+  const projVec = new THREE.Vector3();
+
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.15;
-  // a warm key, a cool fill and a stronger rim from behind (decision 202): skin and shells get a soft edge light
-  // instead of a flat front wash
-  scene.add(new THREE.HemisphereLight(0xe8eef5, 0x12161d, 0.85));
-  const key = new THREE.DirectionalLight(0xfff1e2, 1.25);
-  key.position.set(-14, 24, 40);
+  renderer.toneMappingExposure = 1.02;
+
+  // Warm medical studio key + cool anatomical fill + sculptural rim light
+  scene.add(new THREE.HemisphereLight(0xeef4fa, 0x131822, 0.68));
+  const key = new THREE.DirectionalLight(0xfff2e6, 1.18);
+  key.position.set(-16, 22, 38);
   scene.add(key);
-  const rim = new THREE.DirectionalLight(0xdcecff, 1.2); // behind and above: separates the shells from the background
-  rim.position.set(-8, 12, -14);
+  const rim = new THREE.DirectionalLight(0xd4e8ff, 1.32);
+  rim.position.set(-10, 14, -18);
   scene.add(rim);
-  const fill = new THREE.DirectionalLight(0x8fb2e6, 0.42);
-  fill.position.set(22, -8, 28);
+  const fill = new THREE.DirectionalLight(0x9abbe8, 0.44);
+  fill.position.set(24, -10, 26);
   scene.add(fill);
 
   // ---- body (built when the navigator model arrives) ----
   let skin: THREE.Mesh | null = null;
   let skeleton: THREE.Group | null = null;
   let ghost: THREE.Group | null = null;
-  let windowMarks: THREE.Group | null = null;
-  // the imaging plane doubles as a clipping plane: the 3D heart is split exactly where the beam cuts
+  let windowMarks: WindowMarksRig | null = null;
   const cutPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+  const rebuildBadges = (anchors: WindowBadgeAnchor[]) => {
+    badgeLayer.textContent = '';
+    badgeEls.length = 0;
+    for (const a of anchors) {
+      const div = document.createElement('div');
+      div.className = 'nav-win-badge';
+      const dot = document.createElement('i');
+      dot.style.background = a.colorHex;
+      const span = document.createElement('span');
+      span.textContent = a.label;
+      div.append(dot, span);
+      badgeLayer.appendChild(div);
+      badgeEls.push({ anchor: a, el: div });
+    }
+  };
+
   const onModel = (model: NavigatorModel) => {
     useSimStore.getState().setNavigatorReady(true);
     thorax = model.thorax;
@@ -123,24 +171,18 @@ export function mountNavigatorScene(
     ghost = buildHeartGhost(model);
     scene.add(ghost);
     windowMarks = buildWindowMarks(model.thorax, model.windows);
-    scene.add(windowMarks);
+    scene.add(windowMarks.group);
+    rebuildBadges(windowMarks.badges);
     dirty = true;
   };
-  // 0.26 cm and ten phases: extraction costs 553 ms per phase at this step against 2171 ms at 0.20, so the
-  // whole beat is ready in ~5.5 s of worker time with the first phase on screen in half a second. The
-  // finer grid left fewer black facets (3.2% of folded vertices on the RV wall against 4.5% here), but a
-  // heart that stands still beside a beating image gives the model away far more than half a point of
-  // facets (decisions 67 and 68).
-  const MESH_PHASES = Array.from({ length: 10 }, (_, i) => i / 10);
-  // surfaces extracted from the same implicit model the beam samples, so navigator and image cannot disagree
+
+  // 16 cardiac phases (~19 Hz geometric beat): fluid contraction while staying fast via thoracic-aorta reuse
+  const MESH_PHASES = Array.from({ length: 16 }, (_, i) => i / 16);
   const heart = createHeartMeshes(scene, cutPlane, MESH_PHASES.length);
-  // extraction samples the implicit model hundreds of thousands of times: off the UI thread, with the
-  // ghost showing until the surfaces arrive
   const meshWorker = new Worker(new URL('../../workers/heartMesh.worker.ts', import.meta.url), {
     type: 'module',
   });
   meshWorker.onerror = (e) => {
-    // the ghost stays; the image is unaffected (it does not use these meshes)
     console.warn('heart mesh worker failed to load; keeping the schematic heart', e.message);
   };
   meshWorker.onmessage = (ev: MessageEvent<MeshReply | MeshError | NavigatorModel>) => {
@@ -152,7 +194,7 @@ export function mountNavigatorScene(
       console.warn('heart mesh extraction failed; keeping the schematic heart', ev.data.error);
       return;
     }
-    if (!heartFrame) return; // the model always precedes the meshes
+    if (!heartFrame) return;
     heart.addPhase(ev.data, heartFrame);
     if (ghost) ghost.visible = false;
     dirty = true;
@@ -163,37 +205,45 @@ export function mountNavigatorScene(
     stepCm: 0.26,
     phases: MESH_PHASES,
   } satisfies MeshRequest);
+
   // examination axes: beam axis, elevation normal and the in-plane lateral direction
   const axisGroup = new THREE.Group();
   const axisLine = (color: number): THREE.Line =>
     new THREE.Line(
       new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }),
     );
   const beamAxis = axisLine(0xffc857);
   const elevAxis = axisLine(0x7ce8a0);
   const latAxis = axisLine(0x5cc8ff);
   axisGroup.add(beamAxis, elevAxis, latAxis);
   scene.add(axisGroup);
-  // review markers placed on the model (decision 135)
   const review = createReviewMarkers(scene);
 
-  // ---- probe ----
+  // ---- probe & luminous vertex-colored acoustic fan ----
   const { probe, marker } = buildProbe();
   scene.add(probe);
   const fanMat = new THREE.MeshBasicMaterial({
-    color: 0x5cc8ff,
+    vertexColors: true,
     transparent: true,
-    opacity: 0.14,
+    opacity: 0.34,
     side: THREE.DoubleSide,
     depthWrite: false,
+    blending: THREE.AdditiveBlending,
   });
   const fan = new THREE.Mesh(new THREE.BufferGeometry(), fanMat);
+  fan.renderOrder = 4;
   scene.add(fan);
   const fanEdges = new THREE.LineSegments(
     new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: 0x5cc8ff, transparent: true, opacity: 0.6 }),
+    new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    }),
   );
+  fanEdges.renderOrder = 5;
   scene.add(fanEdges);
 
   // ---- camera / interaction ----
@@ -241,7 +291,6 @@ export function mountNavigatorScene(
   const resize = () => {
     const rawW = el.clientWidth;
     const rawH = el.clientHeight;
-    // Ignore collapsed/hidden mobile layout sizes instead of wiping the WebGL backing store.
     if (lastW > 0 && (rawW <= 0 || rawH <= 0)) return;
     const w = rawW > 0 ? rawW : 300;
     const h = rawH > 0 ? rawH : 300;
@@ -250,13 +299,10 @@ export function mountNavigatorScene(
     lastH = h;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
-    // a tall, narrow panel (the exam's rail, torso alone, decision 256) widens the vertical field so the chest keeps
-    // the width it has in a panel half as tall instead of filling the view with two ribs
     camera.fov = narrowPanelFovDeg(camera.aspect);
     camera.updateProjectionMatrix();
     dirty = true;
     forceImmediate = true;
-    // Repaint synchronously when visible so resizing from mobile/collapsed never leaves a black frame.
     if (!contextLost && !document.hidden && rawW > 0 && rawH > 0) {
       renderer.render(scene, camera);
     }
@@ -266,8 +312,6 @@ export function mountNavigatorScene(
   resize();
 
   let raf = 0;
-  // The navigator renders strictly when something it shows has changed, paced by render cost and
-  // software-WebGL budget so it never starves the simulator or main thread.
   const unsubHover = useSegmentHover.subscribe(() => {
     dirty = true;
   });
@@ -288,6 +332,55 @@ export function mountNavigatorScene(
     attr.setXYZ(0, axisOrigin.x, axisOrigin.y, axisOrigin.z);
     attr.setXYZ(1, axisTip.x, axisTip.y, axisTip.z);
     attr.needsUpdate = true;
+  };
+
+  /** Projects acoustic window micro-badges with safe margins and probe-proximity auto-fade. */
+  const syncWindowBadges = (
+    visible: boolean,
+    probePos: { x: number; y: number; z: number },
+  ): void => {
+    badgeLayer.style.display = visible ? 'block' : 'none';
+    if (!visible || !badgeEls.length || lastW <= 0 || lastH <= 0) return;
+    const padX = 6;
+    const topSafeY = 44; // clears top-left Sonda|Cámara pill
+    const dialSafeLeft = lastW - 96; // clears top-right RotationDial
+    const dialSafeBottom = 94;
+
+    for (const item of badgeEls) {
+      const a = item.anchor;
+      const dist = Math.hypot(
+        a.anchor.x - probePos.x,
+        a.anchor.y - probePos.y,
+        a.anchor.z - probePos.z,
+      );
+      // Hide badge when probe sits directly over that window so it never blocks the handle or marker
+      if (dist < 3.4) {
+        item.el.style.opacity = '0';
+        continue;
+      }
+      projVec.copy(a.anchor);
+      projVec.y += a.window === 'subcostal' ? -1.2 : 0.9;
+      projVec.project(camera);
+      if (projVec.z < -1 || projVec.z > 1) {
+        item.el.style.opacity = '0';
+        continue;
+      }
+      const bw = item.el.offsetWidth || 72;
+      const bh = item.el.offsetHeight || 18;
+      let sx = ((projVec.x + 1) * 0.5) * lastW - bw * 0.5;
+      let sy = ((1 - projVec.y) * 0.5) * lastH - bh * 0.5;
+
+      // Clamp neatly inside panel borders (prevents right-edge "• Apic" clipping)
+      sx = Math.max(padX, Math.min(lastW - bw - padX, sx));
+      sy = Math.max(topSafeY, Math.min(lastH - bh - 8, sy));
+      // Avoid overlapping the top-right RotationDial card
+      if (sx + bw > dialSafeLeft && sy < dialSafeBottom) {
+        if (dialSafeLeft - bw - 6 >= padX) sx = dialSafeLeft - bw - 6;
+        else sy = dialSafeBottom + 4;
+      }
+      item.el.style.transform = `translate3d(${Math.round(sx)}px, ${Math.round(sy)}px, 0)`;
+      item.el.style.opacity = dist < 5.0 ? '0.55' : '0.92';
+    }
   };
 
   const tick = () => {
@@ -338,15 +431,15 @@ export function mountNavigatorScene(
     basisMat.makeBasis(basisLat, basisNorm, basisFwd);
     probe.quaternion.setFromRotationMatrix(basisMat);
     updateFan(fan, fanEdges, beam, st.settings.depthCm, st.settings.sectorDeg);
-    // clip the heart with the imaging plane, and point the axes along the probe
     cutPlane.normal.set(beam.normal.x, beam.normal.y, beam.normal.z);
     cutPlane.constant = -(
       beam.normal.x * beam.origin.x +
       beam.normal.y * beam.origin.y +
       beam.normal.z * beam.origin.z
     );
-    // the saved layers, or in exam mode the skin and the ribs alone (decision 256)
+
     const layers = navigatorLayers(st);
+    const heartVisible = anatomy && (layers.heart || layers.chambers || layers.vessels);
     heart.update({
       beam,
       layers,
@@ -359,7 +452,6 @@ export function mountNavigatorScene(
         hovered: useSegmentHover.getState().id,
       },
     });
-    // the schematic heart stands in until the surfaces arrive, and only where the heart may be seen
     if (ghost) ghost.visible = anatomy && phasesReady === 0;
     axisGroup.visible = layers.axes;
     review.sync(st.reviewMarkers, st.reviewSelectedId);
@@ -370,28 +462,31 @@ export function mountNavigatorScene(
       setAxisEndpoints(elevAxis, beam.normal, 4);
       setAxisEndpoints(latAxis, beam.lateral, 4);
     }
-    if (skeleton) skeleton.visible = layers.skeleton;
-    if (windowMarks) windowMarks.visible = layers.windows;
-    // the skin is a layer of its own: hiding the bones used to make it opaque, which hid the heart; in the exam the
-    // ribs are the landmark, so the skin stays as translucent as over the heart (decision 256)
+    if (skeleton) {
+      skeleton.visible = layers.skeleton;
+      updateSkeletonStyle(skeleton, heartVisible);
+    }
+    if (windowMarks) {
+      windowMarks.group.visible = layers.windows;
+      if (layers.windows) windowMarks.setActiveProbe(pose.position);
+    }
     if (skin) {
       skin.visible = layers.skin;
-      (skin.material as THREE.MeshStandardMaterial).opacity =
-        !anatomy || layers.heart || layers.chambers || layers.vessels ? 0.32 : 0.85;
+      updateSkinOpacity(skin, heartVisible ? 0.14 : !anatomy ? 0.34 : 0.72);
     }
-    // what the frame draws, read from the objects themselves, for the E2E check of the exam (decision 256)
     const drawn = [
       skin?.visible && 'skin',
       skeleton?.visible && 'skeleton',
       [...heart.meshByGroup.values()].some((m) => m.visible) && 'heart',
       ghost?.visible && 'ghost',
-      windowMarks?.visible && 'windows',
+      windowMarks?.group.visible && 'windows',
       axisGroup.visible && 'axes',
     ]
       .filter(Boolean)
       .join(' ');
     if (el.dataset['drawn'] !== drawn) el.dataset['drawn'] = drawn;
     renderer.render(scene, camera);
+    syncWindowBadges(layers.windows && anatomy, pose.position);
     lastCostMs = performance.now() - now;
   };
   tick();
@@ -405,12 +500,12 @@ export function mountNavigatorScene(
     detachInput();
     meshWorker.terminate();
     ro.disconnect();
-    // the next scene starts where the learner left the camera
     if (cameraStateRef) cameraStateRef.current = rig.state();
+    envRT?.dispose();
+    pmrem?.dispose();
     renderer.dispose();
-    // dispose() keeps the WebGL context until the canvas is collected: each rebuild (breathing, position, case) left one
-    // alive, and the browser, at its limit of contexts, takes the oldest away — possibly the one the scanner draws with
     renderer.forceContextLoss();
+    if (badgeLayer.parentElement === el) el.removeChild(badgeLayer);
     el.removeChild(renderer.domElement);
   };
 }

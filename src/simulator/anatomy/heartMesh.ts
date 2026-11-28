@@ -10,14 +10,15 @@ import {
   type ThoraxModel,
 } from './thoraxModel';
 import { makeSample, Structure, Tissue } from './tissue';
+import { buildCoronaryMeshes } from './coronaryMesh';
 
 /**
  * Surface meshes of the heart, extracted from the same implicit model the ultrasound beam cuts
  * (`classifyHeart`). The 3D navigator therefore cannot drift from the image: both read one anatomy.
  *
- * Extraction is naive surface nets over an occupancy grid: one vertex per cell that straddles the
- * surface, placed at the average of the cube edges that cross it, quads across every sign-changing edge,
- * then a couple of Laplacian passes. No lookup tables, deterministic, and smooth enough for a navigator.
+ * Extraction uses surface nets over an occupancy grid with volume-preserving Taubin smoothing,
+ * geometric concavity + inter-group sulcus ambient occlusion, physiological separation of arteries,
+ * veins, and atria, and epicardial coronary vessels snapped onto the active surface.
  */
 export interface MeshGroup {
   id: string;
@@ -29,6 +30,16 @@ export interface MeshGroup {
   normals: Float32Array;
   indices: Uint32Array;
   /**
+   * Per-vertex ambient occlusion factor (~0.55–1.05): darkens anatomical sulci, inter-chamber creases,
+   * and great-vessel roots so surfaces read with sculptural 3D depth instead of flat uniform shading.
+   */
+  ao?: Float32Array;
+  /**
+   * Per-vertex inter-structure sulcus proximity (0..1) on myocardium: identifies the interventricular
+   * and atrioventricular grooves for subtle subepicardial tissue tinting.
+   */
+  groove?: Float32Array;
+  /**
    * LV myocardium only: the segment code (`lvSegments.ts`, decision 152) of the tissue each vertex bounds, from the
    * classifier at this phase's grid (0 on the papillary muscles). Each phase is classified anew, so the colour follows
    * the tissue without assuming that vertex indices match between phases.
@@ -37,13 +48,17 @@ export interface MeshGroup {
 }
 
 export interface HeartMeshOptions {
-  /** Grid spacing in cm (0.3 is ~0.4 s and plenty for a navigator; 0.2 is finer and ~3× slower). */
+  /** Grid spacing in cm (0.26–0.30 is crisp and fast enough for a navigator). */
   stepCm?: number;
   /** Extraction bounds in the heart frame (cm). */
   bounds?: { min: [number, number, number]; max: [number, number, number] };
   smoothing?: number;
-  /** Shared thorax supplies the descending segment, ending at its diaphragmatic boundary. */
+  /** Shared thorax supplies the descending segment, trimmed neatly to the cardiac silhouette. */
   thorax?: ThoraxModel;
+  /** Set false on secondary cardiac phases to reuse the thoracic aorta mesh from phase 0. */
+  includeAorta?: boolean;
+  /** Set false to omit epicardial coronary vessels (defaults to true). */
+  includeCoronaries?: boolean;
 }
 
 type GroupSpec = {
@@ -68,23 +83,22 @@ const isLvWall = (s: Structure): boolean =>
   s === Structure.LvWallInferior ||
   s === Structure.LvApex;
 
-/** Groups the navigator can show or hide independently. */
+/** Groups the navigator can show or hide independently (physiologically color-coded). */
 export const MESH_GROUPS: GroupSpec[] = [
   {
     id: 'lv-myocardium',
     label: 'Miocardio VI',
-    color: 0xc4534f,
+    color: 0x9b282f,
     opacity: 1,
     has: (s) => isLvWall(s) || s === Structure.PapillaryMuscle,
   },
   {
-    // The RV free wall is 0.3-0.5 cm thick, one or two cells of the navigator's 0.26 cm grid: extracted as it is, it
-    // came out as a purple shell perforated where the wall falls under a cell, over the front of the heart only. It
-    // is meshed two cells deeper into its own cavity, so its epicardium is closed and smooth, smoothed more, and drawn
-    // in the muscle tone of the LV so the heart reads as one surface. The ultrasound image does not use this mesh.
+    // The RV free wall is 0.3-0.5 cm thick (1-2 cells at 0.26 cm): thickened 2 cells into its cavity so the
+    // epicardium stays closed and smooth. Slightly lighter warm muscle tone distinguishes RV from LV
+    // across the anterior interventricular sulcus. The ultrasound image never uses this mesh.
     id: 'rv-myocardium',
     label: 'Miocardio VD',
-    color: 0xb84f4c,
+    color: 0xb13d40,
     opacity: 1,
     has: (s) =>
       s === Structure.RvWall || s === Structure.ModeratorBand || s === Structure.RvPapillary,
@@ -94,34 +108,37 @@ export const MESH_GROUPS: GroupSpec[] = [
   {
     id: 'lv-cavity',
     label: 'Cavidad VI',
-    color: 0x8f2b2b,
+    color: 0x8e1e28,
     opacity: 0.55,
     has: (s) => s === Structure.LvCavity || s === Structure.Lvot,
   },
   {
     id: 'rv-cavity',
     label: 'Cavidad VD',
-    color: 0x3c4a8f,
-    opacity: 0.5,
+    color: 0x2c488f,
+    opacity: 0.52,
     has: (s) => s === Structure.RvCavity || s === Structure.Rvot,
   },
   {
-    id: 'atria',
-    label: 'Aurículas',
-    color: 0x7a4a7a,
-    opacity: 0.5,
+    id: 'left-atrium',
+    label: 'Aurícula izquierda',
+    color: 0xa64152,
+    opacity: 0.88,
     has: (s) =>
-      s === Structure.LaCavity ||
-      s === Structure.RaCavity ||
-      s === Structure.LaWall ||
-      s === Structure.RaWall ||
-      s === Structure.LaAppendage ||
-      s === Structure.RaAppendage,
+      s === Structure.LaCavity || s === Structure.LaWall || s === Structure.LaAppendage,
+  },
+  {
+    id: 'right-atrium',
+    label: 'Aurícula derecha',
+    color: 0x5d578a,
+    opacity: 0.88,
+    has: (s) =>
+      s === Structure.RaCavity || s === Structure.RaWall || s === Structure.RaAppendage,
   },
   {
     id: 'valves',
     label: 'Válvulas',
-    color: 0xf2e08a,
+    color: 0xf0e0a4,
     opacity: 1,
     has: (s, t) =>
       t === Tissue.Valve ||
@@ -130,25 +147,40 @@ export const MESH_GROUPS: GroupSpec[] = [
       s === Structure.TricuspidAnnulus,
   },
   {
-    id: 'great-vessels',
-    label: 'Grandes vasos',
-    color: 0xcf6a6a,
-    opacity: 0.7,
-    has: (s) =>
-      s === Structure.AorticRoot ||
-      s === Structure.PulmonaryArtery ||
-      s === Structure.Svc ||
-      s === Structure.Ivc ||
-      s === Structure.PulmonaryVein ||
-      s === Structure.CoronarySinus,
+    id: 'aortic-root',
+    label: 'Raíz aórtica',
+    color: 0xd44042,
+    opacity: 0.94,
+    has: (s) => s === Structure.AorticRoot,
+  },
+  {
+    id: 'pulmonary-artery',
+    label: 'Arteria pulmonar',
+    color: 0x4b6ea8,
+    opacity: 0.92,
+    has: (s) => s === Structure.PulmonaryArtery,
+  },
+  {
+    id: 'venae-cavae',
+    label: 'Venas cavas',
+    color: 0x3b659c,
+    opacity: 0.92,
+    has: (s) => s === Structure.Svc || s === Structure.Ivc || s === Structure.CoronarySinus,
+  },
+  {
+    id: 'pulmonary-veins',
+    label: 'Venas pulmonares',
+    color: 0xc4505d,
+    opacity: 0.9,
+    has: (s) => s === Structure.PulmonaryVein,
   },
 ];
 
 export const AORTA_GROUP: GroupSpec = {
   id: 'thoracic-aorta',
   label: 'Arco y aorta torácica',
-  color: 0xcf6a6a,
-  opacity: 0.7,
+  color: 0xd44042,
+  opacity: 0.92,
   // the arch and its branches by name: `s >= AscendingAorta` took in every structure added after them (the right atrial
   // appendage, the esophagus, the mediastinum)
   has: (s) =>
@@ -166,36 +198,53 @@ export function buildHeartMeshes(
   pose: HeartPose,
   opts: HeartMeshOptions = {},
 ): MeshGroup[] {
-  const groups = extractMeshes(heart, pose, opts, MESH_GROUPS);
-  // Explicit caller bounds remain authoritative (tests and offline crops).
-  const min = { ...pose.aorta.tube.min },
-    max = { ...pose.aorta.tube.max };
-  if (opts.thorax) {
-    const z = DESC_AORTA_Z + opts.thorax.columnShiftCm;
-    const bottom = diaphragmY(opts.thorax, DESC_AORTA_X, z);
-    for (const x of [DESC_AORTA_X - 1.5, DESC_AORTA_X + 1.5])
-      for (const zz of [z - 1.5, z + 1.5])
-        for (const y of [bottom, opts.thorax.descAortaTopY]) {
-          const p = torsoToHeart(heart.frame, { x, y, z: zz });
-          min.x = Math.min(min.x, p.x);
-          min.y = Math.min(min.y, p.y);
-          min.z = Math.min(min.z, p.z);
-          max.x = Math.max(max.x, p.x);
-          max.y = Math.max(max.y, p.y);
-          max.z = Math.max(max.z, p.z);
-        }
+  const ivcFloorY = heart.frame.origin.y - 4.8;
+  const groups = extractMeshes(heart, pose, opts, MESH_GROUPS, ivcFloorY);
+  const out: MeshGroup[] = [...groups];
+
+  if (opts.includeAorta !== false) {
+    // Explicit caller bounds remain authoritative (tests and offline crops).
+    const min = { ...pose.aorta.tube.min },
+      max = { ...pose.aorta.tube.max };
+    const aortaFloorY = heart.frame.origin.y - 5.4;
+    if (opts.thorax) {
+      const z = DESC_AORTA_Z + opts.thorax.columnShiftCm;
+      const bottom = Math.max(diaphragmY(opts.thorax, DESC_AORTA_X, z), aortaFloorY);
+      for (const x of [DESC_AORTA_X - 1.5, DESC_AORTA_X + 1.5])
+        for (const zz of [z - 1.5, z + 1.5])
+          for (const y of [bottom, opts.thorax.descAortaTopY]) {
+            const p = torsoToHeart(heart.frame, { x, y, z: zz });
+            min.x = Math.min(min.x, p.x);
+            min.y = Math.min(min.y, p.y);
+            min.z = Math.min(min.z, p.z);
+            max.x = Math.max(max.x, p.x);
+            max.y = Math.max(max.y, p.y);
+            max.z = Math.max(max.z, p.z);
+          }
+    }
+    const aortaStep = Math.max(opts.stepCm ?? 0.35, 0.42);
+    const pad = aortaStep * 2;
+    const vascular = extractMeshes(
+      heart,
+      pose,
+      {
+        ...opts,
+        stepCm: aortaStep,
+        bounds: opts.bounds ?? {
+          min: [min.x - pad, min.y - pad, min.z - pad],
+          max: [max.x + pad, max.y + pad, max.z + pad],
+        },
+      },
+      [AORTA_GROUP],
+      aortaFloorY,
+    );
+    out.push(...vascular);
   }
-  const vascular = extractMeshes(
-    heart,
-    pose,
-    {
-      ...opts,
-      stepCm: Math.max(opts.stepCm ?? 0.35, 0.45),
-      bounds: opts.bounds ?? { min: [min.x, min.y, min.z], max: [max.x, max.y, max.z] },
-    },
-    [AORTA_GROUP],
-  );
-  return [...groups, ...vascular];
+
+  if (opts.includeCoronaries !== false) {
+    out.push(...buildCoronaryMeshes(heart, pose));
+  }
+  return out;
 }
 
 function extractMeshes(
@@ -203,6 +252,7 @@ function extractMeshes(
   pose: HeartPose,
   opts: HeartMeshOptions,
   specs: GroupSpec[],
+  inferiorTrimTorsoY?: number,
 ): MeshGroup[] {
   const step = opts.stepCm ?? 0.35;
   const b = opts.bounds ?? DEFAULT_BOUNDS;
@@ -214,25 +264,36 @@ function extractMeshes(
   const tissues = new Uint8Array(nx * ny * nz);
   const segs = new Uint8Array(nx * ny * nz);
   const s = makeSample();
-  for (let k = 0; k < nz; k++)
-    for (let j = 0; j < ny; j++)
+  const bc = heart.boundCenter;
+  const br2 = (heart.boundRadius + 0.6) * (heart.boundRadius + 0.6);
+  const wantDescAorta = Boolean(opts.thorax) && specs.some((g) => g.id === 'thoracic-aorta');
+  const descScale = opts.thorax ? descAortaScale(opts.thorax, pose.state.aorticPressure) : 1;
+
+  for (let k = 0; k < nz; k++) {
+    const z = b.min[2] + k * step;
+    const dz = z - bc.z;
+    const dz2 = dz * dz;
+    for (let j = 0; j < ny; j++) {
+      const y = b.min[1] + j * step;
+      const dy = y - bc.y;
+      const dyz2 = dy * dy + dz2;
       for (let i = 0; i < nx; i++) {
-        const x = b.min[0] + i * step,
-          y = b.min[1] + j * step,
-          z = b.min[2] + k * step;
-        if (!classifyHeart(heart, pose, x, y, z, s)) {
-          if (!opts.thorax) continue;
+        const x = b.min[0] + i * step;
+        const dx = x - bc.x;
+        let hit = false;
+        if (dx * dx + dyz2 <= br2) {
+          hit = classifyHeart(heart, pose, x, y, z, s);
+        }
+        if (hit && s.structure === Structure.Ivc && inferiorTrimTorsoY !== undefined) {
           const p = heartToTorso(heart.frame, { x, y, z });
+          if (p.y < inferiorTrimTorsoY) hit = false;
+        }
+        if (!hit) {
+          if (!wantDescAorta || !opts.thorax) continue;
+          const p = heartToTorso(heart.frame, { x, y, z });
+          if (inferiorTrimTorsoY !== undefined && p.y < inferiorTrimTorsoY) continue;
           if (
-            !classifyThorax(
-              opts.thorax,
-              p.x,
-              p.y,
-              p.z,
-              s,
-              s.sdf,
-              descAortaScale(opts.thorax, pose.state.aorticPressure),
-            ) ||
+            !classifyThorax(opts.thorax, p.x, p.y, p.z, s, s.sdf, descScale) ||
             s.structure !== Structure.DescendingAorta
           )
             continue;
@@ -242,6 +303,8 @@ function extractMeshes(
         tissues[o] = s.tissue;
         segs[o] = s.segment;
       }
+    }
+  }
   return specs.map((g) =>
     surfaceNet(
       g,
@@ -256,6 +319,37 @@ function extractMeshes(
       g.id === 'lv-myocardium' ? segs : null,
     ),
   );
+}
+
+/** Whether a neighboring structure constitutes a meaningful anatomical sulcus against a myocardial group. */
+function isSulcusNeighbour(groupId: string, other: Structure): boolean {
+  if (other === Structure.None || other === Structure.Pericardium || other === Structure.EpicardialFat || other === Structure.PericardialFat)
+    return false;
+  if (groupId === 'lv-myocardium') {
+    return (
+      other === Structure.RvWall ||
+      other === Structure.RvCavity ||
+      other === Structure.Rvot ||
+      other === Structure.LaWall ||
+      other === Structure.LaCavity ||
+      other === Structure.LaAppendage ||
+      other === Structure.RaWall ||
+      other === Structure.RaCavity ||
+      other === Structure.AorticRoot ||
+      other === Structure.PulmonaryArtery
+    );
+  }
+  if (groupId === 'rv-myocardium') {
+    return (
+      isLvWall(other) ||
+      other === Structure.RaWall ||
+      other === Structure.RaCavity ||
+      other === Structure.RaAppendage ||
+      other === Structure.AorticRoot ||
+      other === Structure.PulmonaryArtery
+    );
+  }
+  return false;
 }
 
 function surfaceNet(
@@ -300,6 +394,8 @@ function surfaceNet(
   const cellVertex = new Int32Array((nx - 1) * (ny - 1) * (nz - 1)).fill(-1);
   const pos: number[] = [];
   const vertexSeg: number[] = [];
+  const trackGroove = g.id === 'lv-myocardium' || g.id === 'rv-myocardium';
+  const vertexGroove: number[] = [];
   const votes = new Uint8Array(21);
   const cellIndex = (i: number, j: number, k: number): number => (k * (ny - 1) + j) * (nx - 1) + i;
   for (let k = 0; k < nz - 1; k++)
@@ -310,9 +406,6 @@ function surfaceNet(
           for (let dj = 0; dj < 2; dj++)
             for (let di = 0; di < 2; di++) if (at(i + di, j + dj, k + dk)) count++;
         if (count === 0 || count === 8) continue; // fully outside or fully inside: no surface here
-        // the vertex belongs on the surface, so it is the average of the cube edges that cross it. Averaging the
-        // inside corners instead drops it onto a corner wherever the wall is one cell thick, and the shell comes
-        // out corrugated along the grid.
         let cx = 0,
           cy = 0,
           cz = 0,
@@ -342,7 +435,6 @@ function surfaceNet(
             }
         if (!crossings) continue;
         if (segs) {
-          // the most frequent segment among the cell's inside corners (0 when they are papillary muscle)
           votes.fill(0);
           for (let dk = 0; dk < 2; dk++)
             for (let dj = 0; dj < 2; dj++)
@@ -354,6 +446,25 @@ function surfaceNet(
           let best = 0;
           for (let c = 1; c < 21; c++) if (votes[c]! > votes[best]!) best = c;
           vertexSeg.push(best);
+        }
+        if (trackGroove) {
+          let sulcus = 0;
+          const k0 = Math.max(0, k - 1),
+            k1 = Math.min(nz - 1, k + 2);
+          const j0 = Math.max(0, j - 1),
+            j1 = Math.min(ny - 1, j + 2);
+          const i0 = Math.max(0, i - 1),
+            i1 = Math.min(nx - 1, i + 2);
+          outer: for (let kk = k0; kk <= k1; kk++)
+            for (let jj = j0; jj <= j1; jj++)
+              for (let ii = i0; ii <= i1; ii++) {
+                const st = ids[(kk * ny + jj) * nx + ii] as Structure;
+                if (isSulcusNeighbour(g.id, st)) {
+                  sulcus = 1;
+                  break outer;
+                }
+              }
+          vertexGroove.push(sulcus);
         }
         cellVertex[cellIndex(i, j, k)] = pos.length / 3;
         pos.push(
@@ -404,9 +515,11 @@ function surfaceNet(
           );
       }
   const positions = new Float32Array(pos);
-  smooth(positions, idx, smoothing);
+  smoothTaubin(positions, idx, smoothing);
   const normals = vertexNormals(positions, idx);
   smoothNormals(normals, idx, 2);
+  const groove = trackGroove ? smoothScalar(Float32Array.from(vertexGroove), idx, 3) : undefined;
+  const ao = computeAmbientOcclusion(positions, normals, idx, step, groove);
   return {
     id: g.id,
     label: g.label,
@@ -415,6 +528,8 @@ function surfaceNet(
     positions,
     normals,
     indices: new Uint32Array(idx),
+    ao,
+    ...(groove ? { groove } : {}),
     ...(segs ? { segments: Uint8Array.from(vertexSeg) } : {}),
   };
 }
@@ -514,13 +629,16 @@ function smoothNormals(normals: Float32Array, indices: number[], passes: number)
   }
 }
 
-/** Laplacian smoothing over the triangle adjacency (keeps the cast recognisable, removes the stair steps). */
-function smooth(positions: Float32Array, indices: number[], passes: number): void {
+/**
+ * Volume-preserving Taubin smoothing (alternating shrink λ = 0.52 and inflate μ = -0.54 passes).
+ * Removes voxel stair-stepping without ballooning/shrinking chambers or erasing anatomical sulci.
+ */
+function smoothTaubin(positions: Float32Array, indices: number[], passes: number): void {
   if (!passes || !indices.length) return;
   const n = positions.length / 3;
   const sum = new Float32Array(n * 3);
   const deg = new Uint16Array(n);
-  for (let p = 0; p < passes; p++) {
+  const stepPass = (weight: number) => {
     sum.fill(0);
     deg.fill(0);
     for (let t = 0; t < indices.length; t += 3)
@@ -542,8 +660,96 @@ function smooth(positions: Float32Array, indices: number[], passes: number): voi
     for (let v = 0; v < n; v++) {
       const d = deg[v]!;
       if (!d) continue;
-      for (let c = 0; c < 3; c++)
-        positions[v * 3 + c] = positions[v * 3 + c]! * 0.5 + (sum[v * 3 + c]! / d) * 0.5;
+      for (let c = 0; c < 3; c++) {
+        const cur = positions[v * 3 + c]!;
+        const avg = sum[v * 3 + c]! / d;
+        positions[v * 3 + c] = cur + weight * (avg - cur);
+      }
+    }
+  };
+  for (let p = 0; p < passes; p++) {
+    stepPass(0.52);
+    stepPass(-0.535);
+  }
+}
+
+/** Smooths a per-vertex scalar attribute over triangle adjacency. */
+function smoothScalar(values: Float32Array, indices: number[], passes: number): Float32Array {
+  if (!passes || !indices.length) return values;
+  const n = values.length;
+  const sum = new Float32Array(n);
+  const deg = new Uint16Array(n);
+  for (let p = 0; p < passes; p++) {
+    sum.fill(0);
+    deg.fill(0);
+    for (let t = 0; t < indices.length; t += 3)
+      for (let e = 0; e < 3; e++) {
+        const a = indices[t + e]!,
+          b = indices[t + ((e + 1) % 3)]!;
+        sum[a] = sum[a]! + values[b]!;
+        deg[a] = deg[a]! + 1;
+        sum[b] = sum[b]! + values[a]!;
+        deg[b] = deg[b]! + 1;
+      }
+    for (let v = 0; v < n; v++) {
+      const d = deg[v]!;
+      if (d) values[v] = values[v]! * 0.45 + (sum[v]! / d) * 0.55;
     }
   }
+  return values;
+}
+
+/**
+ * Per-vertex ambient occlusion from local surface concavity (Laplacian displacement projected onto the
+ * outward normal) combined with inter-structure sulcus contact (`groove`). Darkens crevices, sulci, and
+ * vessel roots while giving convex domes a crisp sculptural lift.
+ */
+function computeAmbientOcclusion(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: number[],
+  step: number,
+  groove?: Float32Array,
+): Float32Array {
+  const n = positions.length / 3;
+  const ao = new Float32Array(n).fill(1);
+  if (!indices.length) return ao;
+  const sum = new Float32Array(n * 3);
+  const deg = new Uint16Array(n);
+  for (let t = 0; t < indices.length; t += 3)
+    for (let e = 0; e < 3; e++) {
+      const a = indices[t + e]!,
+        b = indices[t + ((e + 1) % 3)]!;
+      for (const [from, to] of [
+        [a, b],
+        [b, a],
+      ] as const) {
+        const fi = from * 3,
+          ti = to * 3;
+        sum[fi] = sum[fi]! + positions[ti]!;
+        sum[fi + 1] = sum[fi + 1]! + positions[ti + 1]!;
+        sum[fi + 2] = sum[fi + 2]! + positions[ti + 2]!;
+        deg[from] = deg[from]! + 1;
+      }
+    }
+  const invStep = 1 / Math.max(0.1, step);
+  const concavity = new Float32Array(n);
+  for (let v = 0; v < n; v++) {
+    const d = deg[v]!;
+    if (!d) continue;
+    const o = v * 3;
+    const lx = sum[o]! / d - positions[o]!;
+    const ly = sum[o + 1]! / d - positions[o + 1]!;
+    const lz = sum[o + 2]! / d - positions[o + 2]!;
+    // Positive projection onto outward normal = concave valley/sulcus
+    concavity[v] = (lx * normals[o]! + ly * normals[o + 1]! + lz * normals[o + 2]!) * invStep;
+  }
+  smoothScalar(concavity, indices, 2);
+  for (let v = 0; v < n; v++) {
+    const c = concavity[v]!;
+    let factor = c > 0 ? 1.02 - c * 0.55 : 1.02 + Math.min(0.12, -c * 0.14);
+    if (groove) factor *= 1 - 0.24 * groove[v]!;
+    ao[v] = Math.max(0.54, Math.min(1.06, factor));
+  }
+  return ao;
 }
