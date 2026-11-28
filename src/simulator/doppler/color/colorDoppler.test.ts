@@ -29,6 +29,7 @@ import {
 import { allocPolarFrame, type PolarFrameSpec } from '@/simulator/renderer/types';
 import { Structure, Tissue } from '@/simulator/anatomy/tissue';
 import { softTissueTransmission } from '@/simulator/renderer/acoustic/acoustics';
+import { mrWallJetCentre } from '@/simulator/doppler/flow-primitives/regurgitantJets';
 import { loadCaseById } from '@/cases';
 import { normalExcellentCase } from '@/cases/normal-excellent';
 import { normalizeCase } from '@/cases/normalizeCase';
@@ -1608,16 +1609,31 @@ test('eccentric MR steers in 3D (anteromedial prolapse, posterolateral SAM) with
     `Expected strong anteromedial turbulent MVP MR jet in anterior LA, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
   );
 
-  // Coanda wall-hugging curvature distally (along = 3.2 cm): turns upward along LA dome (|vx/vz| decreases vs orifice)
-  const bend = 0.42 * 0.9 * (3.2 - 1.0);
-  const cX = mvpFlow.mvCenter.x + mvpDir.x * (3.2 - bend);
-  const cY = mvpFlow.mvCenter.y + mvpDir.y * (3.2 - bend);
-  const cZ = mvpHp.zAnn - 0.1 + mvpDir.z * 3.2 - 0.14 * bend;
-  sampleFlow(mvpFlow, mvpModels.tables, mvpHp, 0.2, cX, cY, cZ, fs, Structure.LaCavity);
+  // Coandă wall attachment (Fase C): the free jet meets the atrial wall and runs along it as a wall jet, 1 cm past the
+  // impact still fast and turbulent, its velocity tangent to the wall where its initial direction ran into it
+  const wallPt = mrWallJetCentre(mvpFlow, mvpHp, 1.0);
+  assert.ok(wallPt && wallPt.hitAlong > 1.5 && wallPt.hitAlong < 5, `MVP jet should meet the LA wall, got ${JSON.stringify(wallPt)}`);
+  sampleFlow(mvpFlow, mvpModels.tables, mvpHp, 0.2, wallPt.x, wallPt.y, wallPt.z, fs, Structure.LaCavity);
+  const speed = Math.hypot(fs.vx, fs.vy, fs.vz);
+  const vDotN = Math.abs(fs.vx * wallPt.nx + fs.vy * wallPt.ny + fs.vz * wallPt.nz) / Math.max(1e-6, speed);
+  const dDotN = Math.abs(mvpDir.x * wallPt.nx + mvpDir.y * wallPt.ny + mvpDir.z * wallPt.nz);
   assert.ok(
-    fs.present === 1 && Math.hypot(fs.vx, fs.vy, fs.vz) > 1.5 && Math.abs(fs.vy / fs.vz) < Math.abs(mvpDir.y / mvpDir.z),
-    `Expected Coanda wall-hugging curvature turning toward LA roof distally, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)})`,
+    fs.present === 1 && speed > 1.5 && fs.dispersion > 0.35 && vDotN < 0.3 && dDotN > 0.4,
+    `Expected Coanda wall jet tangent to the LA wall past impact, got (${fs.vx.toFixed(2)}, ${fs.vy.toFixed(2)}, ${fs.vz.toFixed(2)}) v·n=${vDotN.toFixed(2)} d·n=${dDotN.toFixed(2)}`,
   );
+  // the free jet does not run on through the wall along its initial direction
+  sampleFlow(
+    mvpFlow,
+    mvpModels.tables,
+    mvpHp,
+    0.2,
+    mvpFlow.mvCenter.x + mvpDir.x * (wallPt.hitAlong + 0.8),
+    mvpFlow.mvCenter.y + mvpDir.y * (wallPt.hitAlong + 0.8),
+    mvpHp.zAnn - 0.1 + mvpDir.z * (wallPt.hitAlong + 0.8),
+    fs,
+    Structure.LaCavity,
+  );
+  assert.ok(Math.hypot(fs.vx, fs.vy, fs.vz) < 1.0, 'eccentric MR jet must not run on through the atrial wall');
 
   // 2. SAM-related MR (hocm-sam): posterolateral jet (-y posterior toward posterior LA wall, +x lateral)
   const hocmCase = loadCaseById('hocm-sam');

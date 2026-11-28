@@ -347,6 +347,8 @@ export function sampleFlow(
         p.heart.physiology.ePeakMps,
         p.heart.physiology.ePrimeSeptalCmps,
         out,
+        p.mvAreaCm2,
+        p.heart.physiology.aPeakMps,
       );
     }
   }

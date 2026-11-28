@@ -141,6 +141,222 @@ export function mrJetInitialDirection(mrJetDirRad: number): { x: number; y: numb
   return { x: 0.64 * sinT, y: -0.768375 * sinT, z: -cosT };
 }
 
+/**
+ * The left atrial wall an eccentric MR jet attaches to (Fase C): the classifier's atrial body at this instant (the
+ * ellipsoid samplePulmonaryVeins rides on, inset to the endocardium), where the jet's free centreline meets it, and the
+ * great ellipse it then follows in the plane of its initial direction.
+ */
+interface MrWallFrame {
+  /** Body centre and radii (cm), heart frame. */
+  cx: number;
+  cy: number;
+  cz: number;
+  rx: number;
+  ry: number;
+  rz: number;
+  /** Mean radius (cm): arc lengths and lateral distances on the wall. */
+  rm: number;
+  /** Distance along the jet's initial direction from the orifice to the wall (cm). */
+  hitAlong: number;
+  /** Impact point on the unit sphere of the body's normalized coordinates, the tangent the jet leaves it along, binormal. */
+  hx: number;
+  hy: number;
+  hz: number;
+  tx: number;
+  ty: number;
+  tz: number;
+  bx: number;
+  by: number;
+  bz: number;
+}
+
+/** Share of the body's radii at which the wall jet runs: the endocardium inside the classifier's outer body surface. */
+const MR_WALL_INSET = 0.94;
+/** Wall-jet decay length (cm): U(s) = U₀·(s0 / (s + s0))^½ along the wall (Glauert's plane wall jet). */
+const MR_WALL_S0_CM = 1.0;
+/** Direction of the wall jet at the last sample (unit, heart frame): no allocation per sample. */
+const MR_WALL_DIR = { x: 0, y: 0, z: 0 };
+
+function mrWallFrame(
+  p: FlowFieldParams,
+  hp: HeartPose,
+  ox: number,
+  oy: number,
+  oz: number,
+  dir: { x: number; y: number; z: number },
+): MrWallFrame | null {
+  const pv = p.pulmonaryVeins;
+  const la = pv.laCenter,
+    lr = pv.laR;
+  const zTop = la.z - lr.z;
+  const zBottom = hp.zAnn + 0.25;
+  const bo = atrialScale(hp.laBooster, pv.laReservoir, hp.state.contraction);
+  const rx = lr.x * bo * MR_WALL_INSET,
+    ry = lr.y * bo * MR_WALL_INSET,
+    rz = ((zBottom - zTop) / 2) * MR_WALL_INSET;
+  const cx = la.x,
+    cy = la.y,
+    cz = (zTop + zBottom) / 2;
+  if (!(rx > 0.3 && ry > 0.3 && rz > 0.3)) return null;
+  // the jet's free centreline against the body: |o + t·d| = 1 in normalized coordinates, its exit
+  const qox = (ox - cx) / rx,
+    qoy = (oy - cy) / ry,
+    qoz = (oz - cz) / rz;
+  const qdx = dir.x / rx,
+    qdy = dir.y / ry,
+    qdz = dir.z / rz;
+  const a = qdx * qdx + qdy * qdy + qdz * qdz;
+  const b = qox * qdx + qoy * qdy + qoz * qdz;
+  const c = qox * qox + qoy * qoy + qoz * qoz - 1;
+  const disc = b * b - a * c;
+  if (!(disc > 0)) return null;
+  const hitAlong = (-b + Math.sqrt(disc)) / a;
+  if (!(hitAlong > 0.6) || hitAlong > 5.2) return null;
+  const hx = qox + qdx * hitAlong,
+    hy = qoy + qdy * hitAlong,
+    hz = qoz + qdz * hitAlong;
+  const hl = Math.hypot(hx, hy, hz) || 1;
+  const ux = hx / hl,
+    uy = hy / hl,
+    uz = hz / hl;
+  // the tangent the jet keeps at the wall: its direction (normalized coordinates) less the wall-normal part, or toward
+  // the roof when it meets the wall head on
+  const dl = Math.sqrt(a);
+  let tx = qdx / dl,
+    ty = qdy / dl,
+    tz = qdz / dl;
+  const dn = tx * ux + ty * uy + tz * uz;
+  tx -= dn * ux;
+  ty -= dn * uy;
+  tz -= dn * uz;
+  let tl = Math.hypot(tx, ty, tz);
+  if (tl < 0.15) {
+    // toward the roof (−z), less its wall-normal part
+    tx = -uz * ux;
+    ty = -uz * uy;
+    tz = -1 + uz * uz;
+    tl = Math.hypot(tx, ty, tz) || 1;
+  }
+  tx /= tl;
+  ty /= tl;
+  tz /= tl;
+  return {
+    cx,
+    cy,
+    cz,
+    rx,
+    ry,
+    rz,
+    rm: Math.cbrt(rx * ry * rz),
+    hitAlong,
+    hx: ux,
+    hy: uy,
+    hz: uz,
+    tx,
+    ty,
+    tz,
+    bx: uy * tz - uz * ty,
+    by: uz * tx - ux * tz,
+    bz: ux * ty - uy * tx,
+  };
+}
+
+/**
+ * Speed (m/s) of the MR wall jet at (x, y, z), its direction left in MR_WALL_DIR: a Glauert wall jet past the impact,
+ * its centre `dc` off the wall in a sheet of half-thickness `delta`, spreading along the wall over a lateral half-width
+ * `b` that grows five times faster than the sheet thickens, decaying as (s0 / (s + s0))^½ and gone 6 cm round the dome.
+ */
+function sampleMrWallJet(
+  w: MrWallFrame,
+  x: number,
+  y: number,
+  z: number,
+  vImpact: number,
+  rImpact: number,
+): number {
+  const qx = (x - w.cx) / w.rx,
+    qy = (y - w.cy) / w.ry,
+    qz = (z - w.cz) / w.rz;
+  const rn = Math.hypot(qx, qy, qz);
+  if (rn < 0.3 || rn > 1.25) return 0;
+  const px = qx / rn,
+    py = qy / rn,
+    pz = qz / rn;
+  const along = px * w.tx + py * w.ty + pz * w.tz;
+  const toward = px * w.hx + py * w.hy + pz * w.hz;
+  const phi = Math.atan2(along, toward);
+  const s = phi * w.rm;
+  if (s < -0.4 || s > 6.2) return 0;
+  const sp = Math.max(0, s);
+  // distance to the wall along the body's radius through the point, and across the jet's plane on the wall
+  const radial = Math.hypot(x - w.cx, y - w.cy, z - w.cz);
+  const dWall = ((1 - rn) * radial) / rn;
+  const off = Math.asin(Math.max(-1, Math.min(1, px * w.bx + py * w.by + pz * w.bz))) * w.rm;
+  const delta = 0.34 + 0.07 * sp;
+  const dc = 0.3 + 0.05 * sp;
+  const b = Math.max(0.35, rImpact) + 0.38 * sp;
+  const fn = Math.exp(-((dWall - dc) * (dWall - dc)) / (delta * delta));
+  const fl = Math.exp(-(off * off) / (b * b));
+  const v =
+    vImpact *
+    Math.sqrt(MR_WALL_S0_CM / (sp + MR_WALL_S0_CM)) *
+    fn *
+    fl *
+    smoothstep(-0.4, 0.2, s) *
+    fadeOut(sp, 4.2, 6.2);
+  if (v <= 0.03) return 0;
+  // the great ellipse's tangent at the point, back to the heart frame
+  const sinP = Math.sin(phi),
+    cosP = Math.cos(phi);
+  const gx = (-w.hx * sinP + w.tx * cosP) * w.rx,
+    gy = (-w.hy * sinP + w.ty * cosP) * w.ry,
+    gz = (-w.hz * sinP + w.tz * cosP) * w.rz;
+  const gl = Math.hypot(gx, gy, gz) || 1;
+  MR_WALL_DIR.x = gx / gl;
+  MR_WALL_DIR.y = gy / gl;
+  MR_WALL_DIR.z = gz / gl;
+  return v;
+}
+
+/**
+ * The centre of the MR wall jet `s` cm along the wall past its impact (heart frame), the inward-facing... outward wall
+ * normal there (unit), and where the free jet met the wall: null for a central jet or one that never reaches the wall.
+ * For tests and teaching overlays.
+ */
+export function mrWallJetCentre(
+  p: FlowFieldParams,
+  hp: HeartPose,
+  s: number,
+): { x: number; y: number; z: number; nx: number; ny: number; nz: number; hitAlong: number } | null {
+  if (smoothstep(0.18, 0.55, Math.abs(p.mrJetDirRad)) <= 0) return null;
+  const dir = mrJetInitialDirection(p.mrJetDirRad);
+  const w = mrWallFrame(p, hp, p.mvCenter.x, p.mvCenter.y, hp.zAnn - 0.1, dir);
+  if (!w) return null;
+  const phi = s / w.rm;
+  const ux = w.hx * Math.cos(phi) + w.tx * Math.sin(phi),
+    uy = w.hy * Math.cos(phi) + w.ty * Math.sin(phi),
+    uz = w.hz * Math.cos(phi) + w.tz * Math.sin(phi);
+  const gx = ux * w.rx,
+    gy = uy * w.ry,
+    gz = uz * w.rz;
+  const gl = Math.hypot(gx, gy, gz);
+  const k = 1 - (0.3 + 0.05 * Math.max(0, s)) / gl;
+  // the ellipsoid's outward normal: the gradient of |q|², (u / R) componentwise
+  const nx = ux / w.rx,
+    ny = uy / w.ry,
+    nz = uz / w.rz;
+  const nl = Math.hypot(nx, ny, nz) || 1;
+  return {
+    x: w.cx + gx * k,
+    y: w.cy + gy * k,
+    z: w.cz + gz * k,
+    nx: nx / nl,
+    ny: ny / nl,
+    nz: nz / nl,
+    hitAlong: w.hitAlong,
+  };
+}
+
 /** Regurgitant jets (MR in systole into the LA, AR in diastole into the LV) with proximal flow convergence (PISA). */
 export function sampleRegurgitantJets(
   p: FlowFieldParams,
@@ -173,11 +389,19 @@ export function sampleRegurgitantJets(
         dy = y - oy,
         dz = z - oz;
       const along = dx * dir.x + dy * dir.y + dz * dir.z; // initial projection into the LA
-      if (dz <= 0 && allowMrJet && along >= 0 && along < 5.8) {
-        // Eccentric jets impinge on the anteromedial (prolapse) or posterolateral (SAM) LA wall and
-        // wrap smoothly upward along the curved atrial dome (Coanda wall attachment).
-        const ecc = smoothstep(0.18, 0.55, Math.abs(p.mrJetDirRad));
-        const coandaU = ecc > 0 ? smoothstep(1.0, 3.6, along) : 0;
+      const ecc = smoothstep(0.18, 0.55, Math.abs(p.mrJetDirRad));
+      // An eccentric jet meets the atrial wall and runs along it (Coandă, Fase C): where the free jet reaches the wall
+      const wall = ecc > 0 && allowMrJet ? mrWallFrame(p, hp, ox, oy, oz, dir) : null;
+      const hitAlong = wall ? wall.hitAlong : Infinity;
+      let fvx = 0,
+        fvy = 0,
+        fvz = 0,
+        fDisp = 0,
+        fSpeed = 0;
+      if (dz <= 0 && allowMrJet && along >= 0 && along < Math.min(5.8, hitAlong + 0.5)) {
+        // Before the wall the eccentric jet is a straight free jet; a central jet that never reaches it keeps the gentle
+        // Coanda roll toward the roof of decision-era jets.
+        const coandaU = ecc > 0 && !wall ? smoothstep(1.0, 3.6, along) : 0;
         const bend = ecc * 0.42 * coandaU * Math.max(0, along - 1.0);
         const sHoriz = along - bend;
         const cx = ox + dir.x * sHoriz;
@@ -189,30 +413,56 @@ export function sampleRegurgitantJets(
         // organic free-jet / Coanda shear expansion into the LA.
         const expandAlong = Math.max(0, along - 0.35);
         const spreadSlope = 0.28 * (1 - 0.055 * Math.min(4, expandAlong));
-        const coandaBroaden = 1 + 0.26 * ecc * smoothstep(1.2, 3.5, along);
+        const coandaBroaden = 1 + 0.26 * ecc * (wall ? 0 : 1) * smoothstep(1.2, 3.5, along);
         const rHalf = 0.84 * (rVc + expandAlong * spreadSlope) * coandaBroaden;
         if (rho < jetReach(rHalf, expandAlong, FAST_JET_SHEAR)) {
           const prof = jetProfile(rho, rHalf, expandAlong, FAST_JET_SHEAR);
-          const decay = freeJetCentreline(along, 2 * rVc) * fadeOut(along, 4.0, 5.7);
+          const decay =
+            freeJetCentreline(along, 2 * rVc) *
+            fadeOut(along, 4.0, 5.7) *
+            (wall ? fadeOut(along, hitAlong - 0.25, hitAlong + 0.45) : 1);
           const v = vj * prof * decay;
-          // Local tangent follows the Coanda wall curve toward the LA roof
-          const hSlope = Math.max(0.18, 1 - ecc * 0.58 * smoothstep(1.0, 3.2, along));
+          // Local tangent follows the Coanda wall curve toward the LA roof (central-wall roll only without a wall jet)
+          const roll = wall ? 0 : ecc * smoothstep(1.0, 3.2, along);
+          const hSlope = Math.max(0.18, 1 - 0.58 * roll);
           const txRaw = dir.x * hSlope;
           const tyRaw = dir.y * hSlope;
-          const tzRaw = dir.z - 0.14 * ecc * smoothstep(1.0, 3.2, along);
+          const tzRaw = dir.z - 0.14 * roll;
           const tLen = Math.hypot(txRaw, tyRaw, tzRaw) || 1;
-          out.vx += (txRaw / tLen) * v;
-          out.vy += (tyRaw / tLen) * v;
-          out.vz += (tzRaw / tLen) * v;
+          fvx = (txRaw / tLen) * v;
+          fvy = (tyRaw / tLen) * v;
+          fvz = (tzRaw / tLen) * v;
+          fSpeed = v;
           // Laminar core inside the vena contracta, ramping smoothly into turbulent variance distally
           const neckBlend = smoothstep(0.15, 0.7, along);
           const baseTurb = (p.turbulence['mr-jet'] ?? 0.3) * (0.35 + 0.65 * neckBlend);
-          out.dispersion = Math.max(
-            out.dispersion,
-            baseTurb + 0.22 * neckBlend * Math.min(1, rho / Math.max(0.08, rHalf / 0.84)),
-          );
-          out.present = 1;
+          fDisp = baseTurb + 0.22 * neckBlend * Math.min(1, rho / Math.max(0.08, rHalf / 0.84));
         }
+      }
+      if (wall && dz <= 0) {
+        // the wall jet: along the atrial wall past the impact, thin off the wall and spreading along it
+        const rImpact =
+          0.84 *
+          (rVc +
+            Math.max(0, wall.hitAlong - 0.35) *
+              0.28 *
+              (1 - 0.055 * Math.min(4, Math.max(0, wall.hitAlong - 0.35))));
+        const vImpact = vj * freeJetCentreline(wall.hitAlong, 2 * rVc) * fadeOut(wall.hitAlong, 4.0, 5.7);
+        const w = sampleMrWallJet(wall, x, y, z, vImpact, rImpact);
+        if (w > fSpeed) {
+          fvx = MR_WALL_DIR.x * w;
+          fvy = MR_WALL_DIR.y * w;
+          fvz = MR_WALL_DIR.z * w;
+          fSpeed = w;
+          fDisp = (p.turbulence['mr-jet'] ?? 0.3) + 0.2;
+        }
+      }
+      if (fSpeed > 0.03) {
+        out.vx += fvx;
+        out.vy += fvy;
+        out.vz += fvz;
+        out.dispersion = Math.max(out.dispersion, fDisp);
+        out.present = 1;
       } else if (dz > 0 && allowMrPisa) {
         // Proximal Isovelocity Surface Area (PISA): hemispheric continuity v(d) = Q / (2·π·d²·100)
         // on the LV side (dz > 0) of the anatomical mitral coaptation plane, even for eccentric jets.

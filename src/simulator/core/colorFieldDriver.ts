@@ -25,6 +25,8 @@ import {
   type ColorSettings,
 } from '@/simulator/doppler/color/colorDoppler';
 import type { CineFrame } from './cineBuffer';
+import { colorLinePhaseOffset, wrapPhase } from '@/simulator/doppler/color/colorSweep';
+import { colorFrameTimeS } from '@/simulator/renderer/frameRate';
 import {
   colorAcquisitionKey,
   colorCpuAcquisitionKey,
@@ -48,6 +50,24 @@ export interface ColorUpdateContext {
   timeS: number;
   frameIntervalS: number;
   seed: number;
+  /**
+   * Duration (s) of the colour frame's sweep across the box (`colorFrameTimeS`): each colour line reads the flow at its
+   * own instant, centred on `phase` (colorSweep.ts). Zero or absent: every line at `phase`.
+   */
+  sweepS?: number;
+}
+
+/** Phase of each polar line of the box [liMin, liMax] for a sweep, the frame's phase without one. */
+function linePhases(
+  phase: number,
+  liMin: number,
+  liMax: number,
+  sweepS: number | undefined,
+  rrS: number,
+  out: Float64Array,
+): void {
+  for (let li = liMin; li <= liMax; li++)
+    out[li - liMin] = wrapPhase(phase + colorLinePhaseOffset(li, liMin, liMax, sweepS ?? 0, rrS));
 }
 
 /**
@@ -74,6 +94,15 @@ export class ColorFieldDriver {
   private rawFlowBox = new Float32Array(0);
   private rawFlowHasNeighbors = false;
   private cineTransScratch = new Float32Array(0);
+  private linePhase = new Float64Array(0);
+
+  /** The per-line phases of the box for this update (the frame's phase on every line without a sweep). */
+  private phasesFor(phase: number, liMin: number, liMax: number, sweepS: number | undefined, rrS: number): Float64Array {
+    const n = Math.max(0, liMax - liMin + 1);
+    if (this.linePhase.length < n) this.linePhase = new Float64Array(n);
+    linePhases(phase, liMin, liMax, sweepS, rrS, this.linePhase);
+    return this.linePhase;
+  }
 
   get current(): ColorField | null {
     return this.prev;
@@ -237,8 +266,10 @@ export class ColorFieldDriver {
     const hasTissueMap = tissue.length === lines * samples;
     const filterByBlood = bloomSamples === 0 && hasTissueMap;
     const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
+    const phases = this.phasesFor(phase, liMin, liMax, ctx.sweepS, tables.rrS);
 
     for (let li = liMin; li <= liMax; li++) {
+      const phaseLi = phases[li - liMin]!;
       const theta = -sectorRad / 2 + (sectorRad * (li + 0.5)) / lines;
       const ct = Math.cos(theta);
       const sn = Math.sin(theta);
@@ -285,7 +316,7 @@ export class ColorFieldDriver {
         const hy = ohy + dhy * r;
         const hz = ohz + dhz * r;
         const bloodStructure = tId === Tissue.Blood ? structure[pIdx] : undefined;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
+        sampleFlow(flow, tables, hp, phaseLi, hx, hy, hz, fs, bloodStructure);
         if (fs.present) {
           const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
           const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
@@ -387,6 +418,17 @@ export class ColorFieldDriver {
 
     const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
     const bloomSamples = Math.max(0, Math.round((cf.acquisition.color.gainDb - 2) * 0.6));
+    // the frame's own sweep, from the console it was acquired with
+    const cineBox = computeDopplerBoxBounds(spec, cf.acquisition.color);
+    const cinePhases = this.phasesFor(
+      phase,
+      cineBox.liMin,
+      cineBox.liMax,
+      colorFrameTimeS(cf.acquisition.settings, cf.acquisition.color),
+      tables.rrS,
+    );
+    const phaseAt = (li: number): number =>
+      li >= cineBox.liMin && li <= cineBox.liMax ? cinePhases[li - cineBox.liMin]! : phase;
 
     computeColorField(
       syntheticFrame,
@@ -430,7 +472,7 @@ export class ColorFieldDriver {
           }
         }
         const bloodStructure = tId === Tissue.Blood ? syntheticFrame.structure[idx] : undefined;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
+        sampleFlow(flow, tables, hp, phaseAt(li), hx, hy, hz, fs, bloodStructure);
         const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz);
         const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
         o.v = vAxial;
@@ -506,6 +548,10 @@ export class ColorFieldDriver {
     const ohz = ox * hf.ez.x + oy * hf.ez.y + oz * hf.ez.z;
     const clutterCtx = prepareClutterContext(heart, tables, hp, phase, flow.flowPeaks);
     const bloomSamples = Math.max(0, Math.round((ctx.color.gainDb - 2) * 0.6));
+    const box = computeDopplerBoxBounds(spec, ctx.color);
+    const phases = this.phasesFor(phase, box.liMin, box.liMax, ctx.sweepS, tables.rrS);
+    const phaseAt = (li: number): number =>
+      li >= box.liMin && li <= box.liMax ? phases[li - box.liMin]! : phase;
     computeColorField(
       frame,
       {
@@ -555,7 +601,7 @@ export class ColorFieldDriver {
           }
         }
         const bloodStructure = tId === Tissue.Blood ? frame.structure[idx] : undefined;
-        sampleFlow(flow, tables, hp, phase, hx, hy, hz, fs, bloodStructure);
+        sampleFlow(flow, tables, hp, phaseAt(li), hx, hy, hz, fs, bloodStructure);
         const vAxial = -(fs.vx * dhx + fs.vy * dhy + fs.vz * dhz); // + = toward the transducer
         const vSq = fs.vx * fs.vx + fs.vy * fs.vy + fs.vz * fs.vz;
         o.v = vAxial;

@@ -66,6 +66,26 @@ export function colorTransmitLines(box: ColorBoxExtent): number {
 }
 
 /**
+ * Time (s) the colour lines of one frame take: the box's transmit lines, each firing its whole packet at the pulse
+ * repetition frequency of the box's scale to its deepest edge (or the line time to that edge when no scale is given). The
+ * colour lines fire one after the other across the box, so this is also how long the colour frame's sweep lasts: 73 ms
+ * with the default box at ±0.62 m/s, against the 15 ms of the 2D lines of the same frame.
+ */
+export function colorFrameTimeS(
+  settings: Pick<AcquisitionSettings, 'depthCm' | 'frequencyMHz'>,
+  color: ColorBoxExtent,
+): number {
+  const depth = Math.min(color.boxRMaxCm, settings.depthCm);
+  return (
+    colorTransmitLines(color) *
+    COLOR_PACKET *
+    (color.scaleMps === undefined
+      ? lineTimeS(depth)
+      : 1 / pulsedAcquisition(depth, settings.frequencyMHz, color.scaleMps).prfHz)
+  );
+}
+
+/**
  * The acquisition frame rate (Hz): the B-mode transmit events to the image depth, plus the colour packets to the bottom
  * of the box when colour is on. Conventional 2D echocardiography runs at about 40–80 frames/s (Fujikura et al., J Clin Med
  * 2021;10:2095); the default console gives 68.6 Hz at 16 cm and 80°, and 11.4 Hz with the default colour box at ±0.62 m/s (decision 274). Beside a
@@ -77,18 +97,7 @@ export function acquisitionFrameRate(
   spectral = false,
 ): number {
   const bmode = bmodeTransmitLines(settings) * lineTimeS(settings.depthCm);
-  const colour = color
-    ? colorTransmitLines(color) *
-      COLOR_PACKET *
-      (color.scaleMps === undefined
-        ? lineTimeS(Math.min(color.boxRMaxCm, settings.depthCm))
-        : 1 /
-          pulsedAcquisition(
-            Math.min(color.boxRMaxCm, settings.depthCm),
-            settings.frequencyMHz,
-            color.scaleMps,
-          ).prfHz)
-    : 0;
+  const colour = color ? colorFrameTimeS(settings, color) : 0;
   return (spectral ? DUPLEX_BMODE_SHARE : 1) / (bmode + colour);
 }
 

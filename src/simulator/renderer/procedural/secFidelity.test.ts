@@ -19,6 +19,7 @@ import {
 } from '@/simulator/renderer/postprocess/colorMap';
 import { ProceduralSliceRenderer } from '@/simulator/renderer/procedural/sliceRenderer';
 import { computeChamberStasis, scenePhysicsFor } from '@/simulator/renderer/scenePhysics';
+import { secNow, secOrificeKeep } from '@/simulator/renderer/acoustic/acoustics';
 import { allocPolarFrame, polarSpecFor } from '@/simulator/renderer/types';
 import { canonicalControl, getViewTarget } from '@/simulator/windows/viewTargets';
 
@@ -140,14 +141,37 @@ describe('PR C: Spontaneous Echo Contrast (SEC) & Color write-priority physics',
     const packed = allocPacked();
     packScene({ heart, heartPose: pose, thorax, physics: phys }, beam, polarSpecFor(settings, 'low'), packed);
 
-    assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LA']!]! - (phys.secLa ?? 0)) < 1e-6);
-    assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LV']!]! - (phys.secLv ?? 0)) < 1e-6);
+    // the frame's smoke: the stasis dispersed by the shear of the flows at this instant (acoustics.ts secNow)
+    const now = secNow(phys.secLa ?? 0, phys.secLv ?? 0, pose.state.mitralFlowMlps, pose.state.aorticFlowMlps);
+    assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LA']!]! - now.secLa) < 1e-6);
+    assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_LV']!]! - now.secLv) < 1e-6);
+    assert.ok(Math.abs(packed.data[PARAM_OFFSET['SEC_SHEAR']!]! - now.shear) < 1e-6);
 
     assert.ok(GLSL_PASS_B_MAIN.includes('SEC_LA') && GLSL_PASS_B_MAIN.includes('SEC_LV'));
     assert.ok(GLSL_PASS_B_MAIN.includes('SEC_GAIN') && GLSL_PASS_B_MAIN.includes('SEC_FREQ'));
     assert.ok(GLSL_PASS_B_MAIN.includes('SEC_LAA_BOOST'));
+    assert.ok(GLSL_PASS_B_MAIN.includes('SEC_SHEAR') && GLSL_PASS_B_MAIN.includes('SEC_ORIFICE_CLEAR'));
     // Pass A and Pass A Side remain free of SEC code to preserve SwiftShader compile budget
     assert.ok(!GLSL_PASS_A_MAIN.includes('SEC_LA') && !GLSL_PASS_A_SIDE_MAIN.includes('SEC_LA'));
+  });
+
+  it('disperses the smoke with the shear of the flow over the beat and clears it about the mitral inflow (Fase C)', () => {
+    const ms = computeChamberStasis(loadCaseById('mitral-stenosis-severe'));
+    // still blood keeps the whole smoke; brisk inflow disperses part of it, never all of it
+    const still = secNow(ms.secLa, 0, 0, 0);
+    assert.equal(still.secLa, ms.secLa);
+    assert.equal(still.shear, 0);
+    const brisk = secNow(ms.secLa, 0, 400, 0);
+    assert.ok(brisk.secLa < 0.8 * ms.secLa && brisk.secLa > 0.5 * ms.secLa, `${brisk.secLa} vs ${ms.secLa}`);
+    // monotone in the flow
+    assert.ok(secNow(ms.secLa, 0, 100, 0).secLa > secNow(ms.secLa, 0, 300, 0).secLa);
+    // the ventricle's smoke follows the briskest of inflow and ejection
+    const hf = computeChamberStasis(loadCaseById('hfref-severe-mr'));
+    assert.ok(secNow(0, hf.secLv, 0, 300).secLv < hf.secLv);
+    // cleared about the inflow under shear, untouched far from it or without shear
+    assert.equal(secOrificeKeep(0, 0), 1);
+    assert.ok(secOrificeKeep(brisk.shear, 0) < 0.7);
+    assert.ok(secOrificeKeep(brisk.shear, 25) > 0.99);
   });
 
   it('keeps tighter Color Doppler tissue write-priority window (full color on dark blood, clean valve rejection)', () => {

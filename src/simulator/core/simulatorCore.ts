@@ -30,7 +30,7 @@ import {
   type BeamFrame,
 } from '@/simulator/probe/pose';
 import { AtlasRenderer, AtlasRenderer as AtlasBackend } from '@/simulator/renderer/atlas/atlasRenderer';
-import { acquisitionFrameRate, cadenceHz } from '@/simulator/renderer/frameRate';
+import { acquisitionFrameRate, cadenceHz, colorFrameTimeS } from '@/simulator/renderer/frameRate';
 import { createWebgl2Renderer, type Webgl2Renderer } from '@/simulator/renderer/gpu/webgl2Renderer';
 import { isSpectralModality, isStripModality } from '@/simulator/renderer/modality';
 import {
@@ -570,6 +570,7 @@ export class SimulatorCore {
           timeS: this.timeS,
           frameIntervalS: this.frameIntervalS,
           seed: this.caseDef.seed,
+          sweepS: colorFrameTimeS(inp.settings, inp.color),
         },
         this.gpu,
       );
@@ -799,6 +800,8 @@ export class SimulatorCore {
         timeS: this.timeS,
         frameIntervalS: this.frameIntervalS,
         seed: this.caseDef.seed,
+        // the colour lines fire one after the other across the box (colorSweep.ts)
+        sweepS: colorFrameTimeS(inp.settings, inp.color),
       };
       if (onGpu && this.gpu && this.gpu.gbuffer.ready) {
         const ok = this.colorDriver.stepDeferredGpu(colorCtx, this.gpu);
