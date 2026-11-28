@@ -5,7 +5,10 @@ import {
   applyConsole,
   consoleCompensation,
   createConsoleState,
+  LOG_KNEE_SPAN,
+  LOG_KNEE_START,
   persistenceOverTime,
+  softKneeCompress,
   tgcAtDepth,
 } from './consolePipeline';
 
@@ -141,3 +144,31 @@ test('applyConsole dynamic range and gray maps behave monotonically across ampli
   const weakAvgWide = (outWide[8]! + outWide[64 + 8]!) / 2;
   assert.ok(weakAvgWide > weakAvgNarrow, 'wider dynamic range must preserve more low-level echoes');
 });
+
+test('softKneeCompress is C1-continuous, exact identity below knee, and preserves highlight gradation above REF_DB', () => {
+  assert.equal(softKneeCompress(-0.2), 0);
+  assert.equal(softKneeCompress(0), 0);
+  for (const y of [0.1, 0.45, 0.72, LOG_KNEE_START]) {
+    assert.ok(Math.abs(softKneeCompress(y) - y) < 1e-12, `identity broken at y=${y}`);
+  }
+  // C1 slope continuity across LOG_KNEE_START
+  const eps = 1e-5;
+  const slopeLeft = (softKneeCompress(LOG_KNEE_START) - softKneeCompress(LOG_KNEE_START - eps)) / eps;
+  const slopeRight = (softKneeCompress(LOG_KNEE_START + eps) - softKneeCompress(LOG_KNEE_START)) / eps;
+  assert.ok(Math.abs(slopeLeft - 1) < 1e-4 && Math.abs(slopeRight - 1) < 1e-3);
+
+  // Strictly monotonic across shoulder up to full saturation at LOG_KNEE_START + LOG_KNEE_SPAN
+  let prev = softKneeCompress(LOG_KNEE_START);
+  for (let i = 1; i <= 24; i++) {
+    const y = LOG_KNEE_START + (LOG_KNEE_SPAN * i) / 24;
+    const cur = softKneeCompress(y);
+    assert.ok(cur > prev, `not strictly monotonic at y=${y}: ${cur} <= ${prev}`);
+    prev = cur;
+  }
+  assert.equal(softKneeCompress(LOG_KNEE_START + LOG_KNEE_SPAN + 0.1), 1);
+
+  // Highlight reflectors above old 1.0 clip retain internal contrast instead of flat-clipping to 255
+  assert.ok(softKneeCompress(1.0) > 0.92 && softKneeCompress(1.0) < 0.97);
+  assert.ok(softKneeCompress(1.16) > softKneeCompress(1.0) + 0.03);
+});
+

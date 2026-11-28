@@ -72,14 +72,19 @@ export function scenePhysicsFor(
   const a = opts.artifacts ?? caseArtifactLevels(c);
   const w = c.acousticWindow;
   const stasis = computeChamberStasis(c);
+  // Trans-thoracic phase aberration across heterogeneous adipose/intercostal layers broadens the far-field
+  // beam waist and raises near-sidelobe skirts; Tissue Harmonic Imaging suppresses it (formed past the body wall).
+  const aberration =
+    Math.min(1, 0.45 * w.chestWallAttenuation + 0.65 * w.obesityAttenuation) *
+    (settings.harmonics ? 0.42 : 1);
   return {
     frequencyMHz: settings.frequencyMHz,
     harmonics: settings.harmonics,
     clutterLevel: Math.min(1, w.clutterLevel + 0.6 * a.clutter) + w.emphysemaScatter * 0.5,
     windowAttenuation: Math.min(1, w.chestWallAttenuation + 0.25 * w.obesityAttenuation),
     seed: opts.seed ?? c.seed,
-    beamWidth: a.beamWidth,
-    sideLobe: a.sideLobe,
+    beamWidth: Math.min(1, a.beamWidth + 0.22 * aberration),
+    sideLobe: Math.min(1, a.sideLobe + 0.24 * aberration),
     bloodFrame: opts.bloodFrame ?? 0,
     spatialCompound: Math.max(0, Math.min(1, settings.spatialCompound ?? 0)),
     secLa: stasis.secLa,

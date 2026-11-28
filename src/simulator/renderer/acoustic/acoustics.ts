@@ -61,12 +61,53 @@ export const HETERO_FREQ = 1.6;
 export const HETERO_DB_MYO = 6;
 export const HETERO_DB_LIVER = 4;
 export const HETERO_DB_MUSCLE = 4;
-/** Coherent (specular) echo at the interface sample: specular coefficient × |n·d|⁴ × gain. */
+/** Coherent (specular) echo at the interface sample: two-regime Kirchhoff/Beckmann law × partition-of-unity tent. */
 export const SPECULAR_GAIN = 1.0;
 /** Harmonic imaging factor on the specular echo. */
 export const SPECULAR_HARMONIC = 1.1;
 /** Lower bound of |n·d| in the interface window, so grazing interfaces still occupy one sample. */
 export const SPECULAR_WINDOW_MIN = 0.15;
+/**
+ * Partition-of-unity tent normalization: replaces the discontinuous 2-sample boxcar (|sdf| < w, which jumped 2:1
+ * in coherent sum between sample-centred and half-sample-centred interfaces, drawing +6 dB Moiré steps along gently
+ * curved walls) with `1 − |sdf|/w` while preserving exact post-PSF normal-incidence interface brightness.
+ */
+export const SPECULAR_TENT_NORM = 1.62;
+/** Share of the wavelength-scale Beckmann quasi-specular diffuse skirt (|n·d|^1.5) vs coherent mirror lobe (|n·d|^4). */
+export const SPECULAR_SKIRT_SHARE = 0.22;
+/**
+ * Short-range axial micro-reverberation (layer ringdown / comet-tail) behind hyper-reflective interfaces
+ * (pericardium, dense valvular calcium, fibrous root): threshold on central specular amplitude, gains, and decay.
+ */
+export const SPEC_TAIL_THRESHOLD = 0.36;
+export const SPEC_TAIL_GAIN = 0.16;
+export const CALC_TAIL_GAIN = 0.26;
+export const SPEC_TAIL_DECAY_CM = 0.085;
+
+/**
+ * Two-regime Kirchhoff/Beckmann interface echo at signed distance magnitude `absSdf` (cm), incidence cosine `nd`
+ * (|n·d| ∈ [0, 1]) and radial step `dr` (cm):
+ *  - partition-of-unity linear tent `1 − absSdf / w` eliminates sub-sample 2:1 Moiré banding on curved borders;
+ *  - coherent mirror lobe (|n·d|⁴) gives crisp normal-incidence highlights (pericardium, anterior/posterior aorta);
+ *  - quasi-specular Beckmann skirt (|n·d|^1.5) preserves continuous organic endocardial/leaflet borders at 35°–75°
+ *    incidence while vanishing at 90° (`nd = 0`) so true parallel-wall lateral dropout stays intact.
+ */
+export function interfaceEcho(absSdf: number, nd: number, dr: number): number {
+  const c = Math.max(0, Math.min(1, nd));
+  const w = Math.max(c, SPECULAR_WINDOW_MIN) * Math.max(1e-6, dr);
+  const tent = absSdf >= 0 ? Math.max(0, 1 - absSdf / w) * SPECULAR_TENT_NORM : 0;
+  const c2 = c * c;
+  return tent * ((1 - SPECULAR_SKIRT_SHARE) * c2 * c2 + SPECULAR_SKIRT_SHARE * c * Math.sqrt(c));
+}
+
+/** Source amplitude of short-range axial micro-reverberation behind strong specular or calcified reflectors. */
+export function interfaceTailSource(specular: number, extraReflect: number): number {
+  const sp = Math.max(0, specular - SPEC_TAIL_THRESHOLD) * SPEC_TAIL_GAIN;
+  const ca =
+    Math.max(0, (extraReflect - CALCIUM_ATTEN_THRESHOLD) / (1 - CALCIUM_ATTEN_THRESHOLD)) *
+    CALC_TAIL_GAIN;
+  return sp + Math.min(CALC_TAIL_GAIN, ca);
+}
 
 export const REVERB_PERIOD_MIN_CM = 0.4;
 export const REVERB_WIDTH_CM = 0.12;
@@ -470,6 +511,12 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   SPECULAR_GAIN,
   SPECULAR_HARMONIC,
   SPECULAR_WINDOW_MIN,
+  SPECULAR_TENT_NORM,
+  SPECULAR_SKIRT_SHARE,
+  SPEC_TAIL_THRESHOLD,
+  SPEC_TAIL_GAIN,
+  CALC_TAIL_GAIN,
+  SPEC_TAIL_DECAY_CM,
   REVERB_PERIOD_MIN_CM,
   REVERB_WIDTH_CM,
   REVERB_DECAY,

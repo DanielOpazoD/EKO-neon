@@ -73,7 +73,9 @@ import {
   SCATTER_FREQ_RATIO,
   SPECULAR_GAIN,
   SPECULAR_HARMONIC,
-  SPECULAR_WINDOW_MIN,
+  SPEC_TAIL_DECAY_CM,
+  interfaceEcho,
+  interfaceTailSource,
   TRANSMISSION_FLOOR,
   ELEVATION_SIGMA_PER_HALF_WIDTH,
   STRONG_SCATTERER_FRACTION,
@@ -548,12 +550,10 @@ export class ProceduralSliceRenderer implements RendererBackend {
       if (props.specular > 0) {
         const sScale = props.specular * SPECULAR_GAIN * (harm ? SPECULAR_HARMONIC : 1);
         const absSdf = Math.abs(q.sdf);
-        const sp0 = absSdf < Math.max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0;
+        const sp0 = sScale * interfaceEcho(absSdf, nd, dr);
         if (sc > 0) {
-          const spP =
-            absSdf < Math.max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0;
-          const spM =
-            absSdf < Math.max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0;
+          const spP = sScale * interfaceEcho(absSdf, ndP, dr);
+          const spM = sScale * interfaceEcho(absSdf, ndM, dr);
           specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
         } else {
           specular = sp0;
@@ -562,6 +562,12 @@ export class ProceduralSliceRenderer implements RendererBackend {
       a.sigma = sigma;
       a.spec = specular;
     };
+    let tail0 = 0,
+      tail1 = 0,
+      tail2 = 0;
+    const td1 = Math.exp(-dr / SPEC_TAIL_DECAY_CM),
+      td2 = td1 * td1,
+      td3 = td2 * td1;
     for (let si = 0; si < samples; si++) {
       const r = (si + 0.5) * dr;
       const idx = base + si;
@@ -587,6 +593,9 @@ export class ProceduralSliceRenderer implements RendererBackend {
         tr[idx] = transmission;
         ti[idx] = Tissue.None;
         if (sg) sg[idx] = 0;
+        tail2 = tail1;
+        tail1 = tail0;
+        tail0 = 0;
         continue;
       }
       const inHeart = kind === 2;
@@ -644,7 +653,9 @@ export class ProceduralSliceRenderer implements RendererBackend {
         const w = cordWeight(s.nx * nrmH.x + s.ny * nrmH.y + s.nz * nrmH.z, sliceHalfWidthCm(r));
         sigma *= w;
         specular *= w;
-      } else if (nElev > 1) {
+      }
+      const specCentral = specular;
+      if (nElev > 1 && tissue !== Tissue.Valve && tissue !== Tissue.Chordae) {
         // slice thickness: the beam's elevational width grows away from the focus; backscatter and interface
         // echo are the weighted mean over the slice (¼ ½ ¼), which blurs obliquely cut structures
         const e = sliceHalfWidthCm(r);
@@ -698,6 +709,18 @@ export class ProceduralSliceRenderer implements RendererBackend {
       const fg = focusingGain(r, focus);
       sigma *= fg;
       specular *= fg;
+      if (!line) {
+        const tail = tail0 * td1 + tail1 * td2 + tail2 * td3;
+        if (tail > 0) {
+          const tScaled = tail * fg;
+          sigma += 0.65 * tScaled;
+          specular += 0.35 * tScaled;
+        }
+        const extraQ = Math.round(Math.max(0, Math.min(1, s.extraReflect)) * 255) / 255;
+        tail2 = tail1;
+        tail1 = tail0;
+        tail0 = interfaceTailSource(specCentral, extraQ);
+      }
       // complex scatterer phasor of the central plane, anchored in tissue coordinates (moves with the tissue). Across the
       // plane its lattice cell is the slice thickness, as for an M-mode line (decision 99): at the scatterer cell (0.4 mm)
       // a probe tilt that moved the plane by 0.31 mm at 9 cm left the myocardial speckle with a correlation of 0.71, for a

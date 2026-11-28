@@ -450,6 +450,14 @@ float cordWeight(float axisDotPlane, float sliceHalfWidthCm) {
 float cordAlignment(float axisDotBeam) {
   return sqrt(max(0.0, 1.0 - axisDotBeam * axisDotBeam));
 }
+// src/simulator/renderer/acoustic/acoustics.ts: interfaceEcho
+float interfaceEcho(float absSdf, float nd, float dr) {
+  float c = clamp(nd, 0.0, 1.0);
+  float w = max(c, SPECULAR_WINDOW_MIN) * max(1e-6, dr);
+  float tent = absSdf >= 0.0 ? max(0.0, 1.0 - absSdf / w) * SPECULAR_TENT_NORM : 0.0;
+  float c2 = c * c;
+  return tent * ((1.0 - SPECULAR_SKIRT_SHARE) * c2 * c2 + SPECULAR_SKIRT_SHARE * c * sqrt(c));
+}
 // src/simulator/renderer/acoustic/psf.ts: sliceHalfWidthCm
 float sliceHalfWidthCm(float rCm) {
   return SLICE_HALF_BASE_CM + SLICE_HALF_SLOPE * abs(rCm - ELEVATION_FOCUS_CM);

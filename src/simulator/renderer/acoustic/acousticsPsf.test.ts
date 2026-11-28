@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  interfaceEcho,
+  interfaceTailSource,
   MYO_ANISO_FLOOR,
   myoHelixGain,
   papillaryFibreGain,
   pleuralCoherence,
   pleuralIncidenceCos,
   softTissueTransmission,
+  SPECULAR_TENT_NORM,
 } from './acoustics';
 import {
   axialFwhmMm,
@@ -214,4 +217,43 @@ test('free-breathing mode modulates lung curtain continuously over the respirato
   );
   core.dispose();
 });
+
+test('two-regime Kirchhoff/Beckmann interfaceEcho eliminates sub-sample Moiré and preserves oblique borders vs grazing dropout', () => {
+  const dr = 0.05;
+  // 1) Partition-of-unity sub-sample invariance: shifting an interface across fractional radial steps keeps sum constant
+  const sumAtPhase = (frac: number, nd: number): number => {
+    let sum = 0;
+    for (let k = -3; k <= 3; k++) {
+      const sdf = Math.abs((k - frac) * nd * dr);
+      sum += interfaceEcho(sdf, nd, dr);
+    }
+    return sum;
+  };
+  const baseSum = sumAtPhase(0, 0.85);
+  for (const frac of [0.15, 0.33, 0.5, 0.78]) {
+    assert.ok(
+      Math.abs(sumAtPhase(frac, 0.85) - baseSum) < 1e-9,
+      `expected sub-sample coherent sum invariance, got ${sumAtPhase(frac, 0.85)} vs ${baseSum}`,
+    );
+  }
+  assert.ok(Math.abs(interfaceEcho(0, 1, dr) - SPECULAR_TENT_NORM) < 1e-9);
+
+  // 2) At 60° oblique incidence (nd = 0.5), Beckmann diffuse skirt lifts border echo above pure |n·d|^4 while nd = 0 drops to 0
+  const pureFourth = SPECULAR_TENT_NORM * Math.pow(0.5, 4);
+  assert.ok(interfaceEcho(0, 0.5, dr) > pureFourth * 1.8);
+  assert.equal(interfaceEcho(0, 0, dr), 0);
+
+  // 3) Axial micro-reverberation tail source activates only on strong specular / calcific reflectors
+  assert.equal(interfaceTailSource(0.2, 0.1), 0);
+  assert.ok(interfaceTailSource(1.1, 0) > 0.08);
+  assert.ok(interfaceTailSource(0.2, 0.9) > 0.15);
+
+  // 4) Trans-thoracic phase aberration raises beamWidth & sideLobe in difficult habitus and THI suppresses it
+  const diffCase = loadCaseById('normal-difficult-window');
+  const physFund = scenePhysicsFor(diffCase, { frequencyMHz: 2.5, harmonics: false, spatialCompound: 0.5 });
+  const physThi = scenePhysicsFor(diffCase, { frequencyMHz: 2.5, harmonics: true, spatialCompound: 0.5 });
+  assert.ok((physFund.beamWidth ?? 0) > (physThi.beamWidth ?? 0));
+  assert.ok((physFund.sideLobe ?? 0) > (physThi.sideLobe ?? 0));
+});
+
 
