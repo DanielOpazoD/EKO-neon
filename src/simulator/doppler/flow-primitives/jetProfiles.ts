@@ -244,11 +244,56 @@ export function inflowJet(
   out.present = 1;
 }
 
+/** Time constant (s) over which the diastolic LV vortex ring loses its circulation in diastasis (Fase C). */
+export const LV_VORTEX_DECAY_S = 0.22;
+/** The same for the smaller ring the atrial contraction rolls up: a shorter, weaker jet. */
+const LV_VORTEX_A_DECAY_S = 0.12;
+/** Time constant (s) of the ring's travel from the leaflet tips toward the mid cavity. */
+const LV_VORTEX_TRAVEL_S = 0.11;
+
 /**
- * Physiological LV diastolic apical vortex & outflow-tract redirection (Pedrizzetti / Sengupta):
- * during E-wave deceleration, transmitral inflow turns anteriorly in the mid-apical LV and returns
- * smoothly along the anteroseptal/LVOT corridor toward the aortic valve (`avAxis`), priming the
- * outflow tract while keeping the mitral leaflet-tip PW plane and CMM Vp centerline strictly untouched.
+ * Circulation of the diastolic LV vortex ring (0–1 of its peak) at time `t` (s) of the beat, and how far its core has
+ * travelled from the leaflet tips toward the mid cavity (0–1). The ring rolls up at the edge of the early filling jet
+ * from the middle of E acceleration, is complete in mid deceleration, then loses its circulation through diastasis; the
+ * atrial contraction rolls up a second, weaker one (`aShare` of the first); by the QRS what is left has been handed to
+ * the outflow tract (Kilner et al., Nature 2000;404:759-761; Pedrizzetti et al., Nat Rev Cardiol 2014;11:545-553).
+ */
+export function lvVortexState(
+  tm: BeatTables['timings'],
+  rrS: number,
+  t: number,
+  aShare: number,
+): { strength: number; travel: number } {
+  const tt = t < tm.ejectionStartS ? t + rrS : t;
+  const t0 = tm.mitralOpenS + 0.35 * tm.eAccelS;
+  const t1 = tm.mitralOpenS + tm.eAccelS + 0.55 * tm.eDecelS;
+  if (!(tt > t0) || !(t1 > t0)) return { strength: 0, travel: 0 };
+  let s = smoothstep(t0, t1, tt) * Math.exp(-Math.max(0, tt - t1) / LV_VORTEX_DECAY_S);
+  if (tm.hasAWave && aShare > 0 && Number.isFinite(tm.aStartS)) {
+    const a0 = tm.aStartS < t0 ? tm.aStartS + rrS : tm.aStartS;
+    const a1 = a0 + 0.6 * Math.max(0.02, tm.aEndS - tm.aStartS);
+    s = Math.max(
+      s,
+      aShare * smoothstep(a0, a1, tt) * Math.exp(-Math.max(0, tt - a1) / LV_VORTEX_A_DECAY_S),
+    );
+  }
+  // gone by the QRS: the isovolumic contraction and the ejection carry their own outflow, and a lingering low-velocity
+  // outflow-tract stream would run into the ejection's CW/PW envelope and stretch its mean gradient
+  s *= 1 - smoothstep(rrS - 0.06, rrS, tt);
+  return {
+    strength: Math.max(0, Math.min(1, s)),
+    travel: 1 - Math.exp(-(tt - t0) / LV_VORTEX_TRAVEL_S),
+  };
+}
+
+/**
+ * Physiological LV diastolic vortex (Fase C; Kilner, Pedrizzetti, Sengupta): a ring rolled up at the shear layer of the
+ * transmitral jet, with a Lamb–Oseen core, that travels from the leaflet tips toward the mid cavity and keeps turning
+ * through diastasis — inward behind the core, apically along the jet's flank, outward ahead of it and back toward the base
+ * along the walls. Asymmetric as the anterior leaflet makes it: the lobe under it, toward the outflow tract, is the larger
+ * and stronger and carries the returning blood along the anteroseptal wall toward the aortic valve (`avAxis`), priming the
+ * outflow tract for ejection. Inside the jet's core (the leaflet-tip PW plane, the colour M-mode line) the ring adds
+ * nothing, so E, A, DT, VTI and Vp stay exact.
  */
 export function sampleLvDiastolicVortex(
   tables: BeatTables,
@@ -264,20 +309,17 @@ export function sampleLvDiastolicVortex(
   ePeakMps: number,
   ePrimeSeptalCmps: number,
   out: FlowSample,
+  mvAreaCm2 = 4,
+  aPeakMps = 0,
 ): void {
   const zr = z - zAnn;
   if (zr < 0.1 || zr > lengthNow - 0.25) return;
 
-  const tm = tables.timings;
   const rr = tables.rrS;
   const t = (((phase % 1) + 1) % 1) * rr;
-  const tStart = tm.mitralOpenS + 0.6 * tm.eAccelS;
-  const tEnd = Math.min(rr, tm.eEndS - 0.005);
-  if (tEnd <= tStart + 0.02 || t <= tStart || t >= tEnd) return;
-
-  const uT = (t - tStart) / (tEnd - tStart);
-  const timeAmp = Math.sin(Math.PI * uT) * Math.pow(uT, 0.35);
-  if (timeAmp < 0.02) return;
+  const aShare = ePeakMps > 0 ? Math.min(0.75, 0.6 * (aPeakMps / ePeakMps)) : 0;
+  const { strength, travel } = lvVortexState(tables.timings, rr, t, aShare);
+  if (strength < 0.02) return;
 
   // Unit horizontal axis from mitral inflow center toward the anterior/septal LVOT (PLAX / A3C / A5C plane)
   const ox = avCenter.x - mvCenter.x;
@@ -289,24 +331,23 @@ export function sampleLvDiastolicVortex(
   const dx = x - mvCenter.x;
   const dy = y - mvCenter.y;
   const sOut = dx * ux + dy * uy;
-  if (sOut <= -0.15 || sOut >= 3.4) return;
-
   const sPerp = -dx * uy + dy * ux;
-  const wPerp = Math.exp(-(sPerp * sPerp) / (2 * 1.35 * 1.35));
-  if (wPerp < 0.04) return;
-
   const zeta = zr / Math.max(4, lengthNow);
+  // weaker and shorter-lived where relaxation is impaired (low e′)
   const vPeak =
     Math.min(0.44, 0.36 * (ePeakMps / 0.8)) *
     Math.min(1.15, Math.max(0.45, ePrimeSeptalCmps / 9));
 
   let added = false;
+  let lvotShare = 0;
 
   // 1. Anteroseptal / LVOT basal return limb (strictly anterior to the open anterior mitral leaflet, sOut > 0.85 cm)
-  if (sOut > 0.85 && zeta > 0.03 && zeta < 0.86) {
+  const wPerp = Math.exp(-(sPerp * sPerp) / (2 * 1.35 * 1.35));
+  if (sOut > 0.85 && sOut < 3.4 && wPerp >= 0.04 && zeta > 0.03 && zeta < 0.86) {
     const wSide = smoothstep(0.85, 1.45, sOut) * fadeOut(sOut, 2.4, 3.4);
     const wZ = smoothstep(0.03, 0.15, zeta) * fadeOut(zeta, 0.62, 0.86);
-    const revBlend = timeAmp * wSide * wZ * wPerp;
+    lvotShare = wSide * wZ * wPerp;
+    const revBlend = strength * lvotShare;
     const vRet = vPeak * revBlend;
     if (vRet > 0.015) {
       // Anterior mitral leaflet separates the LVOT corridor from transmitral inflow:
@@ -321,15 +362,42 @@ export function sampleLvDiastolicVortex(
     }
   }
 
-  // 2. Mid-apical anterior turning limb sweeping inflow toward the anteroseptal wall (purely horizontal +uOut)
-  if (zeta > 0.42 && zeta < 0.86 && sOut > -0.15 && sOut < 2.2) {
-    const wTurnSide = smoothstep(-0.15, 0.45, sOut) * fadeOut(sOut, 1.3, 2.2);
-    const wTurnZ = smoothstep(0.42, 0.58, zeta) * fadeOut(zeta, 0.7, 0.86);
-    const vTurn = 0.65 * vPeak * timeAmp * wTurnSide * wTurnZ * wPerp;
-    if (vTurn > 0.015) {
-      out.vx += ux * vTurn;
-      out.vy += uy * vTurn;
-      added = true;
+  // 2. The ring: Lamb–Oseen core at the jet's shear layer, travelling apically, larger and stronger toward the LVOT
+  const re = Math.sqrt(Math.max(0.5, mvAreaCm2) / Math.PI);
+  const rho = Math.hypot(dx, dy);
+  const mJet = smoothstep(0.8 * re, 1.15 * re, rho);
+  if (mJet > 0) {
+    const wAnt = 0.5 + 0.5 * (sOut / rho);
+    const rhoC = re + 0.3;
+    const zNear = 0.9;
+    const zFar = Math.max(zNear + 0.5, Math.min(4.2, 0.48 * lengthNow));
+    const zc = zNear + (zFar - zNear) * travel;
+    const core = 0.45 + 0.4 * wAnt;
+    const dRho = rho - rhoC;
+    const dZ = zr - zc;
+    const d = Math.hypot(dRho, dZ);
+    if (d > 1e-4 && d < 3.4) {
+      const sc = d / core;
+      // Lamb–Oseen azimuthal velocity, 1 at its peak (sc = 1.121)
+      const lamb = (1 - Math.exp(-sc * sc)) / sc / 0.6382;
+      const v =
+        vPeak *
+        strength *
+        (0.35 + 0.65 * wAnt) *
+        lamb *
+        mJet *
+        fadeOut(d, 2.4, 3.4) *
+        fadeOut(zr, 0.8 * lengthNow, lengthNow - 0.25);
+      if (v > 0.01) {
+        // inward behind the core, apical on its inner side, outward ahead, basal on its outer side;
+        // partition cleanly with the LVOT redirection limb so basal return in the anteroseptal corridor is not double-counted
+        const vRho = ((v * dZ) / d) * (1 - 0.55 * lvotShare);
+        const vzScale = dRho > 0 ? 1 - lvotShare : 1;
+        out.vx += (vRho * dx) / rho;
+        out.vy += (vRho * dy) / rho;
+        out.vz += ((-v * dRho) / d) * vzScale;
+        added = true;
+      }
     }
   }
 

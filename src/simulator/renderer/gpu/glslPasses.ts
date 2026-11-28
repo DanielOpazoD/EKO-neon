@@ -538,11 +538,15 @@ void main() {
       sec = SEC_LV * lvFrac;
     }
     if (sec > 0.0) {
+      // fresh blood the mitral inflow brings has not aggregated: cleared about the orifice (atrium) or the inflow axis
+      vec2 dm = pH.xy - vec2(MVL_CX + SWING_X, MVL_CY);
+      float dmz = sid == S_LV_CAV ? 0.0 : pH.z - ZANN;
+      float keep = 1.0 - SEC_ORIFICE_CLEAR * SEC_SHEAR * exp(-(dot(dm, dm) + dmz * dmz) / (2.0 * SEC_ORIFICE_SIGMA_CM * SEC_ORIFICE_SIGMA_CM));
       float sx = pH.x * SEC_FREQ + BLOOD_SHIFT * SEC_DRIFT_X;
       float sy = pH.y * SEC_FREQ - BLOOD_SHIFT * SEC_DRIFT_Y;
       float sz = pH.z * SEC_FREQ;
       float swirl = 0.5 + 0.5 * sin(sx + 0.85 * cos(sy * 1.15 + sz * 0.75)) * cos(sy * 0.9 - 0.75 * sin(sz * 1.1 - sx * 0.65));
-      sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
+      sigma += sec * keep * SEC_GAIN * (SEC_BASE_FLOOR + (1.0 - SEC_BASE_FLOOR) * swirl * swirl);
     }
   }
   // the beam's on-axis sensitivity at this depth: wide near the face, narrowest at the focus (decision 144)

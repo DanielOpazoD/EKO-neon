@@ -10,7 +10,7 @@ import type { BeamFrame } from '@/simulator/probe/pose';
 import { contactQuality } from '@/simulator/probe/pose';
 import type { PolarFrameSpec, Scene } from '../types';
 import { hash3 } from '@/core/random';
-import { attenuationFrequencyMHz, bloodShiftCells } from '../acoustic/acoustics';
+import { attenuationFrequencyMHz, bloodShiftCells, secNow } from '../acoustic/acoustics';
 
 /**
  * Single source of truth for the scene parameters shared by the CPU classifier and the GLSL port:
@@ -63,6 +63,7 @@ const SCALARS = [
   'SPATIAL_COMP',
   'SEC_LA',
   'SEC_LV',
+  'SEC_SHEAR',
   // LV geometry & pose
   'BOUND_CX',
   'BOUND_CY',
@@ -413,8 +414,16 @@ export function packScene(
   set('FOCUS', spec.focusCm);
   set('BLOOD_SHIFT', bloodShiftCells(physics.bloodFrame ?? 0));
   set('SPATIAL_COMP', Math.max(0, Math.min(1, physics.spatialCompound ?? 0)));
-  set('SEC_LA', Math.max(0, Math.min(1, physics.secLa ?? 0)));
-  set('SEC_LV', Math.max(0, Math.min(1, physics.secLv ?? 0)));
+  // the smoke of this frame: the chambers' stasis dispersed by the shear of the flows now (acoustics.ts secNow)
+  const sec = secNow(
+    physics.secLa ?? 0,
+    physics.secLv ?? 0,
+    hp.state.mitralFlowMlps,
+    hp.state.aorticFlowMlps,
+  );
+  set('SEC_LA', sec.secLa);
+  set('SEC_LV', sec.secLv);
+  set('SEC_SHEAR', sec.shear);
   const lv = heart.lv;
   set('BOUND_CX', heart.boundCenter.x);
   set('BOUND_CY', heart.boundCenter.y);

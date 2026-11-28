@@ -179,6 +179,49 @@ export const SEC_DRIFT_X = (4 * Math.PI) / 128;
 export const SEC_DRIFT_Y = (2 * Math.PI) / 128;
 export const SEC_BASE_FLOOR = 0.16;
 export const SEC_LAA_BOOST = 1.15;
+/**
+ * Shear dispersal of the smoke (Fase C). Spontaneous echo contrast is red-cell aggregation (rouleaux) in slow blood, and
+ * the shear of a brisk flow breaks the aggregates up again: the echogenicity of blood varies over the beat, brightest as
+ * flow slows and fading as it accelerates (cyclic variation of blood echogenicity; Shung et al., Ultrasound Med Biol
+ * 1992;18:433-439; Paeschke et al., J Am Soc Echocardiogr 1995). SEC_SHEAR_HALF_MLPS is the flow through the chamber at
+ * which half the dispersal is reached, SEC_SHEAR_DEPTH the share of the smoke the briskest flow disperses everywhere in it,
+ * and SEC_ORIFICE_CLEAR the share it clears where the mitral inflow converges onto the orifice (atrium) or runs down its
+ * axis (ventricle), over a Gaussian of SEC_ORIFICE_SIGMA_CM: fresh blood that has not aggregated. Assumed values, not fits.
+ */
+export const SEC_SHEAR_HALF_MLPS = 180;
+export const SEC_SHEAR_DEPTH = 0.45;
+export const SEC_ORIFICE_CLEAR = 0.7;
+export const SEC_ORIFICE_SIGMA_CM = 1.1;
+
+/**
+ * The smoke of a frame: the chambers' stasis (scenePhysics.ts computeChamberStasis) dispersed by the shear of the flows
+ * now — the mitral inflow in the atrium, the larger of the inflow and the ejection in the ventricle — and the mitral shear
+ * (0–1) that clears it about the inflow. One function for the CPU tracer and the GPU's packed scene.
+ */
+export function secNow(
+  secLa: number,
+  secLv: number,
+  mitralFlowMlps: number,
+  aorticFlowMlps: number,
+): { secLa: number; secLv: number; shear: number } {
+  const shear = (q: number): number => {
+    const f = Math.max(0, q);
+    return f / (f + SEC_SHEAR_HALF_MLPS);
+  };
+  const shMv = shear(mitralFlowMlps);
+  const shLv = Math.max(shMv, shear(aorticFlowMlps));
+  const c01 = (v: number): number => Math.max(0, Math.min(1, v));
+  return {
+    secLa: c01(secLa) * (1 - SEC_SHEAR_DEPTH * shMv),
+    secLv: c01(secLv) * (1 - SEC_SHEAR_DEPTH * shLv),
+    shear: shMv,
+  };
+}
+
+/** Share of the smoke left at squared distance `d2` (cm²) from the inflow, under mitral shear `shear` (Pass B mirrors it). */
+export function secOrificeKeep(shear: number, d2: number): number {
+  return 1 - SEC_ORIFICE_CLEAR * shear * Math.exp(-d2 / (2 * SEC_ORIFICE_SIGMA_CM * SEC_ORIFICE_SIGMA_CM));
+}
 /** Lattice offsets of the heterogeneity noise (material coordinates · HETERO_FREQ + offset). */
 export const HETERO_OFFSET: readonly [number, number, number] = [5.3, 1.7, 9.1];
 /**
@@ -547,6 +590,8 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   SEC_DRIFT_Y,
   SEC_BASE_FLOOR,
   SEC_LAA_BOOST,
+  SEC_ORIFICE_CLEAR,
+  SEC_ORIFICE_SIGMA_CM,
   CALCIUM_GAIN,
   CALCIUM_BASE,
   CALCIUM_AMP,

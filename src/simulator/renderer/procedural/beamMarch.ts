@@ -39,10 +39,12 @@ export interface LineContext {
   bloodShift: number;
   /** Multi-angle spatial compounding strength (0..1). */
   spatialCompound: number;
-  /** Hemodynamic LA/LAA spontaneous echo contrast intensity (0..1). */
+  /** Hemodynamic LA/LAA spontaneous echo contrast intensity (0..1), dispersed by the shear of the flows now. */
   secLa: number;
-  /** Hemodynamic LV mid-apical spontaneous echo contrast intensity (0..1). */
+  /** Hemodynamic LV mid-apical spontaneous echo contrast intensity (0..1), dispersed by the shear of the flows now. */
   secLv: number;
+  /** Mitral inflow shear (0..1) that clears the smoke about the inflow (acoustics.ts secNow). */
+  secShear: number;
   latA: Uint8Array;
   latB: Uint8Array;
   latC: Uint8Array;

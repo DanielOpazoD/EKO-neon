@@ -36,6 +36,8 @@ import {
   SEC_FREQ,
   SEC_GAIN,
   SEC_LAA_BOOST,
+  secNow,
+  secOrificeKeep,
   CALCIUM_AMP,
   calciumAttenDb,
   CALCIUM_BASE,
@@ -322,6 +324,12 @@ export class ProceduralSliceRenderer implements RendererBackend {
     const f = physics.frequencyMHz;
     const harm = physics.harmonics;
     const hf = heart.frame;
+    const sec = secNow(
+      physics.secLa ?? 0,
+      physics.secLv ?? 0,
+      scene.heartPose.state.mitralFlowMlps,
+      scene.heartPose.state.aorticFlowMlps,
+    );
     return {
       scene,
       beam,
@@ -341,8 +349,9 @@ export class ProceduralSliceRenderer implements RendererBackend {
       nrmH: torsoToHeartDir(hf, beam.normal),
       bloodShift: bloodShiftCells(physics.bloodFrame ?? 0),
       spatialCompound: Math.max(0, Math.min(1, physics.spatialCompound ?? 0)),
-      secLa: Math.max(0, Math.min(1, physics.secLa ?? 0)),
-      secLv: Math.max(0, Math.min(1, physics.secLv ?? 0)),
+      secLa: sec.secLa,
+      secLv: sec.secLv,
+      secShear: sec.shear,
       ...speckleLattices(physics.seed),
       line: null,
     };
@@ -694,6 +703,12 @@ export class ProceduralSliceRenderer implements RendererBackend {
           sec = ctx.secLv * lvFrac;
         }
         if (sec > 0) {
+          // fresh blood the mitral inflow brings has not aggregated: cleared about the orifice (atrium) or the inflow axis
+          const mv = ctx.scene.heartPose.valves.mitral;
+          const dmx = hx - ctx.scene.heartPose.swingX - mv.cx;
+          const dmy = hy - mv.cy;
+          const dmz = s.structure === Structure.LvCavity ? 0 : hz - ctx.scene.heartPose.zAnn;
+          const keep = secOrificeKeep(ctx.secShear, dmx * dmx + dmy * dmy + dmz * dmz);
           const sx = hx * SEC_FREQ + ctx.bloodShift * SEC_DRIFT_X;
           const sy = hy * SEC_FREQ - ctx.bloodShift * SEC_DRIFT_Y;
           const sz = hz * SEC_FREQ;
@@ -702,7 +717,7 @@ export class ProceduralSliceRenderer implements RendererBackend {
             0.5 *
               Math.sin(sx + 0.85 * Math.cos(sy * 1.15 + sz * 0.75)) *
               Math.cos(sy * 0.9 - 0.75 * Math.sin(sz * 1.1 - sx * 0.65));
-          sigma += sec * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
+          sigma += sec * keep * SEC_GAIN * (SEC_BASE_FLOOR + (1 - SEC_BASE_FLOOR) * swirl * swirl);
         }
       }
       // the beam's on-axis sensitivity at this depth: wide near the face, narrowest at the focus (decision 144)
