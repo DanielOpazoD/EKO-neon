@@ -1,6 +1,4 @@
-import { EXAM_CASE_NAME, showsCaseIdentity } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
-import { listCases } from '@/cases';
 import { VIEW_TARGETS } from '@/simulator/windows/viewDefinitions';
 import { useShallow } from 'zustand/shallow';
 import { CaseCard } from '../CaseCard';
@@ -8,13 +6,10 @@ import { Section, Segmented, Slider } from '../controls';
 import { PresetViews } from '../PresetViews';
 import { useTip } from './useTip';
 
-/** Streamlined «Vistas» tab: core canonical windows, patient context, and collapsible manual probe sliders. */
+/** Streamlined «Vistas» tab: core canonical windows, patient respiration, and collapsible details. */
 export function AcquireTab() {
   const s = useSimStore(
     useShallow((st) => ({
-      caseId: st.caseId,
-      examFinished: st.examFinished,
-      loadCase: st.loadCase,
       mode: st.mode,
       patient: st.patient,
       probe: st.probe,
@@ -47,26 +42,6 @@ export function AcquireTab() {
         </Section>
       )}
       <Section title="Paciente">
-        <div className="row stack">
-          <label>Caso</label>
-          <select
-            aria-label="Caso"
-            value={s.caseId}
-            onChange={(e) => s.loadCase(e.target.value)}
-            disabled={s.mode === 'exam'}
-          >
-            {showsCaseIdentity(s.mode, s.examFinished) ? (
-              listCases().map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.title}
-                </option>
-              ))
-            ) : (
-              // the titles name the diagnoses: during an exam the selector names none (decision 234)
-              <option value={s.caseId}>{EXAM_CASE_NAME}</option>
-            )}
-          </select>
-        </div>
         <div className="row">
           <label>Respiración</label>
           <Segmented

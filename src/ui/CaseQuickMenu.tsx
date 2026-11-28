@@ -1,16 +1,18 @@
-import { modePolicy, showsCaseIdentity } from '@/app/modePolicy';
+import { EXAM_CASE_NAME, modePolicy, showsCaseIdentity } from '@/app/modePolicy';
 import { useSimStore } from '@/app/store';
 import { listCases } from '@/cases';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShallow } from 'zustand/shallow';
 
 /**
- * Compact 1-click clinical case switcher anchored on the top-left HUD case title so an instructor
- * can switch pathologies live during a class without leaving Medir or Doppler.
- * Strictly non-interactive in exam mode (`mode === 'exam'` or `!showsCaseIdentity`) so exam cases
- * stay locked and anonymous.
+ * Clean 1-click clinical case switcher for TopBar (light surface) or dark overlays.
+ * Strictly non-interactive and anonymous (`EXAM_CASE_NAME`) in exam mode.
  */
-export function CaseQuickMenu(props: { children: React.ReactNode; titleAttr?: string }) {
+export function CaseQuickMenu(props: {
+  children?: React.ReactNode;
+  titleAttr?: string;
+  surface?: 'dark' | 'light';
+}) {
   const s = useSimStore(
     useShallow((st) => ({
       mode: st.mode,
@@ -22,8 +24,12 @@ export function CaseQuickMenu(props: { children: React.ReactNode; titleAttr?: st
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const cases = useMemo(() => listCases(), []);
-  const allowed =
-    s.mode !== 'exam' && !modePolicy(s.mode).assignsCase && showsCaseIdentity(s.mode, s.examFinished);
+  const identity = showsCaseIdentity(s.mode, s.examFinished);
+  const allowed = s.mode !== 'exam' && !modePolicy(s.mode).assignsCase && identity;
+  const activeTitle = identity
+    ? (cases.find((c) => c.id === s.caseId)?.title ?? s.caseId)
+    : EXAM_CASE_NAME;
+  const surface = props.surface ?? 'light';
 
   useEffect(() => {
     if (!open) return;
@@ -42,32 +48,39 @@ export function CaseQuickMenu(props: { children: React.ReactNode; titleAttr?: st
   }, [open]);
 
   if (!allowed) {
-    return <span className="view-picker-static">{props.children}</span>;
+    return (
+      <span className={`view-picker-static${surface === 'light' ? ' topbar-case-static' : ''}`}>
+        {props.children ?? activeTitle}
+      </span>
+    );
   }
 
   return (
-    <div className="view-picker dark case-picker" ref={wrapRef}>
+    <div
+      className={`view-picker case-picker ${surface === 'dark' ? 'dark' : 'light'}`}
+      ref={wrapRef}
+    >
       <button
         type="button"
-        className={`view-picker-trigger case-picker-trigger${open ? ' open' : ''}`}
+        className={`view-picker-trigger case-picker-trigger${surface === 'light' ? ' topbar-case-btn' : ''}${open ? ' open' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={props.titleAttr}
-        data-tip="Cambiar de caso clínico en 1 clic sin salir de esta pestaña"
+        title={props.titleAttr ?? activeTitle}
+        data-tip="Cambiar de caso clínico"
         onClick={() => setOpen((v) => !v)}
       >
-        {props.children}
+        {props.children ?? <span className="topbar-case-label">{activeTitle}</span>}
         <span className="view-picker-caret" aria-hidden="true">
           ▾
         </span>
       </button>
       {open && (
         <div
-          className="view-picker-pop case-picker-pop"
+          className={`view-picker-pop case-picker-pop${surface === 'light' ? ' light' : ''}`}
           role="menu"
           aria-label="Cambiar caso clínico"
         >
-          <div className="view-picker-cap">Cambiar caso clínico ({cases.length})</div>
+          <div className="view-picker-cap">Casos clínicos ({cases.length})</div>
           <div className="case-picker-list">
             {cases.map((c) => {
               const active = c.id === s.caseId;

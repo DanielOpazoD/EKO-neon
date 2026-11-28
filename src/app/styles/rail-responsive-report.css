@@ -715,6 +715,71 @@
   padding: 3px 9px;
   font-size: var(--fs-sm);
 }
+.topbar-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+.topbar-case-btn {
+  max-width: min(360px, 42vw);
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  gap: 6px;
+}
+.topbar-case-btn:hover,
+.topbar-case-btn.open {
+  background: var(--card);
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+.topbar-case-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-case-static {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+.case-picker.light .case-picker-pop.light {
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+}
+.case-picker.light .view-picker-cap {
+  color: var(--muted);
+}
+.case-picker.light .case-picker-list button {
+  color: var(--text);
+}
+.case-picker.light .case-picker-list button:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.case-picker.light .case-picker-list button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-strong);
+}
+.case-picker.light .case-picker-diff {
+  color: var(--accent);
+}
+.top-unified-menu {
+  max-height: calc(100dvh - 64px);
+  overflow-y: auto;
+}
 
 @media print {
   @page {

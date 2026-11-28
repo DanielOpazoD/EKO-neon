@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSlidingPill } from './useSlidingPill';
 import { isClassModeOn, nextClassModeUi, useHudStore, useSimStore } from '@/app/store';
 import { useShallow } from 'zustand/shallow';
-import { examClosed, exportCaseTag, modePolicy } from '@/app/modePolicy';
-import { exportDisplayPng, recordDisplayClip } from '@/app/exportImage';
+import { examClosed } from '@/app/modePolicy';
 import { captureCurrentStudyStill } from '@/app/studyCapture';
 import {
   IconArrowPointer,
@@ -11,18 +10,16 @@ import {
   IconPause,
   IconPlay,
   IconPresentation,
-  IconSliders,
   IconTorso,
 } from './icons';
 import { MODALITY_LIST } from '@/simulator/renderer/modality';
-import { Segmented } from './controls';
-import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
 
 const PRIMARY_MODES = MODALITY_LIST.filter((m) => m.id !== 'cmm');
 
 /**
- * Clean bottom acquisition bar: the 6 daily modalities (CMM appears on demand via Shift+M or Ajustes),
- * Freeze/Store, cine playback when frozen, and 2 layout icons (Modo clase, Torso 3D) + ⋯ menu.
+ * Pure acquisition bottom bar: the 6 daily modalities (CMM on demand via Shift+M / Ajustes),
+ * Freeze, Store, compact cine playback when frozen, and 2 layout icons (Modo clase, Torso 3D).
+ * All secondary menus live inside the single «☰» menu in TopBar.
  */
 export function ModeBar() {
   const s = useSimStore(
@@ -172,7 +169,6 @@ export function ModeBar() {
       >
         <IconTorso />
       </button>
-      <OverflowMenu />
       {s.workerMode === 'inline' && (
         <span
           className="small modebar-status"
@@ -246,175 +242,6 @@ function CineControls() {
         {s.cineSpeed}×
       </button>
       <span className="small cine-read">{(hud.cineFramePhase * 100).toFixed(0)}%</span>
-    </div>
-  );
-}
-
-/** ⋯ menu: quality, interface toggles, export actions, and developer tools. */
-function OverflowMenu() {
-  const { open, setOpen, wrap } = usePopover();
-  const [recording, setRecording] = useState(false);
-
-  return (
-    <div className="menu-wrap" ref={wrap}>
-      <button
-        className={`menu-btn${open ? ' active' : ''}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="Más opciones"
-        data-tip="Opciones, calidad y exportación"
-        onClick={() => setOpen(!open)}
-      >
-        <IconSliders />
-      </button>
-      {open && (
-        <OverflowMenuContent
-          recording={recording}
-          setRecording={setRecording}
-          close={() => setOpen(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-function OverflowMenuContent({
-  recording,
-  setRecording,
-  close,
-}: {
-  recording: boolean;
-  setRecording: (v: boolean) => void;
-  close: () => void;
-}) {
-  const s = useSimStore(
-    useShallow((st) => ({
-      caseId: st.caseId,
-      examFinished: st.examFinished,
-      mode: st.mode,
-      quality: st.quality,
-      setQuality: st.setQuality,
-      setUi: st.setUi,
-      ui: st.ui,
-    })),
-  );
-  const policy = modePolicy(s.mode);
-  const devOn = policy.devToolsAllowed && s.ui.devMode;
-
-  return (
-    <div className="menu" role="menu" aria-label="Paneles y acciones">
-      <MenuCap>Calidad de imagen</MenuCap>
-      <div className="menu-quality">
-        <Segmented
-          ariaLabel="Calidad"
-          value={s.quality}
-          onChange={(v) => s.setQuality(v)}
-          options={[
-            { id: 'auto', label: 'Auto' },
-            { id: 'low', label: 'Baja' },
-            { id: 'medium', label: 'Media' },
-            { id: 'high', label: 'Alta' },
-          ]}
-        />
-      </div>
-      <div className="menu-sep" />
-      <MenuCap>Mostrar</MenuCap>
-      <CheckItem
-        label="Ayudas de vista"
-        checked={s.ui.showHints}
-        onToggle={() => s.setUi({ showHints: !s.ui.showHints })}
-        disabled={!policy.hintsEnabled}
-        hint="Puntuación y sugerencias de adquisición"
-      />
-      <CheckItem
-        label="Datos sobre imagen"
-        checked={s.ui.showHud}
-        onToggle={() => s.setUi({ showHud: !s.ui.showHud })}
-        hint="Caso, FC y parámetros en las esquinas"
-      />
-      <CheckItem
-        label="Modo sala oscura"
-        checked={s.ui.roomMode}
-        onToggle={() => s.setUi({ roomMode: !s.ui.roomMode })}
-        hint="Atenúa los bordes dejando destacar la ecografía"
-      />
-      <CheckItem
-        label="ECG"
-        checked={s.ui.showEcg}
-        onToggle={() => s.setUi({ showEcg: !s.ui.showEcg })}
-      />
-      <div className="menu-sep" />
-      <MenuCap>Exportar y ayuda</MenuCap>
-      <ActionItem
-        label="Guardar imagen PNG"
-        onClick={() => {
-          exportDisplayPng(exportCaseTag(s.mode, s.examFinished, s.caseId));
-          close();
-        }}
-      />
-      <ActionItem
-        label={recording ? 'Grabando clip WebM…' : 'Exportar clip WebM (3 s)'}
-        onClick={() => {
-          if (recording) return;
-          setRecording(true);
-          close();
-          void recordDisplayClip(exportCaseTag(s.mode, s.examFinished, s.caseId), 3000).finally(
-            () => setRecording(false),
-          );
-        }}
-      />
-      <ActionItem
-        label="Atajos de teclado"
-        onClick={() => {
-          s.setUi({ shortcutsOpen: true });
-          close();
-        }}
-      />
-      <ActionItem
-        label="Tutorial de controles"
-        onClick={() => {
-          s.setUi({ tutorialDone: false });
-          close();
-        }}
-      />
-      {policy.devToolsAllowed && (
-        <>
-          <div className="menu-sep" />
-          <MenuCap>Desarrollo</MenuCap>
-          <CheckItem
-            label="Modo desarrollador"
-            checked={s.ui.devMode}
-            onToggle={() => s.setUi({ devMode: !s.ui.devMode })}
-            hint="Lab, anatomía experimental, revisión y telemetría"
-          />
-          {devOn && (
-            <>
-              <CheckItem
-                label="Modo revisión"
-                checked={s.ui.reviewMode}
-                onToggle={() =>
-                  s.setUi({
-                    reviewMode: !s.ui.reviewMode,
-                    consoleTab: s.ui.reviewMode ? 'adquirir' : 'revisar',
-                  })
-                }
-                hint="Marca sobre la imagen para documentar hallazgos (R)"
-              />
-              <CheckItem
-                label="Superposición física"
-                checked={s.ui.showPhysics}
-                onToggle={() => s.setUi({ showPhysics: !s.ui.showPhysics })}
-                hint="Líneas de barrido y zona focal"
-              />
-              <CheckItem
-                label="Panel Dev"
-                checked={s.ui.devPanel}
-                onToggle={() => s.setUi({ devPanel: !s.ui.devPanel })}
-              />
-            </>
-          )}
-        </>
-      )}
     </div>
   );
 }
