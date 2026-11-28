@@ -68,20 +68,6 @@ export function AcquireTab() {
           </select>
         </div>
         <div className="row">
-          <label>Posición</label>
-          <select
-            aria-label="Posición del paciente"
-            value={s.patient.position}
-            onChange={(e) =>
-              s.setPatient({ position: e.target.value as typeof s.patient.position })
-            }
-          >
-            <option value="left-lateral">Decúbito lateral izq.</option>
-            <option value="supine">Supino</option>
-            <option value="subcostal-supine">Supino (subcostal)</option>
-          </select>
-        </div>
-        <div className="row">
           <label>Respiración</label>
           <Segmented
             ariaLabel="Respiración"
@@ -96,8 +82,24 @@ export function AcquireTab() {
           />
         </div>
         <details className="adv" open={s.mode === 'exam' || undefined}>
-          <summary>Historia clínica</summary>
-          <CaseCard />
+          <summary>Historia clínica y posición</summary>
+          <div style={{ marginTop: 6 }}>
+            <div className="row">
+              <label>Posición</label>
+              <select
+                aria-label="Posición del paciente"
+                value={s.patient.position}
+                onChange={(e) =>
+                  s.setPatient({ position: e.target.value as typeof s.patient.position })
+                }
+              >
+                <option value="left-lateral">Decúbito lateral izq.</option>
+                <option value="supine">Supino</option>
+                <option value="subcostal-supine">Supino (subcostal)</option>
+              </select>
+            </div>
+            <CaseCard />
+          </div>
         </details>
       </Section>
 

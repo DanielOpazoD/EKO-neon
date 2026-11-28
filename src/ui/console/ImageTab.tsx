@@ -72,18 +72,21 @@ export function ImageTab() {
           ]}
         />
       </div>
+      <div className="row end">
+        <button
+          type="button"
+          className="tgc-btn tgc-btn-primary"
+          onClick={() => s.autoOptimize()}
+          data-tip={tip('Ajusta automáticamente ganancia y TGC por profundidad (iScan).')}
+        >
+          Auto-Opt (iScan)
+        </button>
+      </div>
 
-      <div className="tgc-head">
-        <h4 className="subhead">TGC</h4>
-        <div className="tgc-actions">
-          <button
-            type="button"
-            className="tgc-btn tgc-btn-primary"
-            onClick={() => s.autoOptimize()}
-            data-tip={tip('Ajusta automáticamente ganancia y TGC por profundidad (iScan).')}
-          >
-            Auto-Opt
-          </button>
+      <details className="adv">
+        <summary>TGC (8 bandas)</summary>
+        <div className="tgc-head" style={{ marginTop: 6 }}>
+          <span className="small">Compensación por profundidad</span>
           <button
             type="button"
             className="tgc-btn"
@@ -93,21 +96,21 @@ export function ImageTab() {
             Reset
           </button>
         </div>
-      </div>
-      <div className="tgc" aria-label="TGC por profundidad">
-        {s.settings.tgcDb.map((db, i) => (
-          <input
-            key={i}
-            type="range"
-            aria-label={`TGC banda ${i + 1}`}
-            min={-15}
-            max={15}
-            step={1}
-            value={db}
-            onChange={(e) => s.setTgc(i, Number(e.target.value))}
-          />
-        ))}
-      </div>
+        <div className="tgc" aria-label="TGC por profundidad">
+          {s.settings.tgcDb.map((db, i) => (
+            <input
+              key={i}
+              type="range"
+              aria-label={`TGC banda ${i + 1}`}
+              min={-15}
+              max={15}
+              step={1}
+              value={db}
+              onChange={(e) => s.setTgc(i, Number(e.target.value))}
+            />
+          ))}
+        </div>
+      </details>
 
       <details className="adv">
         <summary>Avanzado</summary>

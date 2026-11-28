@@ -1,30 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { useShallow } from 'zustand/react/shallow';
+import { useShallow } from 'zustand/shallow';
 import { navigatorLayers, useHudStore, useSimStore } from '@/app/store';
 import { modePolicy } from '@/app/modePolicy';
 import { CutMapView } from './CutMapView';
 import { RotationDial } from './RotationDial';
-import { CheckItem, MenuCap, usePopover } from './menu';
-import { IconCrosshair, IconLayers, IconMinus, IconPlus } from './icons';
+import { ActionItem, CheckItem, MenuCap, usePopover } from './menu';
+import { IconLayers } from './icons';
 import { mountNavigatorScene, type NavigatorZoom } from './navigator/navigatorScene';
 import type { NavigatorCameraState } from './navigator/navigatorCamera';
 
 export { narrowPanelFovDeg } from './navigator/navigatorScene';
 
-/**
- * Where the learner left the navigator's camera. It outlives each scene and the component itself: breathing, position
- * or case rebuild the scene, and the report, the curriculum or a collapsed rail unmount it, and each time the framing
- * went back to the overview.
- */
 const navigatorCamera: { current: NavigatorCameraState | null } = { current: null };
 
 /**
- * 3D torso + probe trainer (spec 4.3, 58, 76). Clean clinical torso: wrap-around superellipse chest
- * with a translucent skin over a full rib cage (both sides), sternum, clavicles, a translucent heart
- * ghost and the imaging plane fan; a phased-array transducer with a pickable index marker.
- * Mouse: drag skin = slide · drag the blue marker or wheel = rotate · Shift+drag = rock ·
- * Alt+drag = tilt · right-drag = orbit · Ctrl/⌘+wheel = zoom. Never teleports to a view. The scene itself lives in
- * `navigator/navigatorScene.ts`; this component mounts it and draws the controls around it.
+ * Minimal 3D torso + probe navigator: only 2 top icons (reset view + layers/camera menu),
+ * compact 2-pill drag mode toggle (Sonda | Cámara) while live, and zero permanent help-text clutter.
  */
 export function TorsoView() {
   const ref = useRef<HTMLDivElement>(null);
@@ -39,8 +30,6 @@ export function TorsoView() {
   );
   const frozen = useHudStore((s) => s.hud?.frozen ?? false);
   const zoomRef = useRef<NavigatorZoom | null>(null);
-  // a browser without WebGL keeps the image and the cut map; only the 3D view gives way to a notice (decision 154).
-  // Probed once on mounting; if the renderer still failed, the ErrorBoundary around the navigator would contain it
   const [webglError] = useState(probeWebgl);
 
   useEffect(() => {
@@ -55,73 +44,29 @@ export function TorsoView() {
     });
   }, [caseId, patient, webglError]);
 
+  const setDrag = (next: 'probe' | 'camera') => {
+    dragActionRef.current = next;
+    setDragAction(next);
+  };
+
   return (
     <div className={`torso-wrap${split ? ' split' : ''}`}>
       <div className="torso-head">
         {split && <div className="torso-caption top">Sonda y tórax</div>}
         <div className="torso-buttons">
           <button
-            className="icon-btn"
-            onClick={() => zoomRef.current?.zoomBy(0.85)}
-            data-tip="Acercar"
-            data-tip-key="Ctrl/⌘+rueda"
-            aria-label="Acercar"
-          >
-            <IconPlus size={12} />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => zoomRef.current?.zoomBy(1.18)}
-            data-tip="Alejar"
-            aria-label="Alejar"
-          >
-            <IconMinus size={12} />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => zoomRef.current?.center()}
-            data-tip="Centrar la cámara en la sonda"
-            aria-label="Centrar la cámara en la sonda"
-          >
-            <IconCrosshair size={12} />
-          </button>
-          <button
+            type="button"
             className="icon-btn"
             onClick={() => zoomRef.current?.overview()}
-            data-tip="Restablecer vista global del tórax"
+            data-tip="Restablecer vista 3D (rueda: rotar · Ctrl+rueda: zoom · clic derecho: orbitar · ? atajos)"
             aria-label="Restablecer vista global del tórax"
           >
             ↺
           </button>
-          {anatomy && (
-            <button
-              className="icon-btn"
-              onClick={() => zoomRef.current?.plane()}
-              data-tip="Mirar perpendicular al plano ecográfico"
-              aria-label="Mirar perpendicular al plano ecográfico"
-            >
-              ⊥
-            </button>
-          )}
-          {/* in exam mode the layers are fixed to the skin and the ribs (decision 256) */}
-          {anatomy && <LayerMenu />}
+          {anatomy && <LayerMenu zoomRef={zoomRef} />}
         </div>
       </div>
       <div className="torso-3d" ref={ref} aria-label="Torso 3D y sonda virtual" data-tour="torso">
-        {/* inside the torso so it sits at the torso's own bottom edge, whatever height the cut map leaves it
-            (decision 197) */}
-        <div className="torso-help">
-          {frozen ? (
-            'Sonda de la adquisición congelada · Arrastrar: orbitar cámara · Rueda: zoom'
-          ) : dragAction === 'camera' ? (
-            'Arrastrar: orbitar cámara · Rueda: zoom · La sonda conserva su posición'
-          ) : (
-            <>
-              Arrastrar: deslizar · Rueda: rotar · Shift: rock · Alt: tilt ·{' '}
-              <kbd className="kbd">?</kbd> todos los gestos
-            </>
-          )}
-        </div>
         {webglError && (
           <div className="panel-error" role="alert">
             <b>La vista 3D necesita WebGL 2, que este navegador no ofrece.</b>
@@ -133,22 +78,32 @@ export function TorsoView() {
         )}
       </div>
       {split && <CutMapView />}
-      <label className="torso-gesture">
-        Arrastrar
-        <select
+      {!frozen && (
+        <div
+          className="torso-gesture"
+          role="group"
           aria-label="Acción al arrastrar en el navegador"
-          value={frozen ? 'camera' : dragAction}
-          disabled={frozen}
-          onChange={(e) => {
-            const action = e.target.value as 'probe' | 'camera';
-            dragActionRef.current = action;
-            setDragAction(action);
-          }}
         >
-          <option value="probe">Sonda</option>
-          <option value="camera">Cámara</option>
-        </select>
-      </label>
+          <button
+            type="button"
+            className={dragAction === 'probe' ? 'active' : ''}
+            aria-pressed={dragAction === 'probe'}
+            onClick={() => setDrag('probe')}
+            data-tip="Arrastrar mueve la sonda sobre el tórax"
+          >
+            Sonda
+          </button>
+          <button
+            type="button"
+            className={dragAction === 'camera' ? 'active' : ''}
+            aria-pressed={dragAction === 'camera'}
+            onClick={() => setDrag('camera')}
+            data-tip="Arrastrar orbita la cámara sin mover la sonda"
+          >
+            Cámara
+          </button>
+        </div>
+      )}
       <div className="torso-tools">
         <RotationDial />
       </div>
@@ -156,10 +111,6 @@ export function TorsoView() {
   );
 }
 
-/**
- * Why this browser cannot draw the 3D navigator, or null when it offers a WebGL2 context (released at once). three.js
- * creates only WebGL2 contexts: a browser with WebGL1 alone would pass a looser probe and fail inside the effect.
- */
 function probeWebgl(): string | null {
   try {
     const canvas = document.createElement('canvas');
@@ -172,27 +123,34 @@ function probeWebgl(): string | null {
   }
 }
 
-/** 3D navigator layers as a checkable popover: keeps the torso overlay to camera controls only. */
-function LayerMenu() {
+/** 3D navigator layers + camera framing actions tucked inside one clean popover. */
+function LayerMenu({ zoomRef }: { zoomRef: React.RefObject<NavigatorZoom | null> }) {
   const { open, setOpen, wrap } = usePopover();
   return (
     <div className="menu-wrap" ref={wrap}>
       <button
+        type="button"
         className={`icon-btn${open ? ' active' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Capas del navegador 3D"
-        data-tip="Capas del navegador 3D"
+        data-tip="Capas y cámara del navegador 3D"
         onClick={() => setOpen(!open)}
       >
         <IconLayers size={12} />
       </button>
-      {open && <LayerMenuContent />}
+      {open && <LayerMenuContent zoomRef={zoomRef} close={() => setOpen(false)} />}
     </div>
   );
 }
 
-function LayerMenuContent() {
+function LayerMenuContent({
+  zoomRef,
+  close,
+}: {
+  zoomRef: React.RefObject<NavigatorZoom | null>;
+  close: () => void;
+}) {
   const ui = useSimStore((s) => s.ui);
   const setUi = useSimStore((s) => s.setUi);
   const layer = (label: string, key: keyof typeof ui, hint: string) => (
@@ -212,23 +170,30 @@ function LayerMenuContent() {
       {layer('Miocardio', 'navHeart', 'Paredes del modelo 3D')}
       {layer('Cavidades', 'navChambers', 'Ventrículos y aurículas')}
       {layer('Válvulas', 'navValves', 'Válvulas y cuerdas')}
-      {layer(
-        'Segmentos del VI',
-        'navSegments',
-        'Colorea el miocardio del VI por segmento (también el corte); pasar el ratón: nombre',
-      )}
-      {layer('Vasos', 'navVessels', 'Aorta torácica y ramas proximales, pulmonar y cavas')}
-      <MenuCap>Vistas</MenuCap>
-      {layer(
-        'Corte de frente',
-        'navSplit',
-        'Segunda vista: el corazón cortado por el plano, mirando el corte',
-      )}
-      {layer('Etiquetas del corte', 'navLabels', 'Nombres de cámaras y válvulas sobre el corte')}
-      <MenuCap>Examen</MenuCap>
-      {layer('Ventanas', 'navWindows', 'Ventanas acústicas de las vistas canónicas')}
+      {layer('Segmentos del VI', 'navSegments', 'Colorea los segmentos del VI en 3D y en el corte')}
+      {layer('Vasos', 'navVessels', 'Aorta, pulmonar y cavas')}
+      <MenuCap>Corte</MenuCap>
+      {layer('Corte de frente', 'navSplit', 'Plano ecográfico visto de frente')}
+      {layer('Etiquetas del corte', 'navLabels', 'Nombres de cámaras y válvulas')}
+      {layer('Ventanas', 'navWindows', 'Ventanas acústicas canónicas')}
       {layer('Ejes', 'navAxes', 'Haz, elevación y lateral')}
-      {layer('Corte', 'navCut', 'Cortar el corazón por el plano de imagen')}
+      {layer('Cortar corazón', 'navCut', 'Seccionar el corazón por el plano')}
+      <div className="menu-sep" />
+      <MenuCap>Cámara</MenuCap>
+      <ActionItem
+        label="Centrar en la sonda"
+        onClick={() => {
+          zoomRef.current?.center();
+          close();
+        }}
+      />
+      <ActionItem
+        label="Mirar plano de frente"
+        onClick={() => {
+          zoomRef.current?.plane();
+          close();
+        }}
+      />
     </div>
   );
 }

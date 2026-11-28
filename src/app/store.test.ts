@@ -75,6 +75,25 @@ describe('UI preferences schema (prefs.ts)', () => {
     assert.equal(after.reviewMode, false);
     assert.equal(after.consoleTab, 'adquirir');
   });
+
+  it('automatically switches patient posture to subcostal-supine on subcostal presets and restores left-lateral on transthoracic views', () => {
+    const s = useSimStore.getState();
+    s.setMode('sandbox');
+    s.setPatient({ position: 'left-lateral', respiration: 'expiration' });
+
+    s.startPresetView('subcostal-ivc');
+    assert.equal(useSimStore.getState().patient.position, 'subcostal-supine');
+
+    s.startPresetView('plax');
+    assert.equal(useSimStore.getState().patient.position, 'left-lateral');
+
+    // Exam mode must never auto-switch posture via preset views
+    s.setMode('exam');
+    s.setPatient({ position: 'left-lateral' });
+    s.startPresetView('subcostal-ivc');
+    assert.equal(useSimStore.getState().patient.position, 'left-lateral');
+    s.setMode('sandbox');
+  });
 });
 
 describe('SimStore clamping, cine controls, modality memory and exam policy', () => {

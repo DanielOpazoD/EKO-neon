@@ -4,10 +4,8 @@ import type { SpectralModality } from '@/simulator/doppler/spectral/spectrum';
 import { useShallow } from 'zustand/shallow';
 import { IconMinus, IconPlus, IconVolume, IconVolumeOff } from './icons';
 import {
-  cycleRespiration,
   cycleSweepSpeed,
   quickBarGroupFor,
-  RESPIRATION_SHORT_LABEL,
   stepColorBaseline,
   stepColorScale,
   stepSpectralBaseline,
@@ -16,11 +14,10 @@ import {
 } from './imageQuickBarModel';
 
 /**
- * Contextual on-image quick controls (decision 187): surfaces the exact knobs a sonographer turns
- * most for the active modality right over the image so they never have to leave Medir:
- * - 2D / M-mode: Depth, Gain, Zoom 2×, Auto-Opt, Sweep (M-mode), Respiration
- * - Color / CMM: Nyquist Scale, Baseline, Color Gain, Depth, Zoom 2×, Sweep (CMM)
- * - PW / CW / TDI: Scale, Baseline, Spectral Gain, Invert, Sweep (25/50/100), Audio, Resp (PW)
+ * Minimal contextual hover bar over the bottom of the ultrasound image (max 4–5 core knobs):
+ * - 2D / M-mode: Depth, Gain, Auto-Opt, Zoom 2× (+ Sweep in M-mode)
+ * - Color / CMM: Nyquist Scale, Baseline, Gain, Zoom 2× (+ Sweep in CMM)
+ * - PW / CW / TDI: Scale, Baseline, Gain, Invert, Audio
  */
 export function ImageQuickBar() {
   const s = useSimStore(
@@ -31,9 +28,7 @@ export function ImageQuickBar() {
       frozen: st.frozen,
       gateDepthCm: st.gateDepthCm,
       modality: st.modality,
-      patient: st.patient,
       setColor: st.setColor,
-      setPatient: st.setPatient,
       setSettings: st.setSettings,
       setSpectral: st.setSpectral,
       settings: st.settings,
@@ -44,8 +39,6 @@ export function ImageQuickBar() {
 
   const group = quickBarGroupFor(s.modality);
   const limits = acquisitionLimits(s);
-  const respLabel = RESPIRATION_SHORT_LABEL[s.patient.respiration];
-  const respHeld = s.patient.respiration !== 'free-breathing';
   const sweepSpeed = s.spectral.sweepSpeedMmPerS;
 
   if (group === 'color') {
@@ -87,20 +80,11 @@ export function ImageQuickBar() {
           onMore={() => s.setColor({ gainDb: Math.min(20, s.color.gainDb + 2) })}
         />
         <i className="quick-sep" aria-hidden="true" />
-        <Stepper
-          label="Prof."
-          value={`${s.settings.depthCm} cm`}
-          less="Menos profundidad"
-          more="Más profundidad"
-          onLess={() => s.setSettings({ depthCm: s.settings.depthCm - 1 })}
-          onMore={() => s.setSettings({ depthCm: s.settings.depthCm + 1 })}
-        />
-        <i className="quick-sep" aria-hidden="true" />
         <button
           type="button"
           className={`quick-auto${s.settings.zoom > 1.05 ? ' on' : ''}`}
           aria-pressed={s.settings.zoom > 1.05}
-          data-tip="Zoom HD focalizado (centra el foco y aumenta resolución para medir válvulas/PISA)"
+          data-tip="Zoom HD 2×"
           onClick={() => s.setSettings({ zoom: toggleHdZoom(s.settings.zoom) })}
         >
           {s.settings.zoom > 1.05 ? `HD ${s.settings.zoom.toFixed(1)}×` : 'Zoom 2×'}
@@ -112,7 +96,7 @@ export function ImageQuickBar() {
               type="button"
               className={`quick-auto quick-mono${sweepSpeed !== 50 ? ' on' : ''}`}
               aria-label={`Velocidad de barrido ${sweepSpeed} mm/s`}
-              data-tip="Velocidad de barrido del modo M color (clic: 25 / 50 / 100 mm/s)"
+              data-tip="Barrido (25 / 50 / 100 mm/s)"
               onClick={() => s.setSpectral({ sweepSpeedMmPerS: cycleSweepSpeed(sweepSpeed) })}
             >
               {sweepSpeed} mm/s
@@ -155,8 +139,8 @@ export function ImageQuickBar() {
         <Stepper
           label="Base"
           value={baseText}
-          less="Desplazar ventana hacia negativo (más margen abajo)"
-          more="Desplazar ventana hacia positivo (más margen arriba)"
+          less="Desplazar línea base abajo"
+          more="Desplazar línea base arriba"
           onLess={() =>
             s.setSpectral({
               baselineShiftMps: stepSpectralBaseline(mod, s.spectral.scaleMps, base, -1),
@@ -187,41 +171,16 @@ export function ImageQuickBar() {
         >
           Inv
         </button>
-        <i className="quick-sep" aria-hidden="true" />
-        <button
-          type="button"
-          className={`quick-auto quick-mono${sweepSpeed !== 50 ? ' on' : ''}`}
-          aria-label={`Velocidad de barrido ${sweepSpeed} mm/s`}
-          data-tip="Velocidad de barrido (clic: 25 mm/s para FA/respiración, 50 estándar, 100 mm/s para TD/PHT)"
-          onClick={() => s.setSpectral({ sweepSpeedMmPerS: cycleSweepSpeed(sweepSpeed) })}
-        >
-          {sweepSpeed} mm/s
-        </button>
         <button
           type="button"
           className={`quick-auto quick-icon${s.spectral.audioOn ? ' on' : ''}`}
           aria-pressed={s.spectral.audioOn}
           aria-label={s.spectral.audioOn ? 'Silenciar audio Doppler' : 'Activar audio Doppler'}
-          data-tip={
-            s.spectral.audioOn
-              ? 'Audio Doppler activo (clic para silenciar)'
-              : 'Activar sonido Doppler en vivo (flujo laminar, soplo turbulento y clics)'
-          }
+          data-tip={s.spectral.audioOn ? 'Silenciar audio Doppler' : 'Activar sonido Doppler'}
           onClick={() => s.setSpectral({ audioOn: !s.spectral.audioOn })}
         >
           {s.spectral.audioOn ? <IconVolume size={13} /> : <IconVolumeOff size={13} />}
         </button>
-        {mod === 'pw' && (
-          <button
-            type="button"
-            className={`quick-auto${respHeld ? ' on' : ''}`}
-            aria-label={`Respiración: ${respLabel}`}
-            data-tip="Respiración del paciente (clic: Libre / Insp / Esp / Apnea — útil para variación respiratoria mitral/tricuspídea)"
-            onClick={() => s.setPatient({ respiration: cycleRespiration(s.patient.respiration) })}
-          >
-            Resp: {respLabel}
-          </button>
-        )}
       </div>
     );
   }
@@ -229,7 +188,7 @@ export function ImageQuickBar() {
   return (
     <div className="quick-bar" role="group" aria-label="Profundidad, ganancia y adquisición rápida">
       <Stepper
-        label="Profundidad"
+        label="Prof."
         value={`${s.settings.depthCm} cm`}
         less="Menos profundidad"
         more="Más profundidad"
@@ -238,7 +197,7 @@ export function ImageQuickBar() {
       />
       <i className="quick-sep" aria-hidden="true" />
       <Stepper
-        label="Ganancia"
+        label="Gan."
         value={`${s.settings.gainDb > 0 ? '+' : ''}${s.settings.gainDb} dB`}
         less="Menos ganancia"
         more="Más ganancia"
@@ -248,21 +207,21 @@ export function ImageQuickBar() {
       <i className="quick-sep" aria-hidden="true" />
       <button
         type="button"
-        className={`quick-auto${s.settings.zoom > 1.05 ? ' on' : ''}`}
-        aria-pressed={s.settings.zoom > 1.05}
-        data-tip="Zoom HD focalizado (centra el foco a 2× y aumenta densidad de líneas)"
-        onClick={() => s.setSettings({ zoom: toggleHdZoom(s.settings.zoom) })}
-      >
-        {s.settings.zoom > 1.05 ? `HD ${s.settings.zoom.toFixed(1)}×` : 'Zoom 2×'}
-      </button>
-      <button
-        type="button"
         className="quick-auto"
         aria-label="Auto-optimizar ganancia y TGC"
         data-tip="Auto-Opt (iScan)"
         onClick={() => s.autoOptimize()}
       >
         Auto-Opt
+      </button>
+      <button
+        type="button"
+        className={`quick-auto${s.settings.zoom > 1.05 ? ' on' : ''}`}
+        aria-pressed={s.settings.zoom > 1.05}
+        data-tip="Zoom HD 2×"
+        onClick={() => s.setSettings({ zoom: toggleHdZoom(s.settings.zoom) })}
+      >
+        {s.settings.zoom > 1.05 ? `HD ${s.settings.zoom.toFixed(1)}×` : 'Zoom 2×'}
       </button>
       {s.modality === 'm-mode' && (
         <>
@@ -271,23 +230,13 @@ export function ImageQuickBar() {
             type="button"
             className={`quick-auto quick-mono${sweepSpeed !== 50 ? ' on' : ''}`}
             aria-label={`Velocidad de barrido ${sweepSpeed} mm/s`}
-            data-tip="Velocidad de barrido del modo M (clic: 25 / 50 / 100 mm/s)"
+            data-tip="Barrido (25 / 50 / 100 mm/s)"
             onClick={() => s.setSpectral({ sweepSpeedMmPerS: cycleSweepSpeed(sweepSpeed) })}
           >
             {sweepSpeed} mm/s
           </button>
         </>
       )}
-      <i className="quick-sep" aria-hidden="true" />
-      <button
-        type="button"
-        className={`quick-auto${respHeld ? ' on' : ''}`}
-        aria-label={`Respiración: ${respLabel}`}
-        data-tip="Respiración del paciente (clic: Libre / Insp / Esp / Apnea — útil para colapso de VCI / sniff y ventana pulmonar)"
-        onClick={() => s.setPatient({ respiration: cycleRespiration(s.patient.respiration) })}
-      >
-        Resp: {respLabel}
-      </button>
     </div>
   );
 }

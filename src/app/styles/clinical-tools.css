@@ -544,14 +544,14 @@
 .auto-hub {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
 }
 .auto-run-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-radius: var(--r-sm);
   border: 1px solid var(--accent-line);
   background: var(--accent-soft);
@@ -578,8 +578,8 @@
 .auto-group {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 6px 7px;
+  gap: 4px;
+  padding: 5px 6px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
@@ -591,7 +591,7 @@
   gap: 6px;
 }
 .auto-group-title {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--muted);
@@ -599,7 +599,7 @@
 }
 .auto-group-kpi {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   color: var(--ok);
   white-space: nowrap;
@@ -611,10 +611,12 @@
 }
 .auto-tile {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 2px;
-  padding: 5px 7px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 6px;
   text-align: left;
   border-radius: var(--r-xs);
   border: 1px solid var(--border);
@@ -636,39 +638,25 @@
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.auto-tile-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-}
 .auto-tile-name {
-  font-size: var(--fs-xs);
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
-.auto-tile-sub {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  font-size: 10.5px;
-  color: var(--faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.auto-tile.done .auto-tile-sub {
+.auto-tile-val {
   font-family: var(--mono);
-  font-weight: 650;
+  font-size: 10.5px;
+  font-weight: 700;
   color: var(--ok);
+  white-space: nowrap;
+  flex: none;
 }
-.auto-tile.running .auto-tile-sub {
+.auto-tile.running .auto-tile-val {
   color: var(--accent-strong);
-  font-weight: 600;
 }
 .auto-group-foot {
   display: flex;
