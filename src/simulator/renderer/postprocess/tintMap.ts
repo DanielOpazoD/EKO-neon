@@ -54,13 +54,13 @@ export function tintMapIndex(tint: TintMapId | undefined): number {
   }
 }
 
-/** Map a scalar luminance byte (0..255) to tinted RGB bytes (0..255). */
-export function tintGrayByte(
-  gByte: number,
+/** Map a continuous scalar luminance (0..255 float) to tinted RGB bytes (0..255). */
+export function tintGrayFloat(
+  gFloat: number,
   tint: TintMapId | undefined,
   out: [number, number, number],
 ): void {
-  const g = Math.max(0, Math.min(255, gByte)) / 255;
+  const g = Math.max(0, Math.min(255, gFloat)) / 255;
   let r = g;
   let gn = g;
   let b = g;
@@ -77,24 +77,48 @@ export function tintGrayByte(
     gn = g * (0.87 + 0.13 * g);
     b = g * (0.46 + 0.54 * g * g);
   }
-  out[0] = Math.round(r * 255);
-  out[1] = Math.round(gn * 255);
-  out[2] = Math.round(b * 255);
+  out[0] = Math.floor(r * 255 + 0.5);
+  out[1] = Math.floor(gn * 255 + 0.5);
+  out[2] = Math.floor(b * 255 + 0.5);
+}
+
+/** Map a scalar luminance byte (0..255) to tinted RGB bytes (0..255). */
+export function tintGrayByte(
+  gByte: number,
+  tint: TintMapId | undefined,
+  out: [number, number, number],
+): void {
+  tintGrayFloat(gByte, tint, out);
 }
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+function packRgb(r: number, g: number, b: number): number {
+  return LITTLE_ENDIAN
+    ? ((0xff000000 | (b << 16) | (g << 8) | r) >>> 0)
+    : (((r << 24) | (g << 16) | (b << 8) | 0xff) >>> 0);
+}
 
 function buildPackedLut(tint: TintMapId): Uint32Array {
   const lut = new Uint32Array(256);
   const rgb: [number, number, number] = [0, 0, 0];
   for (let i = 0; i < 256; i++) {
-    tintGrayByte(i, tint, rgb);
-    const r = rgb[0];
-    const g = rgb[1];
-    const b = rgb[2];
-    lut[i] = LITTLE_ENDIAN
-      ? ((0xff000000 | (b << 16) | (g << 8) | r) >>> 0)
-      : (((r << 24) | (g << 16) | (b << 8) | 0xff) >>> 0);
+    tintGrayFloat(i, tint, rgb);
+    lut[i] = packRgb(rgb[0], rgb[1], rgb[2]);
+  }
+  return lut;
+}
+
+/** 10-bit sub-gray steps per byte (0.25 gray resolution → 1021 entries covering 0..255.0). */
+export const TINT_SUB_STEPS = 4;
+export const TINT_SUB_MAX_INDEX = 255 * TINT_SUB_STEPS;
+
+function buildPackedSubLut(tint: TintMapId): Uint32Array {
+  const lut = new Uint32Array(TINT_SUB_MAX_INDEX + 1);
+  const rgb: [number, number, number] = [0, 0, 0];
+  for (let i = 0; i <= TINT_SUB_MAX_INDEX; i++) {
+    tintGrayFloat(i / TINT_SUB_STEPS, tint, rgb);
+    lut[i] = packRgb(rgb[0], rgb[1], rgb[2]);
   }
   return lut;
 }
@@ -106,9 +130,21 @@ const PACKED_LUTS: Record<TintMapId, Uint32Array> = {
   amber: buildPackedLut('amber'),
 };
 
-/** 256-entry packed RGBA32 LUT for O(1) scan-conversion and strip painting. */
+const PACKED_SUB_LUTS: Record<TintMapId, Uint32Array> = {
+  gray: buildPackedSubLut('gray'),
+  'cool-blue': buildPackedSubLut('cool-blue'),
+  sepia: buildPackedSubLut('sepia'),
+  amber: buildPackedSubLut('amber'),
+};
+
+/** 256-entry packed RGBA32 LUT for O(1) strip painting and byte-indexed callers. */
 export function tintPackedLut(tint: TintMapId | undefined): Uint32Array {
   return PACKED_LUTS[tint ?? 'gray'] ?? PACKED_LUTS.gray;
+}
+
+/** 1021-entry (10-bit, 0.25-gray step) packed RGBA32 LUT for continuous bicubic scan conversion. */
+export function tintPackedSubLut(tint: TintMapId | undefined): Uint32Array {
+  return PACKED_SUB_LUTS[tint ?? 'gray'] ?? PACKED_SUB_LUTS.gray;
 }
 
 /** Matching GLSL helper returning RGB in 0..255 byte scale (integer-rounded like the CPU LUT). */

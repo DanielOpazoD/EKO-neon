@@ -57,6 +57,26 @@ export const S_CURVE_MIX = 0.85;
 export const HIGH_CONTRAST_GAMMA = 1.6;
 /** Floor added before the log so a zero envelope compresses to −∞ dB without NaN. */
 export const LOG_FLOOR = 1e-6;
+/** Soft-knee highlight roll-off start (normalized log 0..1) and input span (+16 dB headroom above REF_DB). */
+export const LOG_KNEE_START = 0.8;
+export const LOG_KNEE_SPAN = 0.48;
+
+/**
+ * C¹-continuous monotonic soft-knee highlight compression on normalized log echo `y = (db + DR) / DR`.
+ * Exact identity on [0, LOG_KNEE_START] (cavity blood, clutter, and normal myocardium stay untouched) and
+ * a cubic Hermite shoulder over [LOG_KNEE_START, LOG_KNEE_START + LOG_KNEE_SPAN] so hyper-reflective
+ * pericardium, fibrous trigones, and calcified valves retain internal tonal gradation instead of flat clipping.
+ */
+export function softKneeCompress(y: number): number {
+  if (y <= 0) return 0;
+  if (y <= LOG_KNEE_START) return y;
+  const w = LOG_KNEE_SPAN;
+  if (y >= LOG_KNEE_START + w) return 1;
+  const h = 1 - LOG_KNEE_START;
+  const m = w / h;
+  const t = (y - LOG_KNEE_START) / w;
+  return LOG_KNEE_START + h * t * (m + (3 - 2 * m) * t + (m - 2) * t * t);
+}
 /** 20 / ln(10): exact multiplier to compute 20*log10(x) via faster Math.log(x). */
 const LOG10E_20 = 20 / Math.LN10;
 /** 4096-entry LUTs for clinical & high-contrast gray curves (< 0.0001 max error vs exact expm1/pow). */
@@ -304,12 +324,11 @@ export function applyConsole(
     }
   }
   // 2) axial resolution is formed by the renderer PSF (decision 52)
-  // 3) log compression / dynamic range → 0..1 (in-place on `a`)
+  // 3) log compression / dynamic range with C¹ soft-knee highlight shoulder → 0..1 (in-place on `a`)
   const invDr = 1 / dr_;
   for (let i = 0; i < n; i++) {
     const db = Math.log(a[i]! + LOG_FLOOR) * LOG10E_20 - REF_DB;
-    const y = (db + dr_) * invDr;
-    a[i] = y <= 0 ? 0 : y >= 1 ? 1 : y;
+    a[i] = softKneeCompress((db + dr_) * invDr);
   }
   // 4) structure-oriented anisotropic speckle reduction (SRI / XRES-style) on 2D frames
   const sri = !line ? (settings.sri ?? 0) : 0;

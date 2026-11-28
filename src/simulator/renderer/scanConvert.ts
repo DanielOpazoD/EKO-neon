@@ -1,5 +1,10 @@
 import type { PolarFrameSpec, TintMapId } from './types';
-import { tintGrayByte, tintPackedLut } from './postprocess/tintMap';
+import {
+  tintGrayFloat,
+  tintPackedSubLut,
+  TINT_SUB_MAX_INDEX,
+  TINT_SUB_STEPS,
+} from './postprocess/tintMap';
 
 /**
  * Sector scan conversion: polar (line, sample) → cartesian RGBA. Apex at top-centre, radius = depth.
@@ -238,7 +243,7 @@ export function scanConvertLut(
   if (LITTLE_ENDIAN && rgba.byteOffset % 4 === 0 && rgba.length >= n * 4) {
     const px = new Uint32Array(rgba.buffer, rgba.byteOffset, n);
     px.fill(0xff000000);
-    const tintLut = tintPackedLut(tintMap);
+    const tintLut = tintPackedSubLut(tintMap);
     const cr = CR_WEIGHTS;
     const S = lut.samples;
     const L = lut.lines;
@@ -330,7 +335,9 @@ export function scanConvertLut(
       const hi = hiA > hiB ? hiA : hiB;
       if (val < lo) val = lo;
       else if (val > hi) val = hi;
-      px[inPix[k]!] = tintLut[(val + 0.5) | 0]!;
+      const subIdx = (val * TINT_SUB_STEPS) | 0;
+      px[inPix[k]!] =
+        tintLut[subIdx < 0 ? 0 : subIdx > TINT_SUB_MAX_INDEX ? TINT_SUB_MAX_INDEX : subIdx]!;
     }
     return;
   }
@@ -408,8 +415,8 @@ export function scanConvertLutReference(
     const hi = Math.max(v00, v10, v01, v11);
     if (val < lo) val = lo;
     else if (val > hi) val = hi;
-    const g = Math.floor(val + 0.5);
-    tintGrayByte(g, tintMap, rgb);
+    const q = Math.floor(Math.max(0, Math.min(255, val)) * TINT_SUB_STEPS) / TINT_SUB_STEPS;
+    tintGrayFloat(q, tintMap, rgb);
     rgba[o] = rgb[0];
     rgba[o + 1] = rgb[1];
     rgba[o + 2] = rgb[2];

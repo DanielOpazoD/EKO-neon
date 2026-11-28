@@ -69,10 +69,11 @@ void acoustic(int tissue, int structure, float sdf, float extra, float nd, float
     float dr = DEPTH / SAMPLES;
     float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
     float absSdf = abs(sdf);
-    float sp0 = absSdf < max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0.0;
+    float rough = lat(m * SPECULAR_ROUGH_FREQ + SPECULAR_ROUGH_OFFSET, 1);
+    float sp0 = sScale * interfaceEcho(absSdf, nd, dr, rough);
     if (sc > 0.0) {
-      float spP = absSdf < max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0.0;
-      float spM = absSdf < max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0.0;
+      float spP = sScale * interfaceEcho(absSdf, ndP, dr, rough);
+      float spM = sScale * interfaceEcho(absSdf, ndM, dr, rough);
       specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
     } else {
       specular = sp0;
@@ -257,10 +258,11 @@ void acousticSide(int tissue, int structure, float sdf, float extra, float nd, f
     float dr = DEPTH / SAMPLES;
     float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
     float absSdf = abs(sdf);
-    float sp0 = absSdf < max(nd, SPECULAR_WINDOW_MIN) * dr ? sScale * nd * nd * nd * nd : 0.0;
+    float rough = lat(m * SPECULAR_ROUGH_FREQ + SPECULAR_ROUGH_OFFSET, 1);
+    float sp0 = sScale * interfaceEcho(absSdf, nd, dr, rough);
     if (sc > 0.0) {
-      float spP = absSdf < max(ndP, SPECULAR_WINDOW_MIN) * dr ? sScale * ndP * ndP * ndP * ndP : 0.0;
-      float spM = absSdf < max(ndM, SPECULAR_WINDOW_MIN) * dr ? sScale * ndM * ndM * ndM * ndM : 0.0;
+      float spP = sScale * interfaceEcho(absSdf, ndP, dr, rough);
+      float spM = sScale * interfaceEcho(absSdf, ndM, dr, rough);
       specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
     } else {
       specular = sp0;
@@ -542,6 +544,21 @@ void main() {
   float fg = focusingGain(r, FOCUS);
   sigma *= fg;
   specular *= fg;
+  // short-range axial micro-reverberation (layer ringdown / comet-tail) behind strong specular & calcific reflectors
+  float tail = 0.0;
+  for (int k = 1; k <= 4; k++) {
+    int sk = si - k;
+    if (sk < 0) break;
+    vec4 ap = texelFetch(uPassA, ivec2(sk, li), 0);
+    if (ap.w < 0.5 || ap.z > 0.5) continue;
+    float ts = interfaceTailSource(texelFetch(uPassC, ivec2(sk, li), 0).x, texelFetch(uPassB, ivec2(sk, li), 0).z);
+    if (ts > 0.0) tail += ts * exp(-float(k) * dr / SPEC_TAIL_DECAY_CM);
+  }
+  if (tail > 0.0) {
+    float tScaled = tail * fg;
+    sigma += 0.65 * tScaled;
+    specular += 0.35 * tScaled;
+  }
   // the parenchymal grains: their coefficient from pass A over the σ of the slice (decision 145)
   float grain = sigma * GRAIN_GAIN * c.w;
   // near-field clutter: reverberation in the chest wall under the footprint, incoherent, fixed to the probe position

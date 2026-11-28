@@ -2,6 +2,8 @@ import {
   CLINICAL_GREY_CURVE,
   HIGH_CONTRAST_GAMMA,
   LOG_FLOOR,
+  LOG_KNEE_SPAN,
+  LOG_KNEE_START,
   NOISE_MAGNITUDE_BINS,
   NOISE_PHASE_BINS,
   NOISE_RMS,
@@ -115,6 +117,20 @@ uniform float uDynRange;   // dB
 layout(location = 0) out vec4 outLog;
 #define REF_DB ${glslFloat(REF_DB)}
 #define LOG_FLOOR ${glslFloat(LOG_FLOOR)}
+#define LOG_KNEE_START ${glslFloat(LOG_KNEE_START)}
+#define LOG_KNEE_SPAN ${glslFloat(LOG_KNEE_SPAN)}
+
+// src/simulator/renderer/postprocess/consolePipeline.ts: softKneeCompress
+float softKneeCompress(float y) {
+  if (y <= 0.0) return 0.0;
+  if (y <= LOG_KNEE_START) return y;
+  float w = LOG_KNEE_SPAN;
+  if (y >= LOG_KNEE_START + w) return 1.0;
+  float h = 1.0 - LOG_KNEE_START;
+  float m = w / h;
+  float t = (y - LOG_KNEE_START) / w;
+  return LOG_KNEE_START + h * t * (m + (3.0 - 2.0 * m) * t + (m - 2.0) * t * t);
+}
 
 void main() {
   int si = int(gl_FragCoord.x);
@@ -124,12 +140,12 @@ void main() {
   float x = amp + nz.r;
   float a = sqrt(x * x + nz.b * nz.b) * texelFetch(uComp, ivec2(si, 0), 0).r;
   float db = 20.0 * log(a + LOG_FLOOR) * 0.4342944819032518 - REF_DB;
-  float y = clamp((db + uDynRange) / uDynRange, 0.0, 1.0);
+  float y = softKneeCompress((db + uDynRange) / uDynRange);
   outLog = vec4(y, 0.0, 0.0, 1.0);
 }
 `;
 
-/** Console pass 2: structure-oriented anisotropic SRI + axial edge enhancement + persistence + grey map. */
+/** Console pass 2: 2-scale structure-oriented anisotropic SRI + axial edge enhancement + persistence + grey map. */
 export const GLSL_CONSOLE_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -171,6 +187,24 @@ float sriAt(int si, int li, float strength) {
 
   float gs = (ne + 2.0 * ee + se) - (nw + 2.0 * ww + sw);
   float gl = (sw + 2.0 * ss + se) - (nw + 2.0 * nn + ne);
+
+  bool hasCoarse = si >= 2 && si < uSamples - 2 && li >= 2 && li < uLines - 2;
+  float nw2 = 0.0, nn2 = 0.0, ne2 = 0.0, ww2 = 0.0, ee2 = 0.0, sw2 = 0.0, ss2 = 0.0, se2 = 0.0;
+  if (hasCoarse) {
+    nw2 = logAt(si - 2, li - 2);
+    nn2 = logAt(si, li - 2);
+    ne2 = logAt(si + 2, li - 2);
+    ww2 = logAt(si - 2, li);
+    ee2 = logAt(si + 2, li);
+    sw2 = logAt(si - 2, li + 2);
+    ss2 = logAt(si, li + 2);
+    se2 = logAt(si + 2, li + 2);
+    float gs2 = (ne2 + 2.0 * ee2 + se2) - (nw2 + 2.0 * ww2 + sw2);
+    float gl2 = (sw2 + 2.0 * ss2 + se2) - (nw2 + 2.0 * nn2 + ne2);
+    gs = 0.65 * gs + 0.35 * gs2;
+    gl = 0.65 * gl + 0.35 * gl2;
+  }
+
   float mag = length(vec2(gs, gl));
   float edgeConf = min(1.0, mag / SRI_EDGE_REF);
   vec2 nrm = mag > 1e-5 ? vec2(gs, gl) / mag : vec2(1.0, 0.0);
@@ -202,11 +236,35 @@ float sriAt(int si, int li, float strength) {
   float wne = g3 * exp(-(ne - cc) * (ne - cc) * SRI_INV_2_SIGMA2);
   float wsw = g3 * exp(-(sw - cc) * (sw - cc) * SRI_INV_2_SIGMA2);
 
-  float tangW = we + w_w + ws + wn + wse + wnw + wne + wsw + SRI_CENTER_WEIGHT;
-  float tangMean = (we * ee + w_w * ww + ws * ss + wn * nn + wse * se + wnw * nw + wne * ne + wsw * sw + SRI_CENTER_WEIGHT * cc) / tangW;
+  float tangW1 = we + w_w + ws + wn + wse + wnw + wne + wsw + SRI_CENTER_WEIGHT;
+  float tangMean = (we * ee + w_w * ww + ws * ss + wn * nn + wse * se + wnw * nw + wne * ne + wsw * sw + SRI_CENTER_WEIGHT * cc) / tangW1;
 
   float normW = 2.0 * (wn0 + wn1 + wn2 + wn3);
   float normMean = normW > 1e-6 ? (wn0 * (ee + ww) + wn1 * (ss + nn) + wn2 * (se + nw) + wn3 * (ne + sw)) / normW : cc;
+
+  if (hasCoarse) {
+    float cwe  = g0 * exp(-(ee2 - cc) * (ee2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cw_w = g0 * exp(-(ww2 - cc) * (ww2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cws  = g1 * exp(-(ss2 - cc) * (ss2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cwn  = g1 * exp(-(nn2 - cc) * (nn2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cwse = g2 * exp(-(se2 - cc) * (se2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cwnw = g2 * exp(-(nw2 - cc) * (nw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cwne = g3 * exp(-(ne2 - cc) * (ne2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    float cwsw = g3 * exp(-(sw2 - cc) * (sw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+
+    float tangW2 = cwe + cw_w + cws + cwn + cwse + cwnw + cwne + cwsw + SRI_CENTER_WEIGHT;
+    float tangMean2 = (cwe * ee2 + cw_w * ww2 + cws * ss2 + cwn * nn2 + cwse * se2 + cwnw * nw2 + cwne * ne2 + cwsw * sw2 + SRI_CENTER_WEIGHT * cc) / tangW2;
+    tangMean = (1.0 - SRI_COARSE_SHARE) * tangMean + SRI_COARSE_SHARE * tangMean2;
+
+    float loC = cc - 0.28, hiC = cc + 0.28;
+    float normMean2 = normW > 1e-6
+      ? (wn0 * (clamp(ee2, loC, hiC) + clamp(ww2, loC, hiC)) +
+         wn1 * (clamp(ss2, loC, hiC) + clamp(nn2, loC, hiC)) +
+         wn2 * (clamp(se2, loC, hiC) + clamp(nw2, loC, hiC)) +
+         wn3 * (clamp(ne2, loC, hiC) + clamp(sw2, loC, hiC))) / normW
+      : cc;
+    normMean = 0.75 * normMean + 0.25 * normMean2;
+  }
 
   float smoothMix = strength * (SRI_SMOOTH_BASE + SRI_SMOOTH_COH * edgeConf);
   float smoothed = cc + (tangMean - cc) * smoothMix;
@@ -305,7 +363,7 @@ void main() {
   vec4 wl = vec4(-0.5 * fl + fl2 - 0.5 * fl3, 1.0 - 2.5 * fl2 + 1.5 * fl3, 0.5 * fl + 2.0 * fl2 - 1.5 * fl3, -0.5 * fl2 + 0.5 * fl3);
   float lo = min(min(v00, v10), min(v01, v11));
   float hi = max(max(v00, v10), max(v01, v11));
-  float g = floor(clamp(dot(vec4(c0, c1, c2, c3), wl), lo, hi) + 0.5);
+  float g = clamp(dot(vec4(c0, c1, c2, c3), wl), lo, hi);
   vec3 rgb = applyTintMap(g, uTintMap);
   if (uColorOn == 1) {
     vec2 rt = texelFetch(uPolar, ivec2(x, y), 0).rg;
