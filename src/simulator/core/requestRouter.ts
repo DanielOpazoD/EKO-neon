@@ -194,12 +194,12 @@ export function routeSimRequest(req: SimRequest, ctx: RequestRouterCtx): SimResp
       Math.abs(f.acquisition.probe.rotationDeg - refFrame.acquisition.probe.rotationDeg) < 3 &&
       Math.abs(f.acquisition.probe.tiltDeg - refFrame.acquisition.probe.tiltDeg) < 3 &&
       Math.abs(f.acquisition.probe.rockDeg - refFrame.acquisition.probe.rockDeg) < 3;
-    // Pick the optimal cardiac phase frame in cine when available (mid-systole for LVOT/AV CW/RVOT PW/RV S', early-diastole for mitral/TDI e', ED for TAPSE/TR)
+    // Pick the optimal cardiac phase frame in cine when available:
+    // - mid-systole for LVOT/AV CW/RV S'
+    // - early-diastole for mitral/TDI e'
+    // - ED for TAPSE/TR/RVOT PW (closed pulmonary valve orifice is crisply delineated at ED on PSAX-AV)
     const desiredPhase =
-      req.target === 'lvot' ||
-      req.target === 'av-cw' ||
-      req.target === 'rvot-pw' ||
-      req.target === 'rv-s-prime'
+      req.target === 'lvot' || req.target === 'av-cw' || req.target === 'rv-s-prime'
         ? pm.ejectionStart + 0.4 * (pm.ejectionEnd - pm.ejectionStart)
         : req.target === 'mitral-inflow' || req.target === 'tdi-septal' || req.target === 'tdi-lateral'
           ? 0.5 * (pm.mitralOpen + pm.eEnd)

@@ -175,6 +175,20 @@ describe('Automatic 2D PLAX linear dimensions & LA volume (Paquete 1)', () => {
         checkTol('aortic-root', 10);
         // HFrEF's canonical 2D PLAX slice is anatomically clipped posteriorly by the descending aorta (~3.9 cm vs 4.7 cm 3D AP)
         checkTol('la-ap', caseId === 'hfref-severe-mr' ? 20 : 12);
+
+        // Verify ASE same-orientation rule: IVSd, LVEDD, LVPWd, and LVESD share the exact same perpendicular axis (<= 1° diff)
+        const angleOf = (id: 'ivsd' | 'lv-edd' | 'lvpwd' | 'lv-esd') => {
+          const cal = byId.get(id)!;
+          return (Math.atan2(cal.bPx.y - cal.aPx.y, cal.bPx.x - cal.aPx.x) * 180) / Math.PI;
+        };
+        const edAng = angleOf('lv-edd');
+        for (const id of ['ivsd', 'lvpwd', 'lv-esd'] as const) {
+          const diff = Math.abs(angleOf(id) - edAng);
+          assert.ok(
+            diff <= 1.0,
+            `${caseId}: ${id} angle differs from lv-edd by ${diff.toFixed(2)}° (expected strictly parallel)`,
+          );
+        }
       } finally {
         core.dispose();
       }

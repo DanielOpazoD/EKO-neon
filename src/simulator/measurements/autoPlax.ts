@@ -407,6 +407,19 @@ export function detectPlaxFrameAxes(
   return { grid: g, lv, la, ao, ascAo, lvot, mv, uLv, pLv, uAo, pAo };
 }
 
+export interface PlaxLvTransectResult {
+  ivsd?: CmSegment;
+  cavity?: CmSegment;
+  lvpwd?: CmSegment;
+  /** Anatomical ED transect origin & axes so ES LVESD measures on the exact same line (ASE 2015). */
+  transect?: {
+    ox: number;
+    oy: number;
+    uLv: { ux: number; uy: number };
+    pLv: { px: number; py: number };
+  };
+}
+
 /**
  * Measure ASE PLAX LV linear dimensions (IVSd, LVEDD, LVPWd on ED; or LVESD on ES) along a
  * perpendicular transect at the level of the mitral valve leaflet tips.
@@ -416,7 +429,7 @@ export function extractPlaxLvTransect(
   spec: Pick<PolarFrameSpec, 'lines' | 'samples' | 'sectorRad' | 'depthCm'>,
   includeWalls: boolean,
   display?: Uint8ClampedArray,
-): { ivsd?: CmSegment; cavity?: CmSegment; lvpwd?: CmSegment } | null {
+): PlaxLvTransectResult | null {
   const axes = detectPlaxFrameAxes(structure, spec, display);
   if (!axes) return null;
   const { grid: g, lv, mv, uLv, pLv } = axes;
@@ -446,7 +459,7 @@ export function extractPlaxLvTransect(
   if (tHi < tLo) return null;
 
   let bestScore = -Infinity;
-  let bestResult: { ivsd?: CmSegment; cavity?: CmSegment; lvpwd?: CmSegment } | null = null;
+  let bestResult: PlaxLvTransectResult | null = null;
 
   const stepCm = 0.025;
   for (let t = tLo; t <= tHi; t += 0.1) {
@@ -505,8 +518,6 @@ export function extractPlaxLvTransect(
       (ivsLen >= 0.45 && pwLen >= 0.45 ? 1.2 : 0);
     if (score > bestScore) {
       bestScore = score;
-      // Add half a polar sample step on outer wall edge so wall thickness reflects continuous tissue boundary
-      // while remaining strictly inside septal/posterior myocardium for technique grading.
       const ivsInner = cav.s0 - stepCm;
       const pwInner = cav.s1 + stepCm;
       bestResult = {
@@ -517,11 +528,59 @@ export function extractPlaxLvTransect(
         ...(includeWalls && pwLen >= 0.4
           ? { lvpwd: segFromRay(ox, oy, pLv.px, pLv.py, pwInner, pwS1) }
           : {}),
+        transect: { ox, oy, uLv, pLv },
       };
     }
   }
 
   return bestResult;
+}
+
+/**
+ * Measure LVESD on the end-systolic frame at the EXACT same PLAX transect line and perpendicularity
+ * established for LVEDD/IVSd/LVPWd at end-diastole (ASE/EACVI 2015), falling back by ≤ 0.35 cm
+ * only if basal longitudinal descent shifts the mitral leaflet onto the exact ED line.
+ */
+function extractPlaxLvEsAtTransect(
+  structure: Uint8Array,
+  spec: Pick<PolarFrameSpec, 'lines' | 'samples' | 'sectorRad' | 'depthCm'>,
+  transect: NonNullable<PlaxLvTransectResult['transect']>,
+  display?: Uint8ClampedArray,
+): CmSegment | null {
+  const g = makeGrid(structure, spec, display);
+  const { ox, oy, uLv, pLv } = transect;
+  const stepCm = 0.025;
+  // Prefer dt = 0 (exact ED line), then step gently apically along -uLv to clear systolic
+  // basal annular descent (MAPSE) while staying strictly 0° parallel to the ED transect.
+  const shifts = [
+    0, -0.1, -0.25, -0.4, -0.55, -0.7, -0.85, -1.0, -1.15, -1.3, -1.45, -1.6, -1.75, -1.9, -2.05,
+    0.15,
+  ];
+  for (const dt of shifts) {
+    const cx = ox + uLv.ux * dt;
+    const cy = oy + uLv.uy * dt;
+    const cavRuns = rayRuns(
+      g,
+      cx,
+      cy,
+      pLv.px,
+      pLv.py,
+      -5.5,
+      5.5,
+      stepCm,
+      (s) => LV_CAVITY_RUN_SET.has(s),
+    );
+    if (!cavRuns.length) continue;
+    let cav = cavRuns[0]!;
+    for (const r of cavRuns) if (r.s1 - r.s0 > cav.s1 - cav.s0) cav = r;
+    const cavLen = cav.s1 - cav.s0;
+    if (cavLen < 1.2) continue;
+    const antEdge = sampleAtCm(g, cx + pLv.px * (cav.s0 - 0.12), cy + pLv.py * (cav.s0 - 0.12));
+    const postEdge = sampleAtCm(g, cx + pLv.px * (cav.s1 + 0.12), cy + pLv.py * (cav.s1 + 0.12));
+    if (!SEPTAL_WALL_SET.has(antEdge) || !POSTERIOR_WALL_SET.has(postEdge)) continue;
+    return segFromRay(cx, cy, pLv.px, pLv.py, cav.s0, cav.s1);
+  }
+  return null;
 }
 
 /** Measure ASE LVOT diameter (~0.5 cm proximal to aortic annulus, inner-edge to inner-edge) on mid-systole PLAX. */
@@ -920,11 +979,14 @@ export function computeAutoPlaxMeasurements(
     }
   }
 
-  // 3. End-systole: LVESD and LA AP diameter
+  // 3. End-systole: LVESD on the exact same ED transect line & perpendicularity + LA AP diameter
   let esFrameId: number | null = null;
-  const esLv = extractPlaxLvTransect(esFrame.structure, esFrame.spec, false, esFrame.display);
-  if (esLv?.cavity) {
-    calipers.push(makeCaliper('lv-esd', 'es', esFrame, esPick.offset, esLv.cavity));
+  const esCavity =
+    (edLv?.transect
+      ? extractPlaxLvEsAtTransect(esFrame.structure, esFrame.spec, edLv.transect, esFrame.display)
+      : null) ?? extractPlaxLvTransect(esFrame.structure, esFrame.spec, false, esFrame.display)?.cavity;
+  if (esCavity) {
+    calipers.push(makeCaliper('lv-esd', 'es', esFrame, esPick.offset, esCavity));
     esFrameId = esFrame.frameId;
   }
   const laAp = extractPlaxLaAp(esFrame.structure, esFrame.spec, esFrame.display);

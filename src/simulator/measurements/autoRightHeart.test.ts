@@ -375,4 +375,128 @@ describe('Automatic 2D & Doppler Right-Heart + IVC measurements (Paquete 2)', ()
       }
     }
   });
+
+  it('anchors M-mode TAPSE strictly to the lateral tricuspid annulus and distinguishes normal vs PH accurately', () => {
+    for (const caseId of ['normal-excellent-window', 'pulmonary-hypertension-rv'] as const) {
+      const c = loadCaseById(caseId);
+      const truth = computeGroundTruth(c);
+      const { heart, thorax } = buildCaseModels(c, REST_PATIENT);
+      const ctrl = canonicalControl(getViewTarget('rv-focused'), heart, thorax);
+      const base = baseInput();
+      const core = new SimulatorCore(c, {
+        ...base,
+        probe: ctrl,
+        modality: '2d',
+        quality: 'low',
+        rendererBackend: 'procedural',
+        display: { width: 640, height: 480 },
+      });
+      try {
+        for (let i = 0; i < 20; i++) core.step(0.032);
+        const dop = core.request({ kind: 'autoDopplerTarget', target: 'tapse' });
+        assert.ok(
+          dop && dop.kind === 'autoDopplerTarget' && dop.result.ok,
+          `${caseId}: tapse target should succeed`,
+        );
+        assert.equal(dop.result.modality, 'm-mode');
+
+        core.setInput({
+          ...base,
+          probe: ctrl,
+          modality: 'm-mode',
+          cursorThetaRad: dop.result.thetaRad,
+          gateDepthCm: dop.result.rCm,
+          quality: 'low',
+          rendererBackend: 'procedural',
+          display: { width: 640, height: 480 },
+        });
+        let lastOut = core.step(0.032);
+        for (let i = 0; i < 65; i++) lastOut = core.step(0.032);
+        assert.ok(lastOut);
+
+        const mRes = core.request({ kind: 'autoMeasureStrip', target: 'tapse' });
+        assert.ok(
+          mRes && mRes.kind === 'autoMeasureStrip' && mRes.result.ok && mRes.result.target === 'tapse',
+          `${caseId}: autoMeasureStrip tapse should succeed, got ${JSON.stringify(mRes)}`,
+        );
+        const measured = mRes.result.tapseCm;
+        const truthVal = truth.rightHeart.tapseCm;
+        const errPct = (Math.abs(measured - truthVal) / truthVal) * 100;
+        assert.ok(
+          errPct <= 16,
+          `${caseId} TAPSE: measured ${measured.toFixed(2)} cm vs truth ${truthVal.toFixed(2)} cm (${errPct.toFixed(1)}%)`,
+        );
+        if (caseId === 'pulmonary-hypertension-rv') {
+          assert.ok(measured < 1.6, `PH TAPSE must be reduced (<1.6 cm), got ${measured.toFixed(2)} cm`);
+        } else {
+          assert.ok(measured >= 1.8, `Normal TAPSE must be >=1.8 cm, got ${measured.toFixed(2)} cm`);
+        }
+
+        const tech = evaluateTechnique(specById('tapse'), {
+          modality: 'm-mode',
+          viewId: lastOut.view?.bestViewId ?? null,
+          viewScore: lastOut.view?.score ?? null,
+          phase: lastOut.phase,
+          phaseMarks: lastOut.acquisition?.phaseMarks ?? null,
+          gate: lastOut.gate,
+          userAssisted: true,
+        });
+        assert.equal(
+          tech.findings.filter((f) => f.level === 'invalid').length,
+          0,
+          `${caseId} tapse invalid technique: ${JSON.stringify(tech.findings)}`,
+        );
+      } finally {
+        core.dispose();
+      }
+    }
+  });
+
+  it('measures septal TDI e′ reliably in atrial fibrillation (short irregular RR) without incomplete-beat failure', () => {
+    const c = loadCaseById('af-diastolic');
+    const truth = computeGroundTruth(c);
+    const { heart, thorax } = buildCaseModels(c, REST_PATIENT);
+    const ctrl = canonicalControl(getViewTarget('a4c'), heart, thorax);
+    const base = baseInput();
+    const core = new SimulatorCore(c, {
+      ...base,
+      probe: ctrl,
+      modality: '2d',
+      quality: 'low',
+      rendererBackend: 'procedural',
+      display: { width: 640, height: 480 },
+    });
+    try {
+      for (let i = 0; i < 20; i++) core.step(0.032);
+      const dop = core.request({ kind: 'autoDopplerTarget', target: 'tdi-septal' });
+      assert.ok(dop && dop.kind === 'autoDopplerTarget' && dop.result.ok);
+
+      core.setInput({
+        ...base,
+        probe: ctrl,
+        modality: 'tdi',
+        cursorThetaRad: dop.result.thetaRad,
+        gateDepthCm: dop.result.rCm,
+        spectral: { ...base.spectral, scaleMps: 0.25, wallFilterMps: 0.02, baselineShiftMps: 0 },
+        quality: 'low',
+        rendererBackend: 'procedural',
+        display: { width: 640, height: 480 },
+      });
+      for (let i = 0; i < 70; i++) core.step(0.032);
+
+      const epRes = core.request({ kind: 'autoMeasureStrip', target: 'tdi-e-prime' });
+      assert.ok(
+        epRes && epRes.kind === 'autoMeasureStrip' && epRes.result.ok && epRes.result.target === 'tdi-e-prime',
+        `af-diastolic tdi-e-prime should succeed, got ${JSON.stringify(epRes)}`,
+      );
+      const measuredCmps = Math.abs(epRes.result.ePrime.velocityMps) * 100;
+      const errPct = (Math.abs(measuredCmps - truth.mitral.ePrimeSeptalCmps) / truth.mitral.ePrimeSeptalCmps) * 100;
+      assert.ok(
+        errPct <= 15,
+        `af-diastolic e′ septal: measured ${measuredCmps.toFixed(1)} vs truth ${truth.mitral.ePrimeSeptalCmps.toFixed(1)} cm/s (${errPct.toFixed(1)}%)`,
+      );
+    } finally {
+      core.dispose();
+    }
+  });
 });

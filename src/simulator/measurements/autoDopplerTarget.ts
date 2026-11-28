@@ -506,31 +506,22 @@ export function findDopplerTargetFromPolar(
           s === Structure.RaWall,
       ),
     );
-    const pool = tvAnnCells.length > 0 ? tvAnnCells : basalRvWall.length > 0 ? basalRvWall : rvWallCells;
-    let best = pool[0]!;
-    let bestScore = -Infinity;
-    for (const c of pool) {
-      // Deepest basal end of the lateral RV wall (closest to tricuspid annular hinge)
-      const score = c.y - Math.abs(c.x - rvC.x) * 0.15;
-      if (score > bestScore) {
-        bestScore = score;
-        best = c;
-      }
+    // Both TAPSE and RV S' strictly anchor to the lateral RV free wall (`RvWall`) meeting the
+    // tricuspid annulus / RA (never the septal tricuspid hinge adjacent to LvWallSeptal).
+    const rvPool = basalRvWall.length >= 4 ? basalRvWall : rvWallCells;
+    if (!rvPool.length) {
+      return {
+        ok: false,
+        target,
+        reason: 'structure-not-visible',
+        message:
+          'No se identifica la pared libre basal del VD en este corte. Usa A4C o vista enfocada en VD.',
+      };
     }
+    let maxY = -Infinity;
+    for (const c of rvPool) if (c.y > maxY) maxY = c.y;
+
     if (target === 'rv-s-prime') {
-      // Strictly target the lateral RV free wall (`RvWall`) inside the basal annular cuff
-      // (never the septal tricuspid hinge adjacent to LvWallSeptal).
-      const rvPool = basalRvWall.length >= 4 ? basalRvWall : rvWallCells;
-      if (!rvPool.length) {
-        return {
-          ok: false,
-          target,
-          reason: 'structure-not-visible',
-          message: 'No se identifica la pared libre basal del VD en este corte. Usa A4C o vista enfocada en VD.',
-        };
-      }
-      let maxY = -Infinity;
-      for (const c of rvPool) if (c.y > maxY) maxY = c.y;
       const desiredY = maxY - 0.35;
       const band = rvWallCells.filter((c) => c.y >= maxY - 0.9 && c.y <= maxY - 0.05);
       const candPool = band.length >= 3 ? band : rvPool;
@@ -566,7 +557,33 @@ export function findDopplerTargetFromPolar(
         summary: `Gate TDI en anillo tricuspídeo lateral (${p.rCm.toFixed(1)} cm) listo para S′ VD.`,
       };
     }
-    const p = clampPolar(lut, best.x, best.y);
+
+    // target === 'tapse': deepest basal lateral RV free-wall junction right at the tricuspid annulus
+    // (excludes septal TricuspidAnnulus cells adjacent to LvWallSeptal).
+    const lateralTvAnn = tvAnnCells.filter(
+      (c) =>
+        hasNeighbor(structure, lut, c.li, c.si, 4, (s) => s === Structure.RvWall) &&
+        !hasNeighbor(structure, lut, c.li, c.si, 3, (s) => s === Structure.LvWallSeptal),
+    );
+    const tapsePool = lateralTvAnn.length > 0 ? lateralTvAnn : rvPool;
+    let bestTapse = tapsePool[0]!;
+    let bestTapseScore = -Infinity;
+    for (const c of tapsePool) {
+      const nearFat = hasNeighbor(
+        structure,
+        lut,
+        c.li,
+        c.si,
+        1,
+        (s) => s === Structure.EpicardialFat || s === Structure.Pericardium,
+      );
+      const score = c.y - (nearFat ? 0.45 : 0);
+      if (score > bestTapseScore) {
+        bestTapseScore = score;
+        bestTapse = c;
+      }
+    }
+    const p = clampPolar(lut, bestTapse.x, bestTapse.y);
     return {
       ok: true,
       target,
