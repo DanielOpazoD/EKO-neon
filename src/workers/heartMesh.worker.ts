@@ -146,7 +146,13 @@ function buildAllPhases(
     const phase = phases[i]!;
     const t0 = performance.now();
     const pose = computeHeartPose(heart, cycleStateAt(tables, phase));
-    const groups = buildHeartMeshes(heart, pose, { stepCm, thorax });
+    // Thoracic aorta moves minimally across the beat: extract once on phase 0 and reuse across phases
+    const groups = buildHeartMeshes(heart, pose, {
+      stepCm,
+      thorax,
+      includeAorta: i === 0,
+      includeCoronaries: true,
+    });
     const reply: MeshReply = {
       caseId,
       index: i,
@@ -158,6 +164,8 @@ function buildAllPhases(
     const transfer: Transferable[] = [];
     for (const g of groups) {
       transfer.push(g.positions.buffer, g.normals.buffer, g.indices.buffer);
+      if (g.ao) transfer.push(g.ao.buffer);
+      if (g.groove) transfer.push(g.groove.buffer);
       if (g.segments) transfer.push(g.segments.buffer);
     }
     (self as unknown as Worker).postMessage(reply, transfer);

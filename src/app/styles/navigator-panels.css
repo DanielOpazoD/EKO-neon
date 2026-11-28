@@ -21,7 +21,42 @@
   border: 0;
   overflow: hidden;
   /* dark studio chamber with subtle central vignette so the probe silhouette never disappears */
-  background: radial-gradient(ellipse at 50% 44%, #111827 0%, #050811 66%, #000000 100%);
+  background: radial-gradient(ellipse at 50% 44%, #131c2e 0%, #070b14 66%, #020409 100%);
+}
+.nav-win-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 2;
+}
+.nav-win-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px 2px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.3;
+  color: #f1f5f9;
+  background: rgba(11, 18, 32, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  backdrop-filter: blur(5px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+  transition: opacity 0.16s ease;
+  will-change: transform, opacity;
+}
+.nav-win-badge i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
 }
 .cut-map {
   flex: 1 1 50%;
