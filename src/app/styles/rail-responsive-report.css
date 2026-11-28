@@ -585,6 +585,118 @@
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 10px;
 }
+.report-clean {
+  max-width: 860px;
+}
+.cr-top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.cr-top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cr-head-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cr-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.cr-title-row h2 {
+  margin: 0;
+}
+.cr-demo-line {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.cr-empty-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cr-empty-box p {
+  margin: 0;
+}
+.cr-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+}
+.cr-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.cr-kpi-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.cr-kpi-val {
+  font-family: var(--mono);
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--text);
+}
+.cr-val-cell {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.cr-eval-details {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  padding: 8px 12px;
+}
+.cr-eval-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--text);
+}
+.cr-eval-summary::-webkit-details-marker {
+  display: none;
+}
+.cr-eval-badge {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.cr-view-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.cr-disclaimer {
+  margin-top: 14px;
+  opacity: 0.7;
+}
 
 @media print {
   @page {
