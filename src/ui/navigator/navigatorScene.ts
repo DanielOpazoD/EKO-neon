@@ -205,7 +205,7 @@ export function mountNavigatorScene(
   meshWorker.postMessage({
     caseDef: loadCaseById(caseId),
     patient,
-    stepCm: 0.26,
+    stepCm: 0.3,
     phases: MESH_PHASES,
   } satisfies MeshRequest);
 

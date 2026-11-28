@@ -1,5 +1,6 @@
 import type { HeartModel, HeartPose } from './heartModel';
 import { classifyHeart } from './heartModel';
+import { lvRegionalMotion } from './lvGeometry';
 import { heartToTorso, torsoToHeart } from './heartFrame';
 import {
   classifyThorax,
@@ -86,10 +87,10 @@ const isLvWall = (s: Structure): boolean =>
 /** Groups the navigator can show or hide independently (solid, natural anatomical palette). */
 export const MESH_GROUPS: GroupSpec[] = [
   {
-    // LV + RV myocardium fused into ONE continuous biventricular surface (with a constrained sulcus
-    // fillet bridging the RV–LV insertions). Eliminates the detached "shell/cape" overhang seam
-    // between separate LV and RV meshes while keeping both interior cavities hollow for cut views
-    // and preserving exact AHA 17-segment tagging on LV wall vertices.
+    // LV + RV myocardium fused into ONE continuous biventricular surface using a Gaussian-blurred
+    // exterior smooth-union density field + interpolated Surface Nets. Eliminates both the detached
+    // RV "cape" seam and the steep anterior RV–LV step while keeping interior cavities hollow for
+    // cut views and preserving exact AHA 17-segment tagging on LV wall vertices.
     id: 'lv-myocardium',
     label: 'Miocardio (VI + VD)',
     color: 0x8e242a,
@@ -100,7 +101,7 @@ export const MESH_GROUPS: GroupSpec[] = [
       s === Structure.RvWall ||
       s === Structure.ModeratorBand ||
       s === Structure.RvPapillary,
-    smoothing: 3,
+    smoothing: 2,
   },
   {
     id: 'lv-cavity',
@@ -315,6 +316,8 @@ function extractMeshes(
       step,
       g.smoothing ?? opts.smoothing ?? 2,
       g.id === 'lv-myocardium' ? segs : null,
+      heart,
+      pose,
     ),
   );
 }
@@ -343,28 +346,28 @@ function isSulcusNeighbour(groupId: string, other: Structure): boolean {
   return false;
 }
 
-const isExteriorFillable = (s: Structure): boolean =>
-  s === Structure.None ||
-  s === Structure.EpicardialFat ||
-  s === Structure.Pericardium ||
-  s === Structure.PericardialFat;
+const VENTRICLE_ISO = 0.36;
 
 /**
- * Builds the seamless unified biventricular occupancy mask:
+ * Builds a C²-continuous exterior smooth-union density field for the fused biventricular myocardium:
  * 1. Thickens the thin RV free wall 2 cells inward into RV cavity/RVOT so the epicardium stays watertight.
- * 2. Applies constrained exterior sulcus filleting exclusively in the concave notch where RV meets LV
- *    (never invading blood cavities, atria, or great vessels) so the ventricles fuse into one continuous
- *    sculptural epicardial mass with zero detached "cape/shell" step.
+ * 2. Runs 5 fast separable 1D Gaussian blur passes (`[0.25, 0.5, 0.25]` along X, Y, Z) while strictly
+ *    clamping interior blood cavities (`LvCavity`, `Lvot`, `RvCavity`, `Rvot`) back to 0 so `navCut`
+ *    retains sharp hollow chambers.
+ *
+ * The resulting smooth-union isosurface (`density >= 0.42`) blends the anterior RV wall seamlessly into
+ * the LV wall and apex without blocky steps, ridges, or detached ledges.
  */
-function buildUnifiedVentricleMask(
+function buildUnifiedVentricleField(
   ids: Uint8Array,
   nx: number,
   ny: number,
   nz: number,
-): Uint8Array {
+): Float32Array {
   const n = ids.length;
   const lvZone = new Uint8Array(n);
   const rvZone = new Uint8Array(n);
+  const cavityLock = new Uint8Array(n);
   for (let o = 0; o < n; o++) {
     const s = ids[o] as Structure;
     if (isLvWall(s) || s === Structure.PapillaryMuscle) lvZone[o] = 1;
@@ -374,9 +377,16 @@ function buildUnifiedVentricleMask(
       s === Structure.RvPapillary
     )
       rvZone[o] = 1;
+    else if (
+      s === Structure.LvCavity ||
+      s === Structure.Lvot ||
+      s === Structure.RvCavity ||
+      s === Structure.Rvot
+    )
+      cavityLock[o] = 1;
   }
 
-  // 1. Watertight RV wall: grow RV 2 cells inward into its own cavity/RVOT only (epicardium stays exact)
+  // 1. Watertight RV wall: grow RV 2 cells inward into its own cavity/RVOT only
   const grow = new Uint8Array(n);
   for (let pass = 0; pass < 2; pass++) {
     grow.fill(0);
@@ -397,72 +407,127 @@ function buildUnifiedVentricleMask(
           )
             grow[o] = 1;
         }
-    for (let o = 0; o < n; o++) if (grow[o]) rvZone[o] = 1;
-  }
-
-  const inside = new Uint8Array(n);
-  for (let o = 0; o < n; o++) inside[o] = lvZone[o] || rvZone[o] ? 1 : 0;
-
-  // 2. Constrained LV↔RV sulcus fillet (3 passes): smoothly bridges only the exterior V-notch / overhang
-  //    between LV and RV (anterior & inferior interventricular grooves and apical RV insertion).
-  const strideZ = nx * ny;
-  const fill = new Uint8Array(n);
-  for (let pass = 0; pass < 3; pass++) {
-    fill.fill(0);
-    for (let k = 1; k < nz - 1; k++)
-      for (let j = 1; j < ny - 1; j++)
-        for (let i = 1; i < nx - 1; i++) {
-          const o = k * strideZ + j * nx + i;
-          if (inside[o] || !isExteriorFillable(ids[o] as Structure)) continue;
-          let nLv = 0;
-          let nRv = 0;
-          for (let dk = -1; dk <= 1; dk++) {
-            const ok = o + dk * strideZ;
-            for (let dj = -1; dj <= 1; dj++) {
-              const oj = ok + dj * nx;
-              for (let di = -1; di <= 1; di++) {
-                if (di === 0 && dj === 0 && dk === 0) continue;
-                const nb = oj + di;
-                if (lvZone[nb]) nLv++;
-                if (rvZone[nb]) nRv++;
-              }
-            }
-          }
-          if (nLv >= 1 && nRv >= 1 && nLv + nRv >= 4) fill[o] = 1;
-        }
     for (let o = 0; o < n; o++) {
-      if (fill[o]) {
-        inside[o] = 1;
-        lvZone[o] = 1;
+      if (grow[o]) {
         rvZone[o] = 1;
+        cavityLock[o] = 0;
       }
     }
   }
 
-  // 3. One pass of concave-only exterior morphological closing (>= 14 of 26 neighbors inside)
-  //    smooths any residual step along the apical RV-to-LV junction without inflating convex walls.
-  fill.fill(0);
-  for (let k = 1; k < nz - 1; k++)
-    for (let j = 1; j < ny - 1; j++)
-      for (let i = 1; i < nx - 1; i++) {
-        const o = k * strideZ + j * nx + i;
-        if (inside[o] || !isExteriorFillable(ids[o] as Structure)) continue;
-        let cnt = 0;
-        for (let dk = -1; dk <= 1; dk++) {
-          const ok = o + dk * strideZ;
-          for (let dj = -1; dj <= 1; dj++) {
-            const oj = ok + dj * nx;
-            for (let di = -1; di <= 1; di++) {
-              if (di === 0 && dj === 0 && dk === 0) continue;
-              if (inside[oj + di]) cnt++;
-            }
-          }
-        }
-        if (cnt >= 14) fill[o] = 1;
-      }
-  for (let o = 0; o < n; o++) if (fill[o]) inside[o] = 1;
+  const base = new Uint8Array(n);
+  const field = new Float32Array(n);
+  for (let o = 0; o < n; o++) {
+    if (lvZone[o] || rvZone[o]) {
+      base[o] = 1;
+      field[o] = 1;
+    }
+  }
 
-  return inside;
+  // 2. Separable 3D Gaussian smooth-union (5 passes with core preservation on first 3 passes so thin
+  //    diastolic apical walls never erode while exterior RV–LV steps melt into a smooth C² transition)
+  const tmp = new Float32Array(n);
+  const strideZ = nx * ny;
+  for (let pass = 0; pass < 5; pass++) {
+    // X pass
+    tmp.set(field);
+    for (let k = 0; k < nz; k++) {
+      const kOff = k * strideZ;
+      for (let j = 0; j < ny; j++) {
+        const row = kOff + j * nx;
+        for (let i = 1; i < nx - 1; i++) {
+          const o = row + i;
+          tmp[o] = 0.25 * field[o - 1]! + 0.5 * field[o]! + 0.25 * field[o + 1]!;
+        }
+      }
+    }
+    // Y pass
+    field.set(tmp);
+    for (let k = 0; k < nz; k++) {
+      const kOff = k * strideZ;
+      for (let j = 1; j < ny - 1; j++) {
+        const row = kOff + j * nx;
+        for (let i = 0; i < nx; i++) {
+          const o = row + i;
+          field[o] = 0.25 * tmp[o - nx]! + 0.5 * tmp[o]! + 0.25 * tmp[o + nx]!;
+        }
+      }
+    }
+    // Z pass
+    tmp.set(field);
+    for (let k = 1; k < nz - 1; k++) {
+      const kOff = k * strideZ;
+      for (let j = 0; j < ny; j++) {
+        const row = kOff + j * nx;
+        for (let i = 0; i < nx; i++) {
+          const o = row + i;
+          tmp[o] = 0.25 * field[o - strideZ]! + 0.5 * field[o]! + 0.25 * field[o + strideZ]!;
+        }
+      }
+    }
+    // Enforce hollow interior blood cavities; reinforce wall core on early passes to prevent thinning
+    const keepCore = pass < 3;
+    for (let o = 0; o < n; o++) {
+      if (cavityLock[o]) field[o] = 0;
+      else field[o] = keepCore && base[o] ? Math.max(tmp[o]!, 0.92) : tmp[o]!;
+    }
+  }
+
+  return field;
+}
+
+/**
+ * Applies balanced 3D physiological systolic epicardial deformation (distributed radial & anterior-inferior
+ * contraction, apical inward shortening instead of outward thickening bulge, and authentic systolic
+ * ventricular twist/torsion) scaled by the case's ejection fraction and regional wall motion.
+ */
+function applyPhysiologicalVentricularBeat(
+  positions: Float32Array,
+  heart: HeartModel,
+  pose: HeartPose,
+): void {
+  const c = pose.state.contraction;
+  if (c <= 1e-4) return;
+  const edv = Math.max(20, heart.physiology.edvMl);
+  const esv = Math.max(5, heart.physiology.esvMl);
+  const caseEf = Math.max(0.12, Math.min(0.85, (edv - esv) / edv));
+  const efScale = Math.max(0.25, Math.min(1.35, caseEf / 0.6));
+  const L = heart.lv.lengthCm;
+  const zAnn = pose.zAnn;
+  const effL = Math.max(4, L - zAnn);
+  const hasRwma = heart.regionalMeanFrac > 0;
+
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i]!;
+    const y = positions[i + 1]!;
+    const z = positions[i + 2]!;
+    const zeta = Math.max(0, Math.min(1, (z - zAnn) / effL));
+    const reg = hasRwma ? lvRegionalMotion(heart.segAmp, Math.atan2(y, x), zeta) : 1;
+    const amp = c * efScale * reg;
+    if (amp <= 1e-4) continue;
+
+    const apicalW = zeta * zeta * (3 - 2 * zeta);
+    // Ventricular centroid tapers smoothly from biventricular base toward the LV apex
+    const cx = -1.1 * (1 - 0.88 * zeta);
+    const cy = 0.15 * (1 - 0.88 * zeta);
+
+    // 1. Balanced radial + anterior-inferior contraction so mid, anterior, inferior & apex all squeeze together
+    const sx = 1 - 0.145 * amp * apicalW;
+    const sy = 1 - (0.1 + 0.085 * apicalW) * amp;
+    const x1 = cx + (x - cx) * sx;
+    const y1 = cy + (y - cy) * sy;
+
+    // 2. Systolic apical inward longitudinal shortening (replaces the unphysiological outward apical bulge)
+    const z1 = z - 0.85 * Math.pow(zeta, 1.35) * amp;
+
+    // 3. Physiological systolic torsion: subtle clockwise base (-3°) to counter-clockwise apex (+11°) twist
+    const twistRad = (((-3 + 14 * zeta) * Math.PI) / 180) * amp;
+    const ct = Math.cos(twistRad);
+    const st = Math.sin(twistRad);
+    positions[i] = x1 * ct - y1 * st;
+    positions[i + 1] = x1 * st + y1 * ct;
+    positions[i + 2] = z1;
+  }
 }
 
 function surfaceNet(
@@ -476,43 +541,52 @@ function surfaceNet(
   step: number,
   smoothing: number,
   segs: Uint8Array | null = null,
+  heart?: HeartModel,
+  pose?: HeartPose,
 ): MeshGroup {
-  const inside =
-    g.id === 'lv-myocardium'
-      ? buildUnifiedVentricleMask(ids, nx, ny, nz)
-      : (() => {
-          const mask = new Uint8Array(nx * ny * nz);
-          for (let o = 0; o < ids.length; o++)
-            mask[o] = g.has(ids[o] as Structure, tissues[o] as Tissue) ? 1 : 0;
-          if (g.thicken) {
-            const grow = new Uint8Array(mask.length);
-            for (let pass = 0; pass < g.thicken.cells; pass++) {
-              grow.fill(0);
-              for (let k = 1; k < nz - 1; k++)
-                for (let j = 1; j < ny - 1; j++)
-                  for (let i = 1; i < nx - 1; i++) {
-                    const o = (k * ny + j) * nx + i;
-                    if (mask[o] || !g.thicken.into(ids[o] as Structure)) continue;
-                    if (
-                      mask[o - 1] ||
-                      mask[o + 1] ||
-                      mask[o - nx] ||
-                      mask[o + nx] ||
-                      mask[o - nx * ny] ||
-                      mask[o + nx * ny]
-                    )
-                      grow[o] = 1;
-                  }
-              for (let o = 0; o < mask.length; o++) if (grow[o]) mask[o] = 1;
+  const field = g.id === 'lv-myocardium' ? buildUnifiedVentricleField(ids, nx, ny, nz) : null;
+  const inside = new Uint8Array(nx * ny * nz);
+  if (field) {
+    for (let o = 0; o < ids.length; o++) inside[o] = field[o]! >= VENTRICLE_ISO ? 1 : 0;
+  } else {
+    for (let o = 0; o < ids.length; o++)
+      inside[o] = g.has(ids[o] as Structure, tissues[o] as Tissue) ? 1 : 0;
+    if (g.thicken) {
+      const grow = new Uint8Array(inside.length);
+      for (let pass = 0; pass < g.thicken.cells; pass++) {
+        grow.fill(0);
+        for (let k = 1; k < nz - 1; k++)
+          for (let j = 1; j < ny - 1; j++)
+            for (let i = 1; i < nx - 1; i++) {
+              const o = (k * ny + j) * nx + i;
+              if (inside[o] || !g.thicken.into(ids[o] as Structure)) continue;
+              if (
+                inside[o - 1] ||
+                inside[o + 1] ||
+                inside[o - nx] ||
+                inside[o + nx] ||
+                inside[o - nx * ny] ||
+                inside[o + nx * ny]
+              )
+                grow[o] = 1;
             }
-          }
-          return mask;
-        })();
+        for (let o = 0; o < inside.length; o++) if (grow[o]) inside[o] = 1;
+      }
+    }
+  }
   const at = (i: number, j: number, k: number): number => inside[(k * ny + j) * nx + i] ?? 0;
+  const valAt = (i: number, j: number, k: number): number =>
+    field ? (field[(k * ny + j) * nx + i] ?? 0) : at(i, j, k);
+  const edgeFrac = (d0: number, d1: number): number => {
+    if (!field) return 0.5;
+    const denom = d1 - d0;
+    if (Math.abs(denom) < 1e-6) return 0.5;
+    return Math.max(0.05, Math.min(0.95, (VENTRICLE_ISO - d0) / denom));
+  };
   const cellVertex = new Int32Array((nx - 1) * (ny - 1) * (nz - 1)).fill(-1);
   const pos: number[] = [];
   const vertexSeg: number[] = [];
-  const trackGroove = g.id === 'lv-myocardium' || g.id === 'rv-myocardium';
+  const trackGroove = g.id === 'lv-myocardium';
   const vertexGroove: number[] = [];
   const votes = new Uint8Array(21);
   const cellIndex = (i: number, j: number, k: number): number => (k * (ny - 1) + j) * (nx - 1) + i;
@@ -523,7 +597,7 @@ function surfaceNet(
         for (let dk = 0; dk < 2; dk++)
           for (let dj = 0; dj < 2; dj++)
             for (let di = 0; di < 2; di++) if (at(i + di, j + dj, k + dk)) count++;
-        if (count === 0 || count === 8) continue; // fully outside or fully inside: no surface here
+        if (count === 0 || count === 8) continue;
         let cx = 0,
           cy = 0,
           cz = 0,
@@ -532,22 +606,23 @@ function surfaceNet(
           for (let dj = 0; dj < 2; dj++)
             for (let di = 0; di < 2; di++) {
               const here = at(i + di, j + dj, k + dk);
+              const d0 = field ? valAt(i + di, j + dj, k + dk) : here;
               if (di === 0 && here !== at(i + 1, j + dj, k + dk)) {
-                cx += 0.5;
+                cx += edgeFrac(d0, valAt(i + 1, j + dj, k + dk));
                 cy += dj;
                 cz += dk;
                 crossings++;
               }
               if (dj === 0 && here !== at(i + di, j + 1, k + dk)) {
                 cx += di;
-                cy += 0.5;
+                cy += edgeFrac(d0, valAt(i + di, j + 1, k + dk));
                 cz += dk;
                 crossings++;
               }
               if (dk === 0 && here !== at(i + di, j + dj, k + 1)) {
                 cx += di;
                 cy += dj;
-                cz += 0.5;
+                cz += edgeFrac(d0, valAt(i + di, j + dj, k + 1));
                 crossings++;
               }
             }
@@ -591,7 +666,6 @@ function surfaceNet(
           min[2] + (k + cz / crossings) * step,
         );
       }
-  // quads across every edge whose endpoints differ, built from the four cells sharing that edge
   const idx: number[] = [];
   const vertexAt = (i: number, j: number, k: number): number => {
     if (i < 0 || j < 0 || k < 0 || i >= nx - 1 || j >= ny - 1 || k >= nz - 1) return -1;
@@ -634,6 +708,13 @@ function surfaceNet(
       }
   const positions = new Float32Array(pos);
   smoothTaubin(positions, idx, smoothing);
+  if (
+    heart &&
+    pose &&
+    (g.id === 'lv-myocardium' || g.id === 'lv-cavity' || g.id === 'rv-cavity')
+  ) {
+    applyPhysiologicalVentricularBeat(positions, heart, pose);
+  }
   const normals = vertexNormals(positions, idx);
   smoothNormals(normals, idx, 2);
   const groove = trackGroove ? smoothScalar(Float32Array.from(vertexGroove), idx, 3) : undefined;
@@ -865,9 +946,9 @@ function computeAmbientOcclusion(
   smoothScalar(concavity, indices, 2);
   for (let v = 0; v < n; v++) {
     const c = concavity[v]!;
-    let factor = c > 0 ? 1.02 - c * 0.55 : 1.02 + Math.min(0.12, -c * 0.14);
-    if (groove) factor *= 1 - 0.24 * groove[v]!;
-    ao[v] = Math.max(0.54, Math.min(1.06, factor));
+    let factor = c > 0 ? 1.01 - c * 0.32 : 1.01 + Math.min(0.09, -c * 0.12);
+    if (groove) factor *= 1 - 0.18 * groove[v]!;
+    ao[v] = Math.max(0.68, Math.min(1.05, factor));
   }
   return ao;
 }
