@@ -3,7 +3,14 @@ import { sdRoundCone, smax, smin } from '../sdf';
 import { lvCavitySdf } from '../lvShape';
 import { fastAtan2, latticeNoise3 } from '@/core/noise';
 import { insideMitralOutline, mitralHingeZ, mitralInflowSdf } from '../mitralValve';
-import { septalCrestFactor, septalShiftAt, wallThicknessAt } from '../lvWall';
+import {
+  lvTrabecularRelief,
+  papillaryFluting,
+  septalCrestFactor,
+  septalShare,
+  septalShiftAt,
+  wallThicknessAt,
+} from '../lvWall';
 import { lvSegmentCode, lvWallKind } from '../lvSegments';
 import { lvRegionalMotion, regionalCavityOffset } from '../lvGeometry';
 import { setSample, type ClassifyCtx } from './context';
@@ -49,19 +56,20 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
   // coordinates (speckle, trabeculae) stay with the tissue. With the global scale an akinetic wall, which stays where it
   // was, read material points up to 45 % further out at end-systole, and its speckle swept through it as if it moved.
   const rscWall = rsc + (1 - motion) * (1 - rsc);
-  // trabeculation: rough endocardium with longitudinal ridges (material coordinates, so it moves with the
-  // wall), growing from the mid cavity to the apex
+  // trabeculation: rough endocardium with multi-scale longitudinal/anastomosing ridges (material coordinates, so it
+  // moves with the wall), growing from the mid cavity to the apex and heavier on non-septal/apical walls
+  const mxW = x / rscWall,
+    myW = y / rscWall,
+    mzW = (z - lv.lengthCm) / lsc;
   const trab =
     levelFrac > 0.45
-      ? 0.2 *
-        Math.min(1, (levelFrac - 0.45) / 0.35) *
-        (latticeNoise3(
-          (x / rscWall) * 2.6 + 11.3,
-          (y / rscWall) * 2.6 + 2.9,
-          ((z - lv.lengthCm) / lsc) * 1.1 + 6.1,
-          m.wallNoise,
-        ) -
-          0.5)
+      ? lvTrabecularRelief(
+          az,
+          mzW,
+          levelFrac,
+          septalShare(az, A.rvAzA, A.rvAzP),
+          latticeNoise3(mxW * 2.6 + 11.3, myW * 2.6 + 2.9, mzW * 1.1 + 6.1, m.wallNoise) - 0.5,
+        )
       : 0;
   // Radial regional motion cannot displace the basal clipping plane into the atrium.
   // Apply deformation before intersecting the ventricular half-space (decision 291).
@@ -96,7 +104,7 @@ export function classifyLeftVentricle(c: ClassifyCtx): boolean {
     const P = hp.paps;
     const dPa = sdRoundCone(x, y, z, P[0]!, P[1]!, P[2]!, P[3]!, P[4]!, P[5]!, P[6]!, P[7]!);
     const dPm = sdRoundCone(x, y, z, P[8]!, P[9]!, P[10]!, P[11]!, P[12]!, P[13]!, P[14]!, P[15]!);
-    const dPap = Math.min(dPa, dPm);
+    const dPap = Math.min(dPa, dPm) + papillaryFluting(x / rsc, y / rsc, z / lsc);
     if (dPap < 0) {
       setSample(
         out,

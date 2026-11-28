@@ -450,6 +450,49 @@ float cordWeight(float axisDotPlane, float sliceHalfWidthCm) {
 float cordAlignment(float axisDotBeam) {
   return sqrt(max(0.0, 1.0 - axisDotBeam * axisDotBeam));
 }
+// src/simulator/anatomy/lvWall.ts: lvTrabecularRelief
+float lvTrabecularRelief(float az, float mz, float levelFrac, float septShare, float coarseCentered) {
+  if (levelFrac <= 0.45) {
+    return 0.0;
+  }
+  float w = min(1.0, (levelFrac - 0.45) / 0.32);
+  float freeWeight = 0.72 + 0.44 * (1.0 - clamp(septShare, 0.0, 1.0) * (1.0 - 0.5 * w));
+  float ridge1 = sin(5.0 * az + mz * 1.35) * cos(3.0 * az - mz * 1.05);
+  float ridge2 = sin(9.0 * az - mz * 1.9);
+  return w * freeWeight * (0.19 * coarseCentered + 0.062 * ridge1 + 0.026 * w * ridge2);
+}
+// src/simulator/anatomy/lvWall.ts: papillaryFluting
+float papillaryFluting(float mx, float my, float mz) {
+  return 0.045 * sin(mx * 9.2 + my * 7.4) * cos(mx * 6.9 - my * 9.8 + mz * 1.5);
+}
+// src/simulator/anatomy/rv.ts: rvTrabecularDepth
+float rvTrabecularDepth(float z, float lengthCm, float az) {
+  float L = max(1.0, lengthCm);
+  if (z <= 0.38 * L) {
+    return 0.0;
+  }
+  float w = min(1.0, (z - 0.38 * L) / (0.34 * L));
+  float ridge = sin(6.0 * az + z * 1.3) * cos(4.0 * az - z * 0.9);
+  float mesh = 0.5 + 0.5 * sin(10.0 * az - z * 1.7);
+  return w * (0.14 * max(0.0, ridge) + 0.09 * w * mesh);
+}
+// src/simulator/anatomy/mitralValve.ts: mitralHalfThickness
+float mitralHalfThickness(float thickness, float frac, float w) {
+  float f = clamp(frac, 0.0, 1.0);
+  float h = max(0.0, 1.0 - f / 0.16);
+  float u = clamp((f - 0.58) / 0.42, 0.0, 1.0);
+  float profile = 0.52 + 0.2 * h * h + 0.58 * u * u * (3.1 - 2.1 * u);
+  return (thickness * profile * 0.5 + 0.032) * (0.4 + 0.6 * w);
+}
+// src/simulator/anatomy/aorticValve.ts: cuspHalfThickness
+float cuspHalfThickness(float thickness, float frac, float w, float aq) {
+  float f = clamp(frac, 0.0, 1.0);
+  float a = abs(aq);
+  float uTip = clamp((f - 0.7) / 0.3, 0.0, 1.0);
+  float uCen = max(0.0, 1.0 - (a / 0.34) * (a / 0.34));
+  float arantius = 0.022 * uTip * uTip * (3.0 - 2.0 * uTip) * uCen * uCen;
+  return (thickness * (0.64 + 0.28 * f) * 0.5 + 0.011 + arantius) * (0.4 + 0.6 * w);
+}
 // src/simulator/renderer/acoustic/acoustics.ts: interfaceEcho
 float interfaceEcho(float absSdf, float nd, float dr) {
   float c = clamp(nd, 0.0, 1.0);

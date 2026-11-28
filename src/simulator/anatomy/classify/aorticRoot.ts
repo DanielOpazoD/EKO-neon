@@ -77,7 +77,8 @@ export function classifyAorticRoot(c: ClassifyCtx): boolean {
       return true;
     }
     if (z >= c.zHinge - LV_WALL_BASAL_OVERHANG_CM) {
-      setSample(out, Tissue.Fibrous, -0.15, 0, 0, 1, x, y, z, 0, Structure.LvWallSeptal);
+      const dShelf = Math.min(0.15, z - (c.zHinge - LV_WALL_BASAL_OVERHANG_CM));
+      setSample(out, Tissue.Fibrous, -dShelf, 0, 0, 1, x, y, z, 0, Structure.LvWallSeptal);
       return true;
     }
   }

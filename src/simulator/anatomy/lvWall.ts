@@ -120,3 +120,34 @@ export function septalCrestFactor(az: number, zRel: number): number {
   else if (d < 1) f = 0.64 + 0.72 * (d - 0.5);
   return 1 - cw * cw * (1 - f);
 }
+
+/**
+ * Multi-scale endocardial trabecular relief (cm, zero-mean, radially monotonic) for the mid-to-apical LV cavity
+ * (`levelFrac > 0.45`, keeping the basal/mid PLAX caliper zone `levelFrac <= 0.45` strictly smooth). Evaluates
+ * longitudinal/anastomosing muscular ridges in wall-tangent coordinates `(az, mz)` (`∂ridge/∂r ≡ 0` so no detached
+ * islands can form along radial rays), weighted stronger on the free and apical walls than on the mid-septum.
+ * Mirrored in GLSL (`glslGenerated.ts`).
+ */
+export function lvTrabecularRelief(
+  az: number,
+  mz: number,
+  levelFrac: number,
+  septShare: number,
+  coarseCentered: number,
+): number {
+  if (levelFrac <= 0.45) return 0;
+  const w = Math.min(1, (levelFrac - 0.45) / 0.32);
+  const freeWeight = 0.72 + 0.44 * (1 - Math.max(0, Math.min(1, septShare)) * (1 - 0.5 * w));
+  const ridge1 = Math.sin(5 * az + mz * 1.35) * Math.cos(3 * az - mz * 1.05);
+  const ridge2 = Math.sin(9 * az - mz * 1.9);
+  return w * freeWeight * (0.19 * coarseCentered + 0.062 * ridge1 + 0.026 * w * ridge2);
+}
+
+/**
+ * Longitudinal sulci / bifid-head fluting (cm) on LV and RV papillary muscles in material coordinates,
+ * breaking the circular cross-section of analytic cones into lobulated muscular heads. Mirrored in GLSL.
+ */
+export function papillaryFluting(mx: number, my: number, mz: number): number {
+  return 0.045 * Math.sin(mx * 9.2 + my * 7.4) * Math.cos(mx * 6.9 - my * 9.8 + mz * 1.5);
+}
+

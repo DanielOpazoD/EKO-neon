@@ -169,7 +169,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
   float rs = RADIAL_SCALE, ls = LONG_SCALE;
   // the wall's own radial scale, so that its speckle and trabeculae stay with the tissue (leftVentricle.ts)
   float rsWall = rs + (1.0 - motion) * (1.0 - rs);
-  float trab = levelFrac > 0.45 ? 0.2 * min(1.0, (levelFrac - 0.45) / 0.35) * (lat(vec3((x / rsWall) * 2.6 + 11.3, (y / rsWall) * 2.6 + 2.9, ((z - LV_LEN) / ls) * 1.1 + 6.1), 3) - 0.5) : 0.0;
+  vec3 mWall = vec3(x / rsWall, y / rsWall, (z - LV_LEN) / ls);
+  float trab = levelFrac > 0.45 ? lvTrabecularRelief(az, mWall.z, levelFrac, septalShare(az, RV_AZA, RV_AZP), lat(vec3(mWall.x * 2.6 + 11.3, mWall.y * 2.6 + 2.9, mWall.z * 1.1 + 6.1), 3) - 0.5) : 0.0;
   float dCavR = smax(dProf - regional + trab, zAnn - z, 0.6);
   float tFull = wallThicknessAt(az, levelFrac, motion);
   // decision 223
@@ -183,7 +184,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
   if (dLvBlood < 0.0) {
     float dPa = sdRoundCone(p, vec3(P(PAPS_BASE), P(PAPS_BASE + 1), P(PAPS_BASE + 2)), vec3(P(PAPS_BASE + 3), P(PAPS_BASE + 4), P(PAPS_BASE + 5)), P(PAPS_BASE + 6), P(PAPS_BASE + 7));
     float dPm = sdRoundCone(p, vec3(P(PAPS_BASE + 8), P(PAPS_BASE + 9), P(PAPS_BASE + 10)), vec3(P(PAPS_BASE + 11), P(PAPS_BASE + 12), P(PAPS_BASE + 13)), P(PAPS_BASE + 14), P(PAPS_BASE + 15));
-    float dPap = min(dPa, dPm);
+    float dPap = min(dPa, dPm) + papillaryFluting(x / rs, y / rs, z / ls);
     if (dPap < 0.0) {
       setSample(s, T_MYO, dPap, vec3(x, y, 0.0), vec3(x / rs, y / rs, z / ls), 0.0, S_PAP);
       return true;
@@ -205,7 +206,7 @@ bool classifyHeart(vec3 p0, out Sample s) {
     // only the smooth epicardium reflects coherently; the trabeculated endocardium scatters (decision 144)
     float dIn = nearEpi ? -(wallT - dEllR) : -wallT;
     float sg = nearEpi ? 1.0 : -1.0;
-    setSample(s, T_MYO, dIn, sg * n0, vec3(x / rsWall, y / rsWall, (z - LV_LEN) / ls), 0.0, structure);
+    setSample(s, T_MYO, dIn, sg * n0, mWall, 0.0, structure);
     s.transmural = clamp(dEllR / wallT, 0.0, 1.0);
     s.segment = int(segCode + 0.5);
     return true;
@@ -243,7 +244,8 @@ bool classifyHeart(vec3 p0, out Sample s) {
       return true;
     }
     if (z >= zHinge - LV_WALL_BASAL_OVERHANG_CM) {
-      setSample(s, T_FIBROUS, -0.15, vec3(0.0, 0.0, 1.0), p, 0.0, S_LV_SEPT);
+      float dShelf = min(0.15, z - (zHinge - LV_WALL_BASAL_OVERHANG_CM));
+      setSample(s, T_FIBROUS, -dShelf, vec3(0.0, 0.0, 1.0), p, 0.0, S_LV_SEPT);
       return true;
     }
   }
@@ -589,14 +591,21 @@ bool classifyHeart(vec3 p0, out Sample s) {
         vec3 b0 = vec3(-(rIn + 0.12), -0.2, L * 0.6);
         float rB = rOut - fw * 1.2;
         vec3 b1 = vec3(rB * cos(RV_PAP_AZ), rB * sin(RV_PAP_AZ), L * 0.68);
-        float dBand = sdCapsule(p, b0, b1, 0.28);
+        float dBand = sdRoundCone(p, b0, b1, 0.34, 0.28);
         if (dBand < 0.0) {
           setSample(s, T_MYO, dBand, vec3(0.0, 0.0, 1.0), p, 0.0, S_MOD_BAND);
           return true;
         }
-        float dRp = sdRoundCone(p, vec3(P(RVPAP_BASE), P(RVPAP_BASE + 1), P(RVPAP_BASE + 2)), vec3(P(RVPAP_BASE + 3), P(RVPAP_BASE + 4), P(RVPAP_BASE + 5)), P(RVPAP_BASE + 6), P(RVPAP_BASE + 7));
+        float dRp = sdRoundCone(p, vec3(P(RVPAP_BASE), P(RVPAP_BASE + 1), P(RVPAP_BASE + 2)), vec3(P(RVPAP_BASE + 3), P(RVPAP_BASE + 4), P(RVPAP_BASE + 5)), P(RVPAP_BASE + 6), P(RVPAP_BASE + 7)) + 0.7 * papillaryFluting(x / sc3, y / sc3, z);
         if (dRp < 0.0) {
           setSample(s, T_MYO, dRp, vec3(x, y, 0.0), p, 0.0, S_RV_PAP);
+          return true;
+        }
+        float rrRaw = length(p.xy);
+        float trabDepth = rvTrabecularDepth(z, L, az);
+        if (trabDepth > 0.0 && rrRaw > rIn + 0.12 && dRv + trabDepth > 0.0) {
+          float rrT = rrRaw == 0.0 ? 1.0 : rrRaw;
+          setSample(s, T_MYO, -fw, vec3(x / rrT, y / rrT, 0.0), vec3(x / sc3, y / sc3, z), 0.0, S_RV_WALL);
           return true;
         }
       }

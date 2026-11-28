@@ -141,7 +141,10 @@ float mvAnnulusDistance(vec3 p, float tube) {
   }
   float dPlane = length(vec2(u - qu, v - qv));
   float dzz = p.z - (MVL_CZ + mvHingeHeight(qu, qv));
-  return sqrt(dPlane * dPlane + dzz * dzz) - tube;
+  float duT = abs(qu) - uc;
+  float dvT = qv - MVL_D;
+  float trig = max(0.0, 1.0 - (duT * duT + dvT * dvT) / 0.25);
+  return sqrt(dPlane * dPlane + dzz * dzz) - (tube + 0.048 * trig * trig);
 }
 // share of the SAM a fibre takes at fan fraction q: the chordae hold the commissures (samShare, mitralValve.ts)
 // src/simulator/anatomy/mitralValve.ts: samShare
@@ -211,7 +214,7 @@ float mitralDistance(vec3 p, out float dOut, out float fracOut, out int leafletO
   fracOut = bestFrac;
   leafletOut = bestLeaflet;
   nOut = bestN;
-  return (MVL_T * (0.6 + 0.4 * bestFrac) * 0.5 + 0.035) * (0.4 + 0.6 * bestW);
+  return mitralHalfThickness(MVL_T, bestFrac, bestW);
 }
 
 // ---- aortic root profile and cusps (aorticValve.ts) ----
@@ -298,7 +301,7 @@ float aorticCuspDistance(float t, float rr, float phi, out float dOut, out float
   nOut = bestN;
   float tw = (aq - 0.85) / 0.15;
   float w = aq < 0.85 ? 1.0 : 1.0 - tw * tw * (3.0 - 2.0 * tw);
-  return (CUSP_T * (0.7 + 0.3 * bestFrac) * 0.5 + 0.012) * (0.4 + 0.6 * w);
+  return cuspHalfThickness(CUSP_T, bestFrac, w, aq);
 }
 
 // distance to a 2-segment cusp chain with tapered width
