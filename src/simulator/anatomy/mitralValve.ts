@@ -497,6 +497,19 @@ function leafletDistance(
 }
 
 /**
+ * Half thickness (cm) of a mitral leaflet at profile fraction `frac` (0 hinge → 1 free edge) and fan edge weight `w`:
+ * subtle basal annular wedge (`frac < 0.16`), delicate mid-leaflet clear zone, and thickened distal rough/coaptation
+ * zone (`frac > 0.58`) where primary/marginal chordae insert. Mirrored in GLSL (`glslGenerated.ts`).
+ */
+export function mitralHalfThickness(thickness: number, frac: number, w: number): number {
+  const f = Math.max(0, Math.min(1, frac));
+  const h = Math.max(0, 1 - f / 0.16);
+  const u = Math.max(0, Math.min(1, (f - 0.58) / 0.42));
+  const profile = 0.52 + 0.2 * h * h + 0.58 * u * u * (3.1 - 2.1 * u);
+  return (thickness * profile * 0.5 + 0.032) * (0.4 + 0.6 * w);
+}
+
+/**
  * Distance from a heart-frame point to the mitral leaflets. Writes `mitralHit`; returns the local half thickness,
  * so the point is inside a leaflet when mitralHit.d < the returned value.
  */
@@ -511,8 +524,7 @@ export function mitralDistance(x: number, y: number, z: number, mv: MitralValve)
   let best = leafletDistance(v, u, zr0, mv, mv.anterior, 0, mv.open, mv.samBlend, Infinity);
   best = leafletDistance(v, u, zr0, mv, mv.posterior, 1, mv.open, 0, best);
   if (!(best < Infinity)) return 0;
-  // leaflets are thickest at the free edge (rough zone) and thin out toward the commissures
-  return (mv.thickness * (0.6 + 0.4 * mitralHit.frac) * 0.5 + 0.035) * (0.4 + 0.6 * mitralHit.w);
+  return mitralHalfThickness(mv.thickness, mitralHit.frac, mitralHit.w);
 }
 
 /**
@@ -625,7 +637,11 @@ export function mitralAnnulusDistance(
   }
   const dPlane = Math.hypot(u - qu, v - qv);
   const dzz = z - (mv.cz + hingeHeight(R, D, mv.saddle, mv.lift, qu, qv));
-  return Math.sqrt(dPlane * dPlane + dzz * dzz) - tube;
+  // anterolateral & posteromedial fibrous trigones at (±uc, D) thicken the collagenous ring
+  const duT = Math.abs(qu) - uc;
+  const dvT = qv - D;
+  const trig = Math.max(0, 1 - (duT * duT + dvT * dvT) / 0.25);
+  return Math.sqrt(dPlane * dPlane + dzz * dzz) - (tube + 0.048 * trig * trig);
 }
 
 /**

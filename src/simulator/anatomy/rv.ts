@@ -284,3 +284,21 @@ export function rvCrescent(
   res[1] = rIn;
   res[2] = rOut;
 }
+
+/**
+ * Coarse endocardial trabecular meshwork protrusion (cm ≥ 0) inside the mid-to-apical RV cavity (`dRv < 0`).
+ * Evaluated strictly inside the RV lumen so the outer epicardial shell (`dCavRv` for free wall, pericardium,
+ * and 3D meshing) stays unchanged while A4C, RV-focused, PSAX and subcostal views show the morphological RV's
+ * coarse trabecular ridges and spongy apex. Mirrored in GLSL (`glslGenerated.ts`).
+ */
+export function rvTrabecularDepth(z: number, lengthCm: number, az: number): number {
+  const L = Math.max(1, lengthCm);
+  const w = Math.max(0, Math.min(1, (z - 0.38 * L) / (0.34 * L)));
+  const a = az * 0.15915494309189535;
+  const u1 = Math.abs(6 * a + z * 0.21 - 0.25 - Math.floor(6 * a + z * 0.21 + 0.25)) * 2;
+  const u2 = Math.abs(9 * a - z * 0.25 - Math.floor(9 * a - z * 0.25 + 0.5)) * 2;
+  const c1 = 1 - 2 * u1 * u1 * (3 - 2 * u1);
+  const m2 = 1 - u2 * u2 * (3 - 2 * u2);
+  return w * (0.14 * Math.max(0, c1) + 0.09 * w * m2);
+}
+

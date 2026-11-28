@@ -271,8 +271,9 @@ export function aorticCuspDistance(
     ax = bx;
     az = bz;
   }
-  aorticHit.w = cuspEdgeWeight(Math.abs(q));
-  return cuspHalfThickness(av.thickness, aorticHit.frac, aorticHit.w);
+  const aq = Math.abs(q);
+  aorticHit.w = cuspEdgeWeight(aq);
+  return cuspHalfThickness(av.thickness, aorticHit.frac, aorticHit.w, aq);
 }
 
 /** Weight of a cusp's thickness at |q| of its sector: 1 over its body, fading to 0 at the commissures. */
@@ -281,9 +282,23 @@ function cuspEdgeWeight(aq: number): number {
   return aq < 0.85 ? 1 : 1 - tw * tw * (3 - 2 * tw);
 }
 
-/** Half thickness (cm) of a cusp at fraction `frac` of its profile (0 attachment → 1 free edge, the nodule) and edge weight `w`. */
-function cuspHalfThickness(thickness: number, frac: number, w: number): number {
-  return (thickness * (0.7 + 0.3 * frac) * 0.5 + 0.012) * (0.4 + 0.6 * w);
+/**
+ * Half thickness (cm) of an aortic cusp at profile fraction `frac` (0 attachment → 1 free edge), edge weight `w`,
+ * and normalized sector offset `aq = |q|` (0 cusp centre → 1 commissure). Includes the focal nodule of Arantius
+ * (*corpus Arantii*) at the central free margin (`frac → 1`, `aq → 0`). Mirrored in GLSL (`glslGenerated.ts`).
+ */
+export function cuspHalfThickness(
+  thickness: number,
+  frac: number,
+  w: number,
+  aq: number,
+): number {
+  const f = Math.max(0, Math.min(1, frac));
+  const a = Math.abs(aq);
+  const uTip = Math.max(0, Math.min(1, (f - 0.7) / 0.3));
+  const uCen = Math.max(0, 1 - (a / 0.34) * (a / 0.34));
+  const arantius = 0.022 * uTip * uTip * (3 - 2 * uTip) * uCen * uCen;
+  return (thickness * (0.64 + 0.28 * f) * 0.5 + 0.011 + arantius) * (0.4 + 0.6 * w);
 }
 
 /** Azimuths per half sector in the orifice integral: within 0.01 % of the converged area above 0.05 cm² on the 12 cases' roots. */
@@ -301,7 +316,8 @@ export function aorticOrificeAreaCm2(av: AorticValve, root: RootProfile): number
   let sum = 0;
   for (let i = 0; i < ORIFICE_SAMPLES; i++) {
     const q = (i + 0.5) / ORIFICE_SAMPLES;
-    const r = aorticCuspTip(av, root, q).r - cuspHalfThickness(av.thickness, 1, cuspEdgeWeight(q));
+    const r =
+      aorticCuspTip(av, root, q).r - cuspHalfThickness(av.thickness, 1, cuspEdgeWeight(q), q);
     if (r > 0) sum += r * r;
   }
   return (Math.PI * sum) / ORIFICE_SAMPLES;

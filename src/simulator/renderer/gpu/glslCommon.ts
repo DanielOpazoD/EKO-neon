@@ -175,8 +175,8 @@ export function enumDefinesGlsl(): string {
     .join('\n');
 }
 
-/** Shared GLSL: parameter access, lattice noise, signed-distance primitives. */
-export const GLSL_COMMON = /* glsl */ `
+/** Lightweight preamble for passes (L, C, D) that only read packed parameters/defines without SDFs or anatomy mirrors. */
+export const GLSL_PREAMBLE = /* glsl */ `
 precision highp float;
 precision highp int;
 precision highp sampler3D;
@@ -188,6 +188,10 @@ ${paramDefinesGlsl()}
 ${enumDefinesGlsl()}
 ${acousticDefinesGlsl(ENVELOPE_NORM)}
 ${psfDefinesGlsl()}
+`;
+
+/** Shared GLSL: parameter access, lattice noise, signed-distance primitives. */
+export const GLSL_COMMON = /* glsl */ `${GLSL_PREAMBLE}
 const float PI = 3.14159265358979;
 const float TWO_PI = 6.28318530717959;
 // descending aorta (thoraxModel.ts, decision 213): read by the generated mediastinumDistance and by the thorax block
@@ -303,8 +307,7 @@ float sdEllipsoid(vec3 p, vec3 c, vec3 r) {
   vec3 d = (p - c) / r;
   float k0 = length(d);
   float k1 = length(d / r);
-  if (k1 < 1e-9) return -min(r.x, min(r.y, r.z));
-  return k0 * (k0 - 1.0) / k1;
+  return k1 < 1e-9 ? -min(r.x, min(r.y, r.z)) : k0 * (k0 - 1.0) / k1;
 }
 // src/simulator/anatomy/sdf.ts: sdCapsule
 float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
@@ -328,9 +331,9 @@ float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
   float y2 = y * y * l2;
   float z2 = z * z * l2;
   float k = sign(rr) * rr * rr * x2;
-  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
-  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
-  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+  return sign(z) * a2 * z2 > k
+    ? sqrt(x2 + z2) * il2 - r2
+    : (sign(y) * a2 * y2 < k ? sqrt(x2 + y2) * il2 - r1 : (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1);
 }
 // src/simulator/anatomy/sdf.ts: sdTorusZ
 float sdTorusZ(vec3 p, vec3 c, float R, float r) {

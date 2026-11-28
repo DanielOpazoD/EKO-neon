@@ -450,6 +450,55 @@ float cordWeight(float axisDotPlane, float sliceHalfWidthCm) {
 float cordAlignment(float axisDotBeam) {
   return sqrt(max(0.0, 1.0 - axisDotBeam * axisDotBeam));
 }
+// src/simulator/anatomy/lvWall.ts: lvTrabecularRelief
+float lvTrabecularRelief(float az, float mz, float levelFrac, float coarseCentered) {
+  float w = clamp((levelFrac - 0.45) / 0.32, 0.0, 1.0);
+  float freeShare = 1.0 - min(1.0, abs(az) * 0.3183098861837907);
+  float freeWeight = 0.74 + 0.42 * (freeShare + 0.45 * w * (1.0 - freeShare));
+  float a = az * 0.15915494309189535;
+  float t1 = 6.0 * a + mz * 0.21 - 0.25;
+  float u1 = abs(t1 - floor(t1 + 0.5)) * 2.0;
+  float t2 = 10.0 * a - mz * 0.26;
+  float u2 = abs(t2 - floor(t2 + 0.5)) * 2.0;
+  float ridge = 0.062 * (1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1)) + 0.028 * w * (1.0 - 2.0 * u2 * u2 * (3.0 - 2.0 * u2));
+  return w * freeWeight * (0.19 * coarseCentered + ridge);
+}
+// src/simulator/anatomy/lvWall.ts: papillaryFluting
+float papillaryFluting(float mx, float my, float mz) {
+  float t1 = mx * 1.46 + my * 1.18 - 0.25;
+  float u1 = abs(t1 - floor(t1 + 0.5)) * 2.0;
+  float t2 = mx * 1.1 - my * 1.56 + mz * 0.24;
+  float u2 = abs(t2 - floor(t2 + 0.5)) * 2.0;
+  return 0.045 * (1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1)) * (1.0 - 2.0 * u2 * u2 * (3.0 - 2.0 * u2));
+}
+// src/simulator/anatomy/rv.ts: rvTrabecularDepth
+float rvTrabecularDepth(float z, float lengthCm, float az) {
+  float L = max(1.0, lengthCm);
+  float w = clamp((z - 0.38 * L) / (0.34 * L), 0.0, 1.0);
+  float a = az * 0.15915494309189535;
+  float u1 = abs(6.0 * a + z * 0.21 - 0.25 - floor(6.0 * a + z * 0.21 + 0.25)) * 2.0;
+  float u2 = abs(9.0 * a - z * 0.25 - floor(9.0 * a - z * 0.25 + 0.5)) * 2.0;
+  float c1 = 1.0 - 2.0 * u1 * u1 * (3.0 - 2.0 * u1);
+  float m2 = 1.0 - u2 * u2 * (3.0 - 2.0 * u2);
+  return w * (0.14 * max(0.0, c1) + 0.09 * w * m2);
+}
+// src/simulator/anatomy/mitralValve.ts: mitralHalfThickness
+float mitralHalfThickness(float thickness, float frac, float w) {
+  float f = clamp(frac, 0.0, 1.0);
+  float h = max(0.0, 1.0 - f / 0.16);
+  float u = clamp((f - 0.58) / 0.42, 0.0, 1.0);
+  float profile = 0.52 + 0.2 * h * h + 0.58 * u * u * (3.1 - 2.1 * u);
+  return (thickness * profile * 0.5 + 0.032) * (0.4 + 0.6 * w);
+}
+// src/simulator/anatomy/aorticValve.ts: cuspHalfThickness
+float cuspHalfThickness(float thickness, float frac, float w, float aq) {
+  float f = clamp(frac, 0.0, 1.0);
+  float a = abs(aq);
+  float uTip = clamp((f - 0.7) / 0.3, 0.0, 1.0);
+  float uCen = max(0.0, 1.0 - (a / 0.34) * (a / 0.34));
+  float arantius = 0.022 * uTip * uTip * (3.0 - 2.0 * uTip) * uCen * uCen;
+  return (thickness * (0.64 + 0.28 * f) * 0.5 + 0.011 + arantius) * (0.4 + 0.6 * w);
+}
 // src/simulator/renderer/acoustic/acoustics.ts: interfaceEcho
 float interfaceEcho(float absSdf, float nd, float dr) {
   float c = clamp(nd, 0.0, 1.0);

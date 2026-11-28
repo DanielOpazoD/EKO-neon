@@ -7,7 +7,17 @@ import { cycleStateAt } from '@/simulator/cardiac-cycle/cycleModel';
 import { makeSample, Structure } from './tissue';
 import { measureModel } from './measureModel';
 import { getMeasurementSpec } from '@/simulator/measurements/protocol';
-import { meanWallThicknessCm, septalShare, wallThicknessAt, WALL_MODULATION_GAIN } from './lvWall';
+import {
+  lvTrabecularRelief,
+  meanWallThicknessCm,
+  papillaryFluting,
+  septalShare,
+  wallThicknessAt,
+  WALL_MODULATION_GAIN,
+} from './lvWall';
+import { rvTrabecularDepth } from './rv';
+import { mitralAnnulusDistance, mitralHalfThickness } from './mitralValve';
+import { cuspHalfThickness } from './aorticValve';
 import { RV_GROOVE_ANTERIOR_RAD, RV_GROOVE_INFERIOR_RAD } from './lvSegments';
 import { GLSL_GENERATED } from '@/simulator/renderer/gpu/glslGenerated';
 import { GLSL_HEART_CHAMBERS } from '@/simulator/renderer/gpu/glslHeartChambers';
@@ -181,4 +191,46 @@ test('GLSL mirror: septalShare evaluates as the TypeScript one and wallThickness
   assert.ok(body.includes('septalShare(az, RV_AZA, RV_AZP)'), 'GLSL septum not bounded by the RV insertions');
   assert.ok(!/0\.5 - 0\.5 \* cos\(az\)/.test(body), 'GLSL keeps the A4C-centred share');
   assert.ok(body.includes(`1.0 + ${WALL_MODULATION_GAIN.toFixed(8)} * (lat(`), 'GLSL modulation gain differs');
+});
+
+test('Phase B micro-anatomy: basal caliper protection, LV/RV trabeculae, rough-zone mitral, Arantius nodule & fibrous trigones', () => {
+  // 1) LV trabeculae remain strictly 0 across the entire basal/mid PLAX caliper zone (levelFrac <= 0.45)
+  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.25, 0.3), 0);
+  assert.equal(lvTrabecularRelief(0.8, -4.0, 0.45, 0.3), 0);
+  // In mid-apical zone, free/lateral wall relief exceeds mid-septal relief at the same ridge phase (Δaz = π)
+  const freeApical = Math.abs(lvTrabecularRelief(0.4, -1.2, 0.78, 0.25));
+  const septApical = Math.abs(lvTrabecularRelief(0.4 - Math.PI, -1.2, 0.78, 0.25));
+  assert.ok(freeApical > septApical && freeApical > 0.02);
+
+  // 2) Papillary longitudinal fluting is bounded (<= 0.5 mm) and zero-mean across symmetries
+  assert.ok(Math.abs(papillaryFluting(0.8, -1.1, 3.2)) <= 0.045 + 1e-9);
+
+  // 3) RV coarse trabecular depth is 0 in basal inflow/outflow and positive on apical ridges
+  assert.equal(rvTrabecularDepth(2.0, 8.0, 0.5), 0);
+  const maxRvTrab = Math.max(...[0, 0.15, 0.3, 0.45, 0.6].map((a) => rvTrabecularDepth(6.4, 8.0, a)));
+  assert.ok(maxRvTrab > 0.1, `expected apical RV trabecular ridge > 0.1 cm, got ${maxRvTrab}`);
+
+  // 4) Mitral leaflet rough/coaptation zone (frac ~ 0.9) is > 1.5x thicker than mid-belly clear zone (frac = 0.35)
+  const clearHalf = mitralHalfThickness(0.14, 0.35, 1);
+  const roughHalf = mitralHalfThickness(0.14, 0.92, 1);
+  assert.ok(roughHalf > clearHalf * 1.5, `expected roughHalf ${roughHalf} > 1.5 * clearHalf ${clearHalf}`);
+
+  // 5) Aortic cusp nodule of Arantius thickens central free edge (aq = 0, frac = 1) vs lateral free edge (aq = 0.5, frac = 1)
+  const arantiusHalf = cuspHalfThickness(0.1, 1.0, 1, 0);
+  const lunulaHalf = cuspHalfThickness(0.1, 1.0, 1, 0.5);
+  assert.ok(arantiusHalf > lunulaHalf + 0.018, `expected Arantius nodule > lunula (${arantiusHalf} vs ${lunulaHalf})`);
+
+  // 6) Mitral annulus swells focally at the anterolateral & posteromedial fibrous trigones (±uc, D)
+  const { ed } = modelsOf('normal-excellent-window');
+  const mv = ed.valves.mitral;
+  const uc = Math.sqrt(mv.R * mv.R - mv.D * mv.D);
+  const trigX = mv.cx + mv.ux * mv.D - mv.uy * uc;
+  const trigY = mv.cy + mv.uy * mv.D + mv.ux * uc;
+  const trigZ = mv.cz + mv.saddle * ((uc * uc) / (uc * uc + mv.D * mv.D)) + mv.lift;
+  const postX = mv.cx - mv.ux * mv.R;
+  const postY = mv.cy - mv.uy * mv.R;
+  const postZ = mv.cz;
+  const dTrig = mitralAnnulusDistance(trigX, trigY, trigZ, mv, 0.11);
+  const dPost = mitralAnnulusDistance(postX, postY, postZ, mv, 0.11);
+  assert.ok(dTrig < dPost - 0.03, `expected thicker fibrous trigone (${dTrig} vs posterior ${dPost})`);
 });

@@ -35,7 +35,7 @@ import {
   webglRendererName,
   type Locations,
 } from './glHelpers';
-import { GLSL_COMMON } from './glslCommon';
+import { GLSL_COMMON, GLSL_PREAMBLE } from './glslCommon';
 import { GLSL_HEART } from './glslHeart';
 import {
   GLSL_CONSOLE_FRAG,
@@ -173,6 +173,7 @@ export class Webgl2Renderer implements RendererBackend {
     const ext = gl.getExtension('EXT_color_buffer_float');
     if (!ext) throw new Error('EXT_color_buffer_float unavailable');
     const common = `#version 300 es\n${GLSL_COMMON}`;
+    const preamble = `#version 300 es\n${GLSL_PREAMBLE}`;
     this.common = common;
     this.progA = buildProgram(
       gl,
@@ -185,10 +186,10 @@ export class Webgl2Renderer implements RendererBackend {
       `${common}${GLSL_HEART}${GLSL_THORAX}${GLSL_PASS_A_SIDE_MAIN}`,
     );
     this.progB = buildProgram(gl, GLSL_VERT, `${common}${GLSL_PASS_B_MAIN}`);
-    this.progL = buildProgram(gl, GLSL_VERT, `${common}${GLSL_PASS_L_MAIN}`);
+    this.progL = buildProgram(gl, GLSL_VERT, `${preamble}${GLSL_PASS_L_MAIN}`);
     this.progP = buildProgram(gl, GLSL_VERT, `${common}${GLSL_PASS_P_MAIN}`);
-    this.progC = buildProgram(gl, GLSL_VERT, `${common}${GLSL_PASS_C_MAIN}`);
-    this.progD = buildProgram(gl, GLSL_VERT, `${common}${GLSL_PASS_D_MAIN}`);
+    this.progC = buildProgram(gl, GLSL_VERT, `${preamble}${GLSL_PASS_C_MAIN}`);
+    this.progD = buildProgram(gl, GLSL_VERT, `${preamble}${GLSL_PASS_D_MAIN}`);
     this.progLog = buildProgram(gl, GLSL_VERT, GLSL_LOG_FRAG);
     this.progConsole = buildProgram(gl, GLSL_VERT, GLSL_CONSOLE_FRAG);
     this.progPresent = buildProgram(gl, GLSL_VERT, GLSL_PRESENT_FRAG);
@@ -363,6 +364,14 @@ export class Webgl2Renderer implements RendererBackend {
   /** Reset GPU-resident deferred Doppler circular phasor history (e.g. modality change). */
   resetDopplerHistory(): void {
     this.doppler.resetHistory();
+  }
+
+  /** Reset transient history/present state so a shared QA renderer starts each parity check cleanly. */
+  resetSessionState(): void {
+    this.histValid = false;
+    this.packedFresh = false;
+    this.gbufferReady = false;
+    this.doppler.onGBufferResize();
   }
 
   /**

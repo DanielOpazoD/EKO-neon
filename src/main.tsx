@@ -25,17 +25,34 @@ import { dopplerPerfMonitor } from '@/simulator/doppler/dopplerPerf';
 // WebGL2 port and its shaders onto the main thread, which the app never needs: it loads on first call (page.evaluate
 // awaits the promise), keeping them out of the entry chunk.
 if (import.meta.env.DEV || import.meta.env.VITE_TEST_HOOKS === '1') {
+  // Yield one macrotask between back-to-back debug comparisons so Chromium's GPU process drains
+  // `WEBGL_lose_context` IPC from the previous disposable Webgl2Renderer before allocating the next.
+  const yieldGpu = () => new Promise<void>((r) => setTimeout(r, 0));
   (window as unknown as { __echotwin?: unknown }).__echotwin = {
     useSimStore,
     useHudStore,
-    compareBackends: (...args: Parameters<typeof compareBackends>) =>
-      import('@/app/debugCompare').then((m) => m.compareBackends(...args)),
-    compareExperimentalBackends: (...args: Parameters<typeof compareExperimentalBackends>) =>
-      import('@/app/debugCompare').then((m) => m.compareExperimentalBackends(...args)),
-    compareImageChain: (...args: Parameters<typeof compareImageChain>) =>
-      import('@/app/debugCompare').then((m) => m.compareImageChain(...args)),
-    compareDeferredDoppler: (...args: Parameters<typeof compareDeferredDoppler>) =>
-      import('@/app/debugCompare').then((m) => m.compareDeferredDoppler(...args)),
+    compareBackends: async (...args: Parameters<typeof compareBackends>) => {
+      await yieldGpu();
+      const m = await import('@/app/debugCompare');
+      return m.compareBackends(...args);
+    },
+    compareExperimentalBackends: async (
+      ...args: Parameters<typeof compareExperimentalBackends>
+    ) => {
+      await yieldGpu();
+      const m = await import('@/app/debugCompare');
+      return m.compareExperimentalBackends(...args);
+    },
+    compareImageChain: async (...args: Parameters<typeof compareImageChain>) => {
+      await yieldGpu();
+      const m = await import('@/app/debugCompare');
+      return m.compareImageChain(...args);
+    },
+    compareDeferredDoppler: async (...args: Parameters<typeof compareDeferredDoppler>) => {
+      await yieldGpu();
+      const m = await import('@/app/debugCompare');
+      return m.compareDeferredDoppler(...args);
+    },
     dopplerPerf: dopplerPerfMonitor,
     frameBus,
   };

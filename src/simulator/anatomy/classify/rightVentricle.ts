@@ -1,7 +1,7 @@
 import { Structure, Tissue } from '../tissue';
 import { sdCapsule, sdRoundCone, smin } from '../sdf';
 import { skirtOffsetAt } from '../valveSkirt';
-import { rvCrescent, rvInflowSdf } from '../rv';
+import { rvCrescent, rvInflowSdf, rvTrabecularDepth } from '../rv';
 import { setSample, type ClassifyCtx } from './context';
 import { LV_WALL_BASAL_OVERHANG_CM } from '../heartFrame';
 import { PA_WALL_CM, pulmonaryTrunkDistance } from '../greatVessels';
@@ -112,8 +112,11 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
   // outflow tract, which descends with the base, stood out of the sac in end-systole
   rvTmp[0] = dCavRv;
   if (dCavRv < 0) {
+    const sc3 = 1 - 0.3 * s;
+    let rvTrab = false;
     if (dRv < 0) {
-      // moderator band: from the lower septum to the anterior free wall at the base of the anterior papillary muscle
+      // moderator band: tapering muscular trabecula from the lower septomarginal band (0.34 cm) to the base of
+      // the anterior papillary muscle (0.28 cm)
       const L = m.lv.lengthCm;
       const rIn = rvTmp[1]!;
       const rOut = rvTmp[2]!;
@@ -124,7 +127,7 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
       const bx1 = rB * Math.cos(A.rvPapAz),
         by1 = rB * Math.sin(A.rvPapAz),
         bz1 = L * 0.68;
-      const dBand = sdCapsule(x, y, z, bx0, by0, bz0, bx1, by1, bz1, 0.28);
+      const dBand = sdCapsule(x, y, z, bx0, by0, bz0, bx1, by1, bz1, 0.31);
       if (dBand < 0) {
         setSample(out, Tissue.Myocardium, dBand, 0, 0, 1, x, y, z, 0, Structure.ModeratorBand);
         return true;
@@ -135,6 +138,9 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
         setSample(out, Tissue.Myocardium, dRp, x, y, 0, x, y, z, 0, Structure.RvPapillary);
         return true;
       }
+      // coarse RV endocardial trabecular meshwork along the free wall and RV apex (clear of septal gap)
+      const trabDepth = rvTrabecularDepth(z, L, az);
+      rvTrab = trabDepth > 0 && Math.hypot(x, y) > rIn + 0.12 && dRv + trabDepth > 0;
     }
     const rr = Math.hypot(x, y) || 1;
     // the supraventricular crest (decision 334): above the annulus the inflow column is atrium, and between it and the
@@ -161,21 +167,23 @@ export function classifyRightVentricle(c: ClassifyCtx): boolean {
     }
     setSample(
       out,
-      Tissue.Blood,
-      dCavRv,
+      rvTrab ? Tissue.Myocardium : Tissue.Blood,
+      rvTrab ? -fw : dCavRv,
       x / rr,
       y / rr,
       0,
-      x / (1 - 0.3 * s),
-      y / (1 - 0.3 * s),
+      x / sc3,
+      y / sc3,
       z,
       0,
-      dRvot < dRvU
-        ? Structure.Rvot
-        : // the inflow column above the annulus is atrium (the annulus level itself since decisions 133 and 138)
-          dRv >= 0 && z <= zAnnulus
-          ? Structure.RaCavity
-          : Structure.RvCavity,
+      rvTrab
+        ? Structure.RvWall
+        : dRvot < dRvU
+          ? Structure.Rvot
+          : // the inflow column above the annulus is atrium (the annulus level itself since decisions 133 and 138)
+            dRv >= 0 && z <= zAnnulus
+            ? Structure.RaCavity
+            : Structure.RvCavity,
     );
     return true;
   }
