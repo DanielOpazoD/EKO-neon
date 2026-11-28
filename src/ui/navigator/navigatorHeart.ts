@@ -7,12 +7,11 @@ import { SEGMENT_RGB, segmentIdOf, type SegmentModelChoice } from '../segmentMap
 
 /**
  * The heart surfaces of the 3D navigator: meshes extracted from the same implicit model the beam samples,
- * one geometry per cardiac phase, shaded with per-vertex concavity/sulcus ambient occlusion, subtle
- * helical myocardial tissue variation, subepicardial groove fat warmth, and physiological artery/vein
- * PBR finishes. Clipped cleanly by the imaging plane with stencil caps when `layers.cut` is enabled.
+ * one geometry per cardiac phase, rendered as solid organic tissue using an unparametrized 3D procedural
+ * per-pixel muscle-fiber normal & roughness shader (Mikkelsen screen-space bump perturbation — zero UV
+ * seams, zero plastic clearcoat/sheen film, zero semi-transparent double-wall ghosts).
  */
 
-/** The navigator layers and segment state one frame of the heart depends on. */
 export interface HeartFrameState {
   beam: BeamFrame;
   layers: {
@@ -47,50 +46,23 @@ export interface HeartMeshes {
   update: (s: HeartFrameState) => void;
 }
 
-const LV_BASE = new THREE.Color(0x9b282f);
-const EPICARDIAL_FAT = new THREE.Color(0xdcb878);
+const LV_BASE = new THREE.Color(0x8b2329);
 const FADED = new THREE.Color().setRGB(58 / 255, 63 / 255, 74 / 255, THREE.SRGBColorSpace);
 const HOVER_LIFT = new THREE.Color(1, 1, 1);
 
 /**
- * Computes sculptural per-vertex linear RGB colors from the group's base tissue color,
- * concavity + sulcus ambient occlusion, subtle helical myocardial fiber variation, and
- * narrow subepicardial adipose tinting inside the interventricular and AV grooves.
+ * Computes natural per-vertex linear RGB colors modulated purely by geometric & sulcus ambient
+ * occlusion (no washed-out cream blotches; fine organic tissue fibers are computed per pixel in GLSL).
  */
 function buildNaturalVertexColors(g: MeshGroup): Float32Array {
   const n = g.positions.length / 3;
   const out = new Float32Array(n * 3);
   const base = new THREE.Color(g.color);
   const tmp = new THREE.Color();
-  const isMyo = g.id === 'lv-myocardium' || g.id === 'rv-myocardium';
-  const isAtria = g.id === 'left-atrium' || g.id === 'right-atrium';
   const aoArr = g.ao;
-  const grooveArr = g.groove;
-  const pos = g.positions;
-
   for (let v = 0; v < n; v++) {
     const ao = aoArr ? aoArr[v]! : 1;
-    tmp.copy(base);
-    if (isMyo || isAtria) {
-      const px = pos[v * 3]!;
-      const py = pos[v * 3 + 1]!;
-      const pz = pos[v * 3 + 2]!;
-      // Continuous 3D helical fiber modulation (seam-free in heart-frame space)
-      const az = Math.atan2(py, px);
-      const helix = Math.sin(az * 6 + pz * 1.45) * 0.5 + Math.cos(az * 11 - pz * 2.1) * 0.5;
-      const macro = Math.sin(px * 0.9 + py * 0.7 - pz * 0.5);
-      const fiberLift = 1 + (isMyo ? 0.065 : 0.04) * helix + 0.035 * macro;
-      tmp.multiplyScalar(fiberLift);
-      // Narrow warm subepicardial adipose highlight tightly confined to deep sulcus crevices
-      if (isMyo && grooveArr) {
-        const gr = grooveArr[v]!;
-        if (gr > 0.34) {
-          const fatMix = Math.min(0.2, (gr - 0.34) * 0.3);
-          tmp.lerp(EPICARDIAL_FAT, fatMix);
-        }
-      }
-    }
-    tmp.multiplyScalar(ao);
+    tmp.copy(base).multiplyScalar(ao);
     out[v * 3] = tmp.r;
     out[v * 3 + 1] = tmp.g;
     out[v * 3 + 2] = tmp.b;
@@ -98,8 +70,116 @@ function buildNaturalVertexColors(g: MeshGroup): Float32Array {
   return out;
 }
 
-/** Tailored PBR material per anatomical tissue family (leverages scene RoomEnvironment IBL). */
-function createGroupMaterial(g: MeshGroup): THREE.MeshPhysicalMaterial {
+const ORGANIC_NOISE_GLSL = /* glsl */ `
+varying vec3 vTissuePos;
+uniform float uTissueBump;
+uniform float uTissueFiber;
+uniform float uTissueMode;
+
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+float vnoise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = hash31(i);
+  float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+  float nx00 = mix(n000, n100, f.x);
+  float nx10 = mix(n010, n110, f.x);
+  float nx01 = mix(n001, n101, f.x);
+  float nx11 = mix(n011, n111, f.x);
+  return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+
+float organicTissueField(vec3 p, float mode) {
+  float macro = vnoise3(p * 1.1);
+  float fine = vnoise3(p * 3.4 + vec3(macro * 1.4));
+  if (mode < 0.5) {
+    // Singularity-free 3D anisotropic helical myocardial fiber grain (no polar pinch at the apex)
+    vec3 w = p + vec3(macro * 0.45, fine * 0.28, -macro * 0.35);
+    float f1 = vnoise3(vec3(w.x * 2.8 + w.z * 1.9, w.y * 2.8 - w.z * 1.6, w.z * 1.1));
+    float f2 = vnoise3(vec3(w.x * 5.2 - w.y * 2.4, w.y * 5.2 + w.z * 3.2, w.z * 2.1));
+    return f1 * 0.45 + f2 * 0.25 + fine * 0.20 + macro * 0.10;
+  }
+  if (mode < 1.5) {
+    // Atria: finer irregular pectinate/muscular grain
+    return fine * 0.55 + macro * 0.45;
+  }
+  // Great vessels & coronaries: subtle smooth elastic-wall variation
+  float ring = vnoise3(vec3(p.x * 2.0, p.y * 2.0, p.z * 4.5 + macro * 1.2));
+  return fine * 0.45 + macro * 0.35 + ring * 0.20;
+}
+`;
+
+/**
+ * Injects seam-free 3D procedural myocardial/vascular texture, micro-roughness, and Mikkelsen
+ * screen-space normal perturbation into a standard PBR material — giving genuine living tissue
+ * relief without any glossy plastic clearcoat or milky sheen overlay.
+ */
+function applyOrganicTissueShader(
+  mat: THREE.MeshStandardMaterial,
+  mode: 0 | 1 | 2,
+  bumpScale: number,
+  fiberColorStrength: number,
+): void {
+  mat.customProgramCacheKey = () => `organic-tissue-${mode}`;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms['uTissueBump'] = { value: bumpScale };
+    shader.uniforms['uTissueFiber'] = { value: fiberColorStrength };
+    shader.uniforms['uTissueMode'] = { value: mode };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>\nvarying vec3 vTissuePos;`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>\nvTissuePos = position;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\n${ORGANIC_NOISE_GLSL}`)
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        float tissueH = organicTissueField(vTissuePos, uTissueMode);
+        float tissueTint = mix(1.0 - uTissueFiber, 1.0 + uTissueFiber * 0.65, tissueH);
+        diffuseColor.rgb *= tissueTint;`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor + (0.5 - tissueH) * 0.24, 0.36, 0.88);`,
+      )
+      .replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+        if (uTissueBump > 0.001) {
+          vec3 dPosX = dFdx(vViewPosition);
+          vec3 dPosY = dFdy(vViewPosition);
+          float dHx = dFdx(tissueH);
+          float dHy = dFdy(tissueH);
+          vec3 r1 = cross(dPosY, normal);
+          vec3 r2 = cross(normal, dPosX);
+          float det = dot(dPosX, r1);
+          vec3 surfGrad = sign(det) * (dHx * r1 + dHy * r2);
+          normal = normalize(abs(det) * normal - uTissueBump * surfGrad);
+        }`,
+      );
+  };
+}
+
+/** Natural anatomical PBR materials: solid opaque tissue with zero milky clearcoat/sheen film. */
+function createGroupMaterial(g: MeshGroup): THREE.MeshStandardMaterial {
   const isMyo = g.id === 'lv-myocardium' || g.id === 'rv-myocardium';
   const isVessel =
     g.id === 'aortic-root' ||
@@ -113,85 +193,69 @@ function createGroupMaterial(g: MeshGroup): THREE.MeshPhysicalMaterial {
   const isAtria = g.id === 'left-atrium' || g.id === 'right-atrium' || g.id === 'atria';
 
   if (isMyo) {
-    return new THREE.MeshPhysicalMaterial({
+    const mat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       vertexColors: true,
-      roughness: 0.44,
-      metalness: 0.02,
-      clearcoat: 0.42,
-      clearcoatRoughness: 0.26,
-      sheen: 0.16,
-      sheenRoughness: 0.58,
-      sheenColor: new THREE.Color(0xd96868),
-      envMapIntensity: 0.72,
+      roughness: 0.56,
+      metalness: 0.0,
+      envMapIntensity: 0.35,
       side: THREE.DoubleSide,
     });
+    applyOrganicTissueShader(mat, 0, 0.16, 0.1);
+    return mat;
   }
   if (isCoronary) {
-    return new THREE.MeshPhysicalMaterial({
+    const mat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       vertexColors: true,
-      roughness: 0.26,
-      metalness: 0.04,
-      clearcoat: 0.72,
-      clearcoatRoughness: 0.16,
-      envMapIntensity: 1.05,
+      roughness: 0.5,
+      metalness: 0.0,
+      envMapIntensity: 0.35,
       side: THREE.FrontSide,
     });
+    applyOrganicTissueShader(mat, 2, 0.06, 0.07);
+    return mat;
   }
   if (isVessel) {
-    return new THREE.MeshPhysicalMaterial({
+    const mat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       vertexColors: true,
-      roughness: 0.34,
-      metalness: 0.03,
-      clearcoat: 0.52,
-      clearcoatRoughness: 0.22,
-      envMapIntensity: 0.95,
-      transparent: g.opacity < 1,
-      opacity: g.opacity,
-      depthWrite: true,
+      roughness: 0.52,
+      metalness: 0.0,
+      envMapIntensity: 0.4,
       side: THREE.DoubleSide,
     });
+    applyOrganicTissueShader(mat, 2, 0.1, 0.09);
+    return mat;
   }
   if (isAtria) {
-    return new THREE.MeshPhysicalMaterial({
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.6,
+      metalness: 0.0,
+      envMapIntensity: 0.32,
+      side: THREE.DoubleSide,
+    });
+    applyOrganicTissueShader(mat, 1, 0.16, 0.11);
+    return mat;
+  }
+  if (isValve) {
+    return new THREE.MeshStandardMaterial({
       color: 0xffffff,
       vertexColors: true,
       roughness: 0.44,
-      metalness: 0.02,
-      clearcoat: 0.36,
-      clearcoatRoughness: 0.3,
-      sheen: 0.22,
-      sheenRoughness: 0.6,
-      sheenColor: new THREE.Color(0xdba2b2),
-      envMapIntensity: 0.85,
-      transparent: g.opacity < 1,
-      opacity: g.opacity,
-      depthWrite: true,
+      metalness: 0.0,
+      envMapIntensity: 0.45,
       side: THREE.DoubleSide,
     });
   }
-  if (isValve) {
-    return new THREE.MeshPhysicalMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      roughness: 0.28,
-      metalness: 0.03,
-      clearcoat: 0.5,
-      clearcoatRoughness: 0.2,
-      envMapIntensity: 1.0,
-      side: THREE.DoubleSide,
-    });
-  }
-  // Translucent blood cavities
-  return new THREE.MeshPhysicalMaterial({
+  // Translucent blood cavities (only visible when sliced or when myocardium is hidden)
+  return new THREE.MeshStandardMaterial({
     color: 0xffffff,
     vertexColors: true,
-    roughness: 0.35,
-    metalness: 0.02,
-    clearcoat: 0.22,
-    clearcoatRoughness: 0.4,
+    roughness: 0.48,
+    metalness: 0.0,
     transparent: g.opacity < 1,
     opacity: g.opacity,
     depthWrite: g.opacity >= 1,
@@ -308,14 +372,13 @@ export function createHeartMeshes(
         meshByGroup.set(g.id, mesh);
         heartMeshes.add(mesh);
 
-        // Coronaries are thin epicardial vessels: clipped by cutPlane, no stencil cap needed
         if (g.id !== 'coronary-arteries' && g.id !== 'coronary-veins') {
           const stencil = createPlaneStencilGroup(geom, cutPlane, 10 + capOrder * 2);
           stencil.applyMatrix4(placement);
           const capMat = new THREE.MeshStandardMaterial({
-            color: new THREE.Color(g.color).multiplyScalar(0.52),
+            color: new THREE.Color(g.color).multiplyScalar(0.55),
             roughness: 0.72,
-            metalness: 0.02,
+            metalness: 0.0,
             side: THREE.DoubleSide,
             stencilWrite: true,
             stencilRef: 0,
@@ -338,17 +401,20 @@ export function createHeartMeshes(
   const update = ({ beam, layers, anatomy, phase, segments }: HeartFrameState) => {
     const clip = layers.cut ? [cutPlane] : [];
     for (const m of meshMaterials) m.clippingPlanes = clip;
+    // Internal blood cavities only show when the heart is cut open or myocardium is hidden,
+    // preventing translucent inner shells from bleeding through thin walls on the intact heart.
+    const showInnerBlood = layers.chambers && (layers.cut || !layers.heart);
     const vis: Record<string, boolean> = {
       'lv-myocardium': layers.heart,
       'rv-myocardium': layers.heart,
       'coronary-arteries': layers.heart && !segments.on,
       'coronary-veins': layers.heart && !segments.on,
-      'lv-cavity': layers.chambers,
-      'rv-cavity': layers.chambers,
+      'lv-cavity': showInnerBlood,
+      'rv-cavity': showInnerBlood,
       'left-atrium': layers.chambers,
       'right-atrium': layers.chambers,
       atria: layers.chambers,
-      valves: layers.valves,
+      valves: layers.valves && (layers.cut || !layers.heart),
       'aortic-root': layers.vessels,
       'pulmonary-artery': layers.vessels,
       'venae-cavae': layers.vessels,
@@ -356,7 +422,6 @@ export function createHeartMeshes(
       'great-vessels': layers.vessels,
       'thoracic-aorta': layers.vessels,
     };
-    // a group without a layer of its own shows with the anatomy, never in the exam
     for (const [id, mesh] of meshByGroup) mesh.visible = vis[id] ?? anatomy;
     for (const [id, c] of capByGroup) {
       const v = (vis[id] ?? anatomy) && layers.cut;
@@ -406,11 +471,6 @@ export function createHeartMeshes(
   return { meshByGroup, lvSegmentsByGeom, phasesReady: () => phasesReady, addPhase, update };
 }
 
-/**
- * Stencil mask for one clipped mesh: back faces increment and front faces decrement, so pixels where
- * the solid interior projects end up non-zero. The cap plane then fills exactly that region (and the
- * replace ops reset the stencil so the next group's mask starts clean). Standard three.js capping.
- */
 function createPlaneStencilGroup(
   geometry: THREE.BufferGeometry,
   plane: THREE.Plane,
