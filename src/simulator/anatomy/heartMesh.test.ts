@@ -127,6 +127,60 @@ describe('3D navigator heart meshes, AO, physiological groups & coronaries', () 
     );
   });
 
+  it('prevents exaggerated focal RV free-wall collapse across normal, HFrEF, and RV dysfunction cases', () => {
+    for (const [id, maxAllowedRvDrop] of [
+      ['normal', 1.2],
+      ['hfref-severe-mr', 0.75],
+      ['pulmonary-hypertension-rv', 0.9],
+    ] as const) {
+      const m = buildCaseModels(loadCaseById(id), patient);
+      const edLv = buildHeartMeshes(m.heart, computeHeartPose(m.heart, cycleStateAt(m.tables, 0)), {
+        stepCm: 0.35,
+        thorax: m.thorax,
+        includeAorta: false,
+        includeCoronaries: false,
+      }).find((g) => g.id === 'lv-myocardium')!;
+      const esLv = buildHeartMeshes(
+        m.heart,
+        computeHeartPose(m.heart, cycleStateAt(m.tables, 0.5)),
+        {
+          stepCm: 0.35,
+          thorax: m.thorax,
+          includeAorta: false,
+          includeCoronaries: false,
+        },
+      ).find((g) => g.id === 'lv-myocardium')!;
+
+      const sectorMaxR = (pos: Float32Array, zTarget: number, degTarget: number) => {
+        let maxR = 0;
+        for (let i = 0; i < pos.length; i += 3) {
+          const x = pos[i]!,
+            y = pos[i + 1]!,
+            z = pos[i + 2]!;
+          if (Math.abs(z - zTarget) > 0.45) continue;
+          let d = (Math.atan2(y, x) * 180) / Math.PI;
+          if (d < 0) d += 360;
+          const diff = Math.abs(((d - degTarget + 540) % 360) - 180);
+          if (diff <= 10) {
+            const r = Math.hypot(x, y);
+            if (r > maxR) maxR = r;
+          }
+        }
+        return maxR;
+      };
+
+      for (const zT of [2.5, 4.0, 5.5]) {
+        for (const deg of [120, 150, 180]) {
+          const drop = sectorMaxR(edLv.positions, zT, deg) - sectorMaxR(esLv.positions, zT, deg);
+          assert.ok(
+            drop <= maxAllowedRvDrop,
+            `${id} RV at z=${zT} ${deg}° dropped ${drop.toFixed(2)} cm (max allowed ${maxAllowedRvDrop} cm)`,
+          );
+        }
+      }
+    }
+  });
+
   it('supports omitting thoracic-aorta on secondary phases for fast 16-phase extraction', () => {
     const secondary = buildHeartMeshes(heart, pose, {
       stepCm: 0.35,
