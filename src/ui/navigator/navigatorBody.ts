@@ -1,47 +1,33 @@
 import * as THREE from 'three';
 import {
   ribCenterY,
-  ribDepth,
   ribRadiusAt,
   skinNormal,
-  skinZ,
   type ThoraxModel,
 } from '@/simulator/anatomy/thoraxModel';
 import { heartToTorso } from '@/simulator/anatomy/heartFrame';
 import type { NavigatorModel, WindowMark } from '@/workers/heartMesh.worker';
+import {
+  RIB_HALF_THICKNESS_CM,
+  anteriorLiftAt,
+  skinCrossSection,
+  visualRibDepthCm,
+  visualRibPoint,
+  visualSkinZ,
+} from './thoraxClearance';
 
 /**
  * The body of the 3D navigator, built once per case from the navigator model the mesh worker sends:
- * translucent silhouette skin, sculpted anatomical sternum + flattened ribbon ribs with a true
- * subcostal arch (ribs 8–10 converging onto the 7th costal cartilage), deduplicated acoustic window
- * rings, and the schematic heart that stands in until the surfaces arrive.
+ * translucent Fresnel silhouette skin, sculpted anatomical sternum + flattened ribbon ribs with a
+ * true subcostal arch (ribs 8–10 converging onto the 7th costal cartilage) positioned strictly outside
+ * the beating heart envelope, deduplicated acoustic window rings, and the schematic heart ghost.
  */
-
-/** Superellipse cross-section point at angle θ (0 = front centre), scaled inward by `inset` cm. */
-function crossSection(
-  t: ThoraxModel,
-  theta: number,
-  y: number,
-  inset: number,
-): { x: number; z: number } {
-  const n = t.n;
-  const aw = t.aw - inset;
-  const b = t.bDepth - inset;
-  const s = Math.sin(theta),
-    c = Math.cos(theta);
-  const x = aw * Math.sign(s) * Math.pow(Math.abs(s), 2 / n);
-  let z = -t.bDepth + b * Math.sign(c) * Math.pow(Math.abs(c), 2 / n);
-  if (y > 8) z -= 0.12 * (y - 8) * (y - 8);
-  if (y < -8) z -= 0.18 * (-8 - y);
-  return { x, z };
-}
 
 /**
- * Translucent anterior & lateral thorax shell. Uses the exact `crossSection` surface so pointer
- * raycasting (`pickSkin`) stays 100% aligned with the acoustic skin model, while keeping the
- * neck & shoulders softly translucent so they never form a harsh opaque cut band at the top.
+ * Translucent anterior & lateral thorax shell. Follows `skinCrossSection` plus the case's anterior
+ * clearance lift so the skin stays cleanly outside the rib cage and beating heart.
  */
-export function buildSkin(t: ThoraxModel): THREE.Mesh {
+export function buildSkin(t: ThoraxModel, clearanceCm = 0): THREE.Mesh {
   const nT = 64,
     nY = 44;
   const thMax = 1.45; // ~83° each side: anterior and lateral chest
@@ -54,8 +40,9 @@ export function buildSkin(t: ThoraxModel): THREE.Mesh {
     const taper = 1 - 0.06 * Math.max(0, (-y - 6) / 10) - 0.03 * Math.max(0, (y - 9) / 4);
     for (let i = 0; i <= nT; i++) {
       const th = -thMax + (2 * thMax * i) / nT;
-      const p = crossSection(t, th, y, 0);
-      pos.push(p.x * taper, y, p.z);
+      const p = skinCrossSection(t, th, y);
+      const x = p.x * taper;
+      pos.push(x, y, p.z + anteriorLiftAt(t, x, clearanceCm));
     }
   }
   for (let j = 0; j < nY; j++)
@@ -179,7 +166,11 @@ export interface WindowMarksRig {
  * projected badge anchors rendered by `navigatorScene` with safe viewport clamping so labels
  * never collide with the probe or clip off the panel edges.
  */
-export function buildWindowMarks(t: ThoraxModel, marks: WindowMark[]): WindowMarksRig {
+export function buildWindowMarks(
+  t: ThoraxModel,
+  marks: WindowMark[],
+  clearanceCm = 0,
+): WindowMarksRig {
   const g = new THREE.Group();
   const placed: {
     window: WindowMark['window'];
@@ -216,7 +207,7 @@ export function buildWindowMarks(t: ThoraxModel, marks: WindowMark[]): WindowMar
     halo.renderOrder = 3;
     ring.add(halo);
     const n = skinNormal(t, m.u, m.v);
-    const z = skinZ(t, m.u, m.v);
+    const z = visualSkinZ(t, m.u, m.v, clearanceCm);
     const pos = new THREE.Vector3(m.u + n.x * 0.08, m.v + n.y * 0.08, z + n.z * 0.08);
     ring.position.copy(pos);
     ring.lookAt(m.u + n.x, m.v + n.y, z + n.z);
@@ -239,7 +230,7 @@ export function buildWindowMarks(t: ThoraxModel, marks: WindowMark[]): WindowMar
     const u = acc.u / acc.n;
     const v = acc.v / acc.n;
     const n = skinNormal(t, u, v);
-    const z = skinZ(t, u, v);
+    const z = visualSkinZ(t, u, v, clearanceCm);
     badges.push({
       window: w,
       label: WINDOW_LABELS[w],
@@ -396,9 +387,10 @@ function buildSculptedSternum(
   t: ThoraxModel,
   sternumMat: THREE.MeshPhysicalMaterial,
   xiphoidMat: THREE.MeshPhysicalMaterial,
+  clearanceCm: number,
 ): THREE.Group {
   const group = new THREE.Group();
-  const sz = (y: number) => skinZ(t, 0, y) - t.chestWall * 0.34 - 0.38;
+  const sz = (y: number) => visualSkinZ(t, 0, y, clearanceCm) - visualRibDepthCm(t) + 0.02;
 
   const curveGeometryToChest = (geom: THREE.BufferGeometry, yOffset: number) => {
     const pos = geom.getAttribute('position') as THREE.BufferAttribute;
@@ -494,7 +486,7 @@ function buildSculptedSternum(
  * clean sternocostal cartilages (1–7), a true converging subcostal arch (ribs 8–10 sweeping
  * upward to join the 7th costal cartilage), and doubly-curved S-shaped clavicles.
  */
-export function buildSkeleton(t: ThoraxModel): THREE.Group {
+export function buildSkeleton(t: ThoraxModel, clearanceCm = 0): THREE.Group {
   const g = new THREE.Group();
   const boneMat = new THREE.MeshPhysicalMaterial({
     color: 0xe6dfd0,
@@ -528,8 +520,14 @@ export function buildSkeleton(t: ThoraxModel): THREE.Group {
   });
   g.userData['skeletonMats'] = { boneMat, sternumMat, cartilageMat };
 
-  const depth = ribDepth(t);
   const thMax = 1.42;
+  const ribDepthSubcut = visualRibDepthCm(t);
+
+  // Maps a lateral x distance cleanly to superellipse parameter θ matching `visualRibPoint`
+  const thetaForX = (xAbs: number): number => {
+    const u = Math.min(0.98, Math.max(0, xAbs / Math.max(1, t.aw - ribDepthSubcut)));
+    return Math.asin(Math.pow(u, t.n / 2));
+  };
 
   // Store 7th costal cartilage anchor points per side so false ribs 8–10 converge into a real costal arch
   const archTargetBySide = new Map<number, { x: number; y: number; z: number }[]>();
@@ -545,41 +543,38 @@ export function buildSkeleton(t: ThoraxModel): THREE.Group {
       const cartPts: THREE.Vector3[] = [];
 
       if (k <= 7) {
-        // Bony lateral-to-anterior rib shaft
+        // Bony lateral-to-anterior rib shaft at uniform subcutaneous depth (never collapsing into the heart)
         for (let i = 0; i <= 36; i++) {
           const th = (thMax * i) / 36;
-          const p = crossSection(t, side * th, yFront, depth);
-          if (Math.abs(p.x) < cartSplitX - 0.5) continue;
           const y = yFront + 3.6 * Math.pow(th / thMax, 1.35);
+          const p = visualRibPoint(t, side * th, y, clearanceCm);
+          if (Math.abs(p.x) < cartSplitX - 0.5) continue;
           bonePts.push(new THREE.Vector3(p.x, y, p.z));
         }
         // Costal cartilage sweeping smoothly from bone junction into sternal facet
-        // Ribs 6 & 7 angle gently superiorly as they approach the lower sternal body
         const sternalLift = k === 6 ? 0.75 : k === 7 ? 1.65 : k === 5 ? 0.25 : 0;
         const cSteps = 12;
         for (let i = 0; i <= cSteps; i++) {
-          const u = i / cSteps; // 0 = sternal attachment, 1 = costochondral junction
+          const u = i / cSteps;
           const xAbs = sternalHalfW + (cartSplitX - sternalHalfW) * u;
-          const th = Math.asin(Math.min(0.98, xAbs / Math.max(1, t.aw - depth)));
-          const p = crossSection(t, side * th, yFront, depth);
+          const th = thetaForX(xAbs);
           const yCurve =
             yFront +
             3.6 * Math.pow(th / thMax, 1.35) +
             sternalLift * Math.pow(1 - u, 1.4);
-          const pt = new THREE.Vector3(p.x, yCurve, p.z + 0.08 * (1 - u));
-          cartPts.push(pt);
+          const p = visualRibPoint(t, side * th, yCurve, clearanceCm);
+          cartPts.push(new THREE.Vector3(p.x, yCurve, p.z + 0.04 * (1 - u)));
         }
         if (k === 7) archTargetBySide.set(side, cartPts.map((v) => ({ x: v.x, y: v.y, z: v.z })));
       } else {
-        // False ribs 8–10: bony shaft laterally + cartilage curving UPWARD to fuse into the costal arch!
+        // False ribs 8–10: bony shaft laterally + cartilage curving UPWARD to fuse into the costal arch
         for (let i = 0; i <= 36; i++) {
           const th = (thMax * i) / 36;
-          const p = crossSection(t, side * th, yFront, depth);
-          if (Math.abs(p.x) < cartSplitX - 0.4) continue;
           const y = yFront + 3.6 * Math.pow(th / thMax, 1.35);
+          const p = visualRibPoint(t, side * th, y, clearanceCm);
+          if (Math.abs(p.x) < cartSplitX - 0.4) continue;
           bonePts.push(new THREE.Vector3(p.x, y, p.z));
         }
-        // Converge anterior cartilage smoothly along the chest curvature onto the 7th costal cartilage
         const arch7 = archTargetBySide.get(side);
         if (arch7 && bonePts.length > 0) {
           const startPt = bonePts[0]!;
@@ -587,22 +582,21 @@ export function buildSkeleton(t: ThoraxModel): THREE.Group {
           const endRef = arch7[targetIdx]!;
           const cSteps = 6;
           for (let ci = 0; ci <= cSteps; ci++) {
-            const u = ci / cSteps; // 0 = merge into 7th cartilage, 1 = bony costochondral junction
-            // Smooth cubic blend so cartilage sweeps organically upward without an elbow kink
+            const u = ci / cSteps;
             const s = u * u * (3 - 2 * u);
             const x = endRef.x + (startPt.x - endRef.x) * u;
             const yBase = endRef.y - 0.14 * (k - 7) * (1 - u);
             const y = yBase + (startPt.y - yBase) * Math.pow(s, 0.82);
-            const th = Math.asin(Math.min(0.98, Math.abs(x) / Math.max(1, t.aw - depth)));
-            const surf = crossSection(t, side * th, y, depth);
-            cartPts.push(new THREE.Vector3(x, y, surf.z + 0.04 * (1 - u)));
+            const th = thetaForX(Math.abs(x));
+            const surf = visualRibPoint(t, side * th, y, clearanceCm);
+            cartPts.push(new THREE.Vector3(x, y, surf.z + 0.03 * (1 - u)));
           }
         }
       }
 
       const baseR = ribRadiusAt(t, 5);
-      const halfH = baseR * 1.12;
-      const halfT = baseR * 0.52;
+      const halfH = baseR * 1.1;
+      const halfT = Math.min(baseR * 0.48, RIB_HALF_THICKNESS_CM);
       if (bonePts.length >= 3) {
         const mesh = new THREE.Mesh(
           buildEllipticalTubeGeometry(new THREE.CatmullRomCurve3(bonePts), 36, halfH, halfT, 10),
@@ -629,19 +623,19 @@ export function buildSkeleton(t: ThoraxModel): THREE.Group {
   }
 
   // Sculpted anatomical sternum
-  g.add(buildSculptedSternum(t, sternumMat, cartilageMat));
+  g.add(buildSculptedSternum(t, sternumMat, cartilageMat, clearanceCm));
 
   // Doubly-curved S-shaped anatomical clavicles meeting the manubrium's clavicular notches
-  const szTop = skinZ(t, 0, 10.2) - t.chestWall * 0.32 - 0.15;
+  const szTop = visualSkinZ(t, 0, 10.2, clearanceCm) - ribDepthSubcut + 0.1;
   for (const side of [-1, 1]) {
     const pts = [
-      new THREE.Vector3(side * 1.65, 10.15, szTop + 0.35),
-      new THREE.Vector3(side * 5.2, 10.75, szTop + 0.55), // medial anterior convexity
-      new THREE.Vector3(side * 9.8, 11.45, szTop - 1.15), // lateral anterior concavity
+      new THREE.Vector3(side * 1.65, 10.15, szTop + 0.25),
+      new THREE.Vector3(side * 5.2, 10.75, szTop + 0.42),
+      new THREE.Vector3(side * 9.8, 11.45, szTop - 1.2),
       new THREE.Vector3(side * 13.8, 11.95, szTop - 3.4),
     ];
     const clav = new THREE.Mesh(
-      buildEllipticalTubeGeometry(new THREE.CatmullRomCurve3(pts), 22, 0.44, 0.36, 10),
+      buildEllipticalTubeGeometry(new THREE.CatmullRomCurve3(pts), 22, 0.42, 0.32, 10),
       boneMat,
     );
     clav.renderOrder = 1;
