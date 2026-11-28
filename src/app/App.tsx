@@ -81,6 +81,8 @@ export function App() {
       railMini: s.ui.railMini,
       roomMode: s.ui.roomMode,
       segmentsOpen: s.ui.segmentsOpen,
+      imageSegments: s.ui.imageSegments,
+      navSegments: s.ui.navSegments,
       guidanceOpen: s.ui.guidanceOpen,
       devMode: s.ui.devMode,
       devPanel: s.ui.devPanel,
@@ -306,19 +308,19 @@ export function App() {
                   </Suspense>
                 </ErrorBoundary>
               )}
-              {/* LV segments of the plane (decision 152): a learning aid, hidden like the guide until asked for */}
-              {railVisible && hints && (
+              {/* Polar map panel surfaces only when LV segments are active (no duplicate rail bar when off) */}
+              {railVisible && hints && (ui.imageSegments || ui.navSegments || ui.segmentsOpen) && (
                 <button
                   className="rail-head"
                   onClick={() => useSimStore.getState().setUi({ segmentsOpen: !ui.segmentsOpen })}
                   aria-expanded={ui.segmentsOpen}
                   aria-controls="lv-segments"
-                  data-tip="Mapa polar de los segmentos del VI, qué muestra el corte y ficha de cada segmento"
+                  data-tip="Mapa polar de los segmentos del VI y ficha de cada segmento"
                 >
                   <span className="chev" aria-hidden="true">
                     <IconChevronRight size={13} />
                   </span>
-                  Segmentos del VI
+                  Mapa polar VI
                 </button>
               )}
               {railVisible && ui.segmentsOpen && (

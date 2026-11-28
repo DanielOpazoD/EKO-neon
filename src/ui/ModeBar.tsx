@@ -210,35 +210,6 @@ function CineControls() {
       <CinePlay length={hud.cineLength} spanS={hud.spanS} speed={s.cineSpeed} />
       <button
         type="button"
-        className="cine-chip"
-        aria-label="Cuadro anterior"
-        data-tip="Cuadro anterior"
-        disabled={s.cineOffset <= -(hud.cineLength - 1)}
-        onClick={() => s.setCineOffset(s.cineOffset - 1)}
-      >
-        ‹
-      </button>
-      <button
-        type="button"
-        className="cine-chip"
-        aria-label="Cuadro siguiente"
-        data-tip="Cuadro siguiente"
-        disabled={s.cineOffset >= 0}
-        onClick={() => s.setCineOffset(s.cineOffset + 1)}
-      >
-        ›
-      </button>
-      <button
-        type="button"
-        className="cine-chip"
-        aria-label={`Velocidad del cine ${s.cineSpeed}×`}
-        data-tip="Velocidad del bucle (1× / 0.5× / 0.25×)"
-        onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
-      >
-        {s.cineSpeed}×
-      </button>
-      <button
-        type="button"
         className="cine-chip cine-phase"
         aria-label="Ir a telediástole"
         data-tip="Saltar a telediástole (TD · onda R)"
@@ -265,9 +236,16 @@ function CineControls() {
         value={s.cineOffset}
         onChange={(e) => s.setCineOffset(Number(e.target.value))}
       />
-      <span className="small cine-read">
-        {hud.cineLength + s.cineOffset}/{hud.cineLength} · {(hud.cineFramePhase * 100).toFixed(0)}%
-      </span>
+      <button
+        type="button"
+        className="cine-chip"
+        aria-label={`Velocidad del cine ${s.cineSpeed}×`}
+        data-tip="Velocidad del bucle (1× / 0.5× / 0.25×)"
+        onClick={() => s.setCineSpeed(s.cineSpeed === 1 ? 0.5 : s.cineSpeed === 0.5 ? 0.25 : 1)}
+      >
+        {s.cineSpeed}×
+      </button>
+      <span className="small cine-read">{(hud.cineFramePhase * 100).toFixed(0)}%</span>
     </div>
   );
 }

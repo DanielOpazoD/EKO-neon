@@ -571,7 +571,6 @@ function OneClickAutoHub({
     id: AutoMeasureActionId,
     opts: {
       value?: string | null;
-      idleSub: string;
       wide?: boolean;
     },
   ) => {
@@ -588,13 +587,14 @@ function OneClickAutoHub({
         data-tip={spec.tip}
         onClick={() => onRun(id)}
       >
-        <span className="auto-tile-top">
-          <span className="auto-tile-name">{spec.label}</span>
-          <span className={`mod-chip${running ? ' match' : ''}`}>{spec.modalityBadge}</span>
-        </span>
-        <span className="auto-tile-sub">
-          {running ? 'Midiendo…' : done ? `✓ ${opts.value}` : opts.idleSub}
-        </span>
+        <span className="auto-tile-name">{spec.label}</span>
+        {running ? (
+          <span className="auto-tile-val">…</span>
+        ) : done ? (
+          <span className="auto-tile-val">{opts.value}</span>
+        ) : (
+          <span className="mod-chip">{spec.modalityBadge}</span>
+        )}
       </button>
     );
   };
@@ -632,12 +632,11 @@ function OneClickAutoHub({
         <div className="auto-tile-grid">
           {renderTile('plax-all', {
             wide: true,
-            idleSub: 'PLAX · SIV, DTDVI, PP, DTSVI, TSVI, Ao, AI',
             value: summary.plax.hasResult
               ? [
                   summary.plax.lvEddCm !== null ? `DTD ${summary.plax.lvEddCm.toFixed(1)}` : null,
                   summary.plax.lvEsdCm !== null ? `DTS ${summary.plax.lvEsdCm.toFixed(1)}` : null,
-                  summary.plax.lvotCm !== null ? `TSVI ${summary.plax.lvotCm.toFixed(2)} cm` : null,
+                  summary.plax.lvotCm !== null ? `TSVI ${summary.plax.lvotCm.toFixed(2)}` : null,
                 ]
                   .filter(Boolean)
                   .join(' · ')
@@ -711,23 +710,15 @@ function OneClickAutoHub({
         </div>
         <div className="auto-tile-grid">
           {renderTile('lv-a4c', {
-            idleSub: 'Apical 4C',
-            value: summary.lv.a4c
-              ? `${summary.lv.a4c.efPct.toFixed(0)}% · ${summary.lv.a4c.edvMl.toFixed(0)}/${summary.lv.a4c.esvMl.toFixed(0)}`
-              : null,
+            value: summary.lv.a4c ? `${summary.lv.a4c.efPct.toFixed(0)}%` : null,
           })}
           {renderTile('lv-a2c', {
-            idleSub: 'Apical 2C',
-            value: summary.lv.a2c
-              ? `${summary.lv.a2c.efPct.toFixed(0)}% · ${summary.lv.a2c.edvMl.toFixed(0)}/${summary.lv.a2c.esvMl.toFixed(0)}`
-              : null,
+            value: summary.lv.a2c ? `${summary.lv.a2c.efPct.toFixed(0)}%` : null,
           })}
           {renderTile('la-a4c', {
-            idleSub: 'Apical 4C',
             value: summary.la.a4c ? `${summary.la.a4c.volumeMl.toFixed(0)} mL` : null,
           })}
           {renderTile('la-a2c', {
-            idleSub: 'Apical 2C',
             value: summary.la.a2c ? `${summary.la.a2c.volumeMl.toFixed(0)} mL` : null,
           })}
         </div>
@@ -801,15 +792,13 @@ function OneClickAutoHub({
         </div>
         <div className="auto-tile-grid">
           {renderTile('lvot-vti', {
-            idleSub: 'A5C · PW TSVI',
-            value: agg.lvotVti
-              ? `${agg.lvotVti.value.toFixed(1)} cm${agg.lvotVti.isAveraged ? ` (${agg.lvotVti.beatCount}l)` : ''}`
-              : null,
+            value: agg.lvotVti ? `${agg.lvotVti.value.toFixed(1)} cm` : null,
           })}
           {renderTile('av-vti', {
-            idleSub: 'A5C · CW VAo',
             value: agg.avVti
-              ? `${agg.avVti.latest.derived?.vmaxMps ? `${agg.avVti.latest.derived.vmaxMps.toFixed(2)} m/s` : `${agg.avVti.value.toFixed(1)} cm`}`
+              ? agg.avVti.latest.derived?.vmaxMps
+                ? `${agg.avVti.latest.derived.vmaxMps.toFixed(2)} m/s`
+                : `${agg.avVti.value.toFixed(1)} cm`
               : null,
           })}
         </div>
@@ -840,24 +829,21 @@ function OneClickAutoHub({
         <div className="auto-tile-grid">
           {renderTile('mitral-ea', {
             wide: true,
-            idleSub: 'A4C · PW puntas mitrales',
             value: agg.mitralE
               ? [
                   `E ${agg.mitralE.value.toFixed(2)}`,
                   agg.mitralA ? `A ${agg.mitralA.value.toFixed(2)}` : null,
-                  agg.mitralDt ? `TD ${Math.round(agg.mitralDt.value)} ms` : null,
+                  agg.mitralDt ? `TD ${Math.round(agg.mitralDt.value)}` : null,
                 ]
                   .filter(Boolean)
                   .join(' · ')
               : null,
           })}
           {renderTile('tdi-septal', {
-            idleSub: 'A4C · TDI sept.',
-            value: agg.epSept ? `${agg.epSept.value.toFixed(1)} cm/s` : null,
+            value: agg.epSept ? `${agg.epSept.value.toFixed(1)}` : null,
           })}
           {renderTile('tdi-lateral', {
-            idleSub: 'A4C · TDI lat.',
-            value: agg.epLat ? `${agg.epLat.value.toFixed(1)} cm/s` : null,
+            value: agg.epLat ? `${agg.epLat.value.toFixed(1)}` : null,
           })}
         </div>
         {(eaRatio !== null || eOverEPrime !== null) && (
@@ -884,38 +870,31 @@ function OneClickAutoHub({
         </div>
         <div className="auto-tile-grid">
           {renderTile('rv-2d', {
-            idleSub: 'Enf. VD · 2D',
             value: summary.rv.hasResult
-              ? [
-                  summary.rv.efPct !== null ? `${summary.rv.efPct.toFixed(0)}%` : null,
-                  summary.rv.facPct !== null ? `CAF ${summary.rv.facPct.toFixed(0)}%` : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ') || (summary.rv.basalCm !== null ? `${summary.rv.basalCm.toFixed(1)} cm` : null)
+              ? summary.rv.efPct !== null
+                ? `${summary.rv.efPct.toFixed(0)}%`
+                : summary.rv.basalCm !== null
+                  ? `${summary.rv.basalCm.toFixed(1)} cm`
+                  : null
               : null,
           })}
           {renderTile('tapse', {
-            idleSub: 'Enf. VD · M',
             value: agg.tapse ? `${agg.tapse.value.toFixed(2)} cm` : null,
           })}
           {renderTile('rv-s-prime', {
-            idleSub: 'Enf. VD · TDI',
-            value: agg.rvSPrime ? `${agg.rvSPrime.value.toFixed(1)} cm/s` : null,
+            value: agg.rvSPrime ? `${agg.rvSPrime.value.toFixed(1)}` : null,
           })}
           {renderTile('tr-vmax', {
-            idleSub: 'Enf. VD · CW',
             value: agg.trVmax ? `${agg.trVmax.value.toFixed(2)} m/s` : null,
           })}
           {renderTile('rvot-at', {
-            idleSub: 'PSAX Ao · PW',
             value: agg.rvotAt ? `${Math.round(agg.rvotAt.value)} ms` : null,
           })}
           {renderTile('ivc-full', {
-            idleSub: 'Subc. VCI · Esp+Insp',
             value: summary.ivc.hasResult
-              ? summary.ivc.rapMmHg !== null && summary.ivc.collapsePct !== null
-                ? `PAD ${summary.ivc.rapMmHg} · ${summary.ivc.collapsePct.toFixed(0)}%`
-                : `${(summary.ivc.expCm ?? summary.ivc.inspCm ?? 0).toFixed(2)} cm`
+              ? summary.ivc.rapMmHg !== null
+                ? `PAD ${summary.ivc.rapMmHg}`
+                : `${(summary.ivc.expCm ?? summary.ivc.inspCm ?? 0).toFixed(2)}`
               : null,
           })}
         </div>

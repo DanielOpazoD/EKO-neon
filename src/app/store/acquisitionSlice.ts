@@ -200,9 +200,19 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
     // makes the jump on every case it opens, left the first view of the curriculum out of reach for good.
     // Recording targetViewId synchronously also prevents an in-flight caseReady -> openOnStartView() from overriding
     // a preset view the learner just clicked immediately after switching cases.
+    let postureChanged = false;
     if (!opts?.instant) {
+      const isSubcostal = viewId.startsWith('subcostal-');
+      const curPos = get().patient.position;
+      const nextPos = isSubcostal
+        ? 'subcostal-supine'
+        : curPos === 'subcostal-supine'
+          ? 'left-lateral'
+          : curPos;
+      postureChanged = nextPos !== curPos;
       set((s) => ({
         targetViewId: viewId,
+        ...(postureChanged ? { patient: { ...s.patient, position: nextPos } } : {}),
         ...(!s.presetViews.includes(viewId) ? { presetViews: [...s.presetViews, viewId] } : {}),
       }));
     }
@@ -248,11 +258,23 @@ export const createAcquisitionSlice: SimSliceCreator<AcquisitionSlice> = (set, g
           colorBoxCustom: false,
         });
       });
+    // When switching posture (e.g. left-lateral <-> subcostal-supine), yield 2 animation frames so
+    // the simulator worker receives the rebuilt thorax before computing the canonical probe pose.
+    const waitPosture =
+      postureChanged && typeof requestAnimationFrame === 'function'
+        ? new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          )
+        : Promise.resolve();
     // the pose comes from the worker's own models — the ones the image is traced from (audit B7); without a
     // worker (tests, inline mode) the main-thread copies answer, as they did before
-    void frameBus
-      .request({ kind: 'canonicalControl', viewId })
+    void waitPosture
+      .then(() => {
+        if (token !== currentPresetToken() || get().mode === 'exam') return null;
+        return frameBus.request({ kind: 'canonicalControl', viewId });
+      })
       .then((res) => {
+        if (token !== currentPresetToken() || get().mode === 'exam') return;
         if (res && res.kind === 'canonicalControl') return begin(clampProbe(res.control));
         // no worker answered (tests, inline mode): the main-thread copies compute it, loaded on demand so the
         // anatomy engine stays out of the entry chunk

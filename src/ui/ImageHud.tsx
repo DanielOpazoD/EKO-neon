@@ -25,6 +25,7 @@ const RHYTHM_LABEL: Record<string, string> = {
  */
 export function ImageHud() {
   const show = useSimStore((s) => s.ui.showHud);
+  const devMode = useSimStore((s) => s.ui.devMode);
   const mode = useSimStore((s) => s.mode);
   const caseId = useSimStore((s) => s.caseId);
   const examFinished = useSimStore((s) => s.examFinished);
@@ -100,8 +101,7 @@ export function ImageHud() {
           {depthCm} cm · {formatMHz(frequencyMHz)}
           {harmonics ? ' THI' : ''}
         </span>
-        {/* in colour the frame rate already is the colour one: «· color N» repeated it (decision 195) */}
-        <span>FR {fps !== null ? fps : '—'} Hz</span>
+        {devMode && <span>FR {fps !== null ? fps : '—'} Hz</span>}
         {strip ? viewLine : null}
         {notice ? (
           // the frame shown was formed by the CPU tracer (its tip: why, and the port now); or, frozen over one the GPU
