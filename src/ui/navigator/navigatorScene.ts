@@ -90,7 +90,7 @@ export function mountNavigatorScene(
       const room = new RoomEnvironment();
       envRT = pmrem.fromScene(room, 0.04);
       scene.environment = envRT.texture;
-      scene.environmentIntensity = 0.46;
+      scene.environmentIntensity = 0.24;
       room.dispose();
     } catch {
       /* fallback cleanly to directional lights if PMREM fails on exotic drivers */
@@ -226,10 +226,9 @@ export function mountNavigatorScene(
   const fanMat = new THREE.MeshBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.34,
+    opacity: 0.14,
     side: THREE.DoubleSide,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
   });
   const fan = new THREE.Mesh(new THREE.BufferGeometry(), fanMat);
   fan.renderOrder = 4;
@@ -239,7 +238,7 @@ export function mountNavigatorScene(
     new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.88,
       depthWrite: false,
     }),
   );
@@ -472,7 +471,11 @@ export function mountNavigatorScene(
     }
     if (skin) {
       skin.visible = layers.skin;
-      updateSkinOpacity(skin, heartVisible ? 0.14 : !anatomy ? 0.34 : 0.72);
+      updateSkinOpacity(
+        skin,
+        heartVisible ? 0.0 : !anatomy ? 0.26 : 0.62,
+        heartVisible ? 0.34 : !anatomy ? 0.56 : 0.82,
+      );
     }
     const drawn = [
       skin?.visible && 'skin',

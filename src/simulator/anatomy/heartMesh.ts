@@ -83,62 +83,59 @@ const isLvWall = (s: Structure): boolean =>
   s === Structure.LvWallInferior ||
   s === Structure.LvApex;
 
-/** Groups the navigator can show or hide independently (physiologically color-coded). */
+/** Groups the navigator can show or hide independently (solid, natural anatomical palette). */
 export const MESH_GROUPS: GroupSpec[] = [
   {
+    // LV + RV myocardium fused into ONE continuous biventricular surface (with a constrained sulcus
+    // fillet bridging the RV–LV insertions). Eliminates the detached "shell/cape" overhang seam
+    // between separate LV and RV meshes while keeping both interior cavities hollow for cut views
+    // and preserving exact AHA 17-segment tagging on LV wall vertices.
     id: 'lv-myocardium',
-    label: 'Miocardio VI',
-    color: 0x9b282f,
-    opacity: 1,
-    has: (s) => isLvWall(s) || s === Structure.PapillaryMuscle,
-  },
-  {
-    // The RV free wall is 0.3-0.5 cm thick (1-2 cells at 0.26 cm): thickened 2 cells into its cavity so the
-    // epicardium stays closed and smooth. Slightly lighter warm muscle tone distinguishes RV from LV
-    // across the anterior interventricular sulcus. The ultrasound image never uses this mesh.
-    id: 'rv-myocardium',
-    label: 'Miocardio VD',
-    color: 0xb13d40,
+    label: 'Miocardio (VI + VD)',
+    color: 0x8e242a,
     opacity: 1,
     has: (s) =>
-      s === Structure.RvWall || s === Structure.ModeratorBand || s === Structure.RvPapillary,
-    thicken: { into: (s) => s === Structure.RvCavity || s === Structure.Rvot, cells: 2 },
-    smoothing: 4,
+      isLvWall(s) ||
+      s === Structure.PapillaryMuscle ||
+      s === Structure.RvWall ||
+      s === Structure.ModeratorBand ||
+      s === Structure.RvPapillary,
+    smoothing: 3,
   },
   {
     id: 'lv-cavity',
     label: 'Cavidad VI',
-    color: 0x8e1e28,
+    color: 0x7c1a24,
     opacity: 0.55,
     has: (s) => s === Structure.LvCavity || s === Structure.Lvot,
   },
   {
     id: 'rv-cavity',
     label: 'Cavidad VD',
-    color: 0x2c488f,
+    color: 0x2c4788,
     opacity: 0.52,
     has: (s) => s === Structure.RvCavity || s === Structure.Rvot,
   },
   {
     id: 'left-atrium',
     label: 'Aurícula izquierda',
-    color: 0xa64152,
-    opacity: 0.88,
+    color: 0x7d2633,
+    opacity: 1,
     has: (s) =>
       s === Structure.LaCavity || s === Structure.LaWall || s === Structure.LaAppendage,
   },
   {
     id: 'right-atrium',
     label: 'Aurícula derecha',
-    color: 0x5d578a,
-    opacity: 0.88,
+    color: 0x514166,
+    opacity: 1,
     has: (s) =>
       s === Structure.RaCavity || s === Structure.RaWall || s === Structure.RaAppendage,
   },
   {
     id: 'valves',
     label: 'Válvulas',
-    color: 0xf0e0a4,
+    color: 0xe3d4a3,
     opacity: 1,
     has: (s, t) =>
       t === Tissue.Valve ||
@@ -149,29 +146,29 @@ export const MESH_GROUPS: GroupSpec[] = [
   {
     id: 'aortic-root',
     label: 'Raíz aórtica',
-    color: 0xd44042,
-    opacity: 0.94,
+    color: 0xb03036,
+    opacity: 1,
     has: (s) => s === Structure.AorticRoot,
   },
   {
     id: 'pulmonary-artery',
     label: 'Arteria pulmonar',
-    color: 0x4b6ea8,
-    opacity: 0.92,
+    color: 0x455b85,
+    opacity: 1,
     has: (s) => s === Structure.PulmonaryArtery,
   },
   {
     id: 'venae-cavae',
     label: 'Venas cavas',
-    color: 0x3b659c,
-    opacity: 0.92,
+    color: 0x36507a,
+    opacity: 1,
     has: (s) => s === Structure.Svc || s === Structure.Ivc || s === Structure.CoronarySinus,
   },
   {
     id: 'pulmonary-veins',
     label: 'Venas pulmonares',
-    color: 0xc4505d,
-    opacity: 0.9,
+    color: 0xa03842,
+    opacity: 1,
     has: (s) => s === Structure.PulmonaryVein,
   },
 ];
@@ -179,8 +176,8 @@ export const MESH_GROUPS: GroupSpec[] = [
 export const AORTA_GROUP: GroupSpec = {
   id: 'thoracic-aorta',
   label: 'Arco y aorta torácica',
-  color: 0xd44042,
-  opacity: 0.92,
+  color: 0xb03036,
+  opacity: 1,
   // the arch and its branches by name: `s >= AscendingAorta` took in every structure added after them (the right atrial
   // appendage, the esophagus, the mediastinum)
   has: (s) =>
@@ -242,7 +239,8 @@ export function buildHeartMeshes(
   }
 
   if (opts.includeCoronaries !== false) {
-    out.push(...buildCoronaryMeshes(heart, pose));
+    const myoTargets = groups.filter((g) => g.id === 'lv-myocardium');
+    out.push(...buildCoronaryMeshes(heart, pose, myoTargets));
   }
   return out;
 }
@@ -321,27 +319,20 @@ function extractMeshes(
   );
 }
 
-/** Whether a neighboring structure constitutes a meaningful anatomical sulcus against a myocardial group. */
+/** Whether a neighboring structure constitutes a meaningful anatomical sulcus against the ventricles. */
 function isSulcusNeighbour(groupId: string, other: Structure): boolean {
-  if (other === Structure.None || other === Structure.Pericardium || other === Structure.EpicardialFat || other === Structure.PericardialFat)
+  if (
+    other === Structure.None ||
+    other === Structure.Pericardium ||
+    other === Structure.EpicardialFat ||
+    other === Structure.PericardialFat
+  )
     return false;
   if (groupId === 'lv-myocardium') {
     return (
-      other === Structure.RvWall ||
-      other === Structure.RvCavity ||
-      other === Structure.Rvot ||
       other === Structure.LaWall ||
       other === Structure.LaCavity ||
       other === Structure.LaAppendage ||
-      other === Structure.RaWall ||
-      other === Structure.RaCavity ||
-      other === Structure.AorticRoot ||
-      other === Structure.PulmonaryArtery
-    );
-  }
-  if (groupId === 'rv-myocardium') {
-    return (
-      isLvWall(other) ||
       other === Structure.RaWall ||
       other === Structure.RaCavity ||
       other === Structure.RaAppendage ||
@@ -350,6 +341,128 @@ function isSulcusNeighbour(groupId: string, other: Structure): boolean {
     );
   }
   return false;
+}
+
+const isExteriorFillable = (s: Structure): boolean =>
+  s === Structure.None ||
+  s === Structure.EpicardialFat ||
+  s === Structure.Pericardium ||
+  s === Structure.PericardialFat;
+
+/**
+ * Builds the seamless unified biventricular occupancy mask:
+ * 1. Thickens the thin RV free wall 2 cells inward into RV cavity/RVOT so the epicardium stays watertight.
+ * 2. Applies constrained exterior sulcus filleting exclusively in the concave notch where RV meets LV
+ *    (never invading blood cavities, atria, or great vessels) so the ventricles fuse into one continuous
+ *    sculptural epicardial mass with zero detached "cape/shell" step.
+ */
+function buildUnifiedVentricleMask(
+  ids: Uint8Array,
+  nx: number,
+  ny: number,
+  nz: number,
+): Uint8Array {
+  const n = ids.length;
+  const lvZone = new Uint8Array(n);
+  const rvZone = new Uint8Array(n);
+  for (let o = 0; o < n; o++) {
+    const s = ids[o] as Structure;
+    if (isLvWall(s) || s === Structure.PapillaryMuscle) lvZone[o] = 1;
+    else if (
+      s === Structure.RvWall ||
+      s === Structure.ModeratorBand ||
+      s === Structure.RvPapillary
+    )
+      rvZone[o] = 1;
+  }
+
+  // 1. Watertight RV wall: grow RV 2 cells inward into its own cavity/RVOT only (epicardium stays exact)
+  const grow = new Uint8Array(n);
+  for (let pass = 0; pass < 2; pass++) {
+    grow.fill(0);
+    for (let k = 1; k < nz - 1; k++)
+      for (let j = 1; j < ny - 1; j++)
+        for (let i = 1; i < nx - 1; i++) {
+          const o = (k * ny + j) * nx + i;
+          if (rvZone[o]) continue;
+          const s = ids[o] as Structure;
+          if (s !== Structure.RvCavity && s !== Structure.Rvot) continue;
+          if (
+            rvZone[o - 1] ||
+            rvZone[o + 1] ||
+            rvZone[o - nx] ||
+            rvZone[o + nx] ||
+            rvZone[o - nx * ny] ||
+            rvZone[o + nx * ny]
+          )
+            grow[o] = 1;
+        }
+    for (let o = 0; o < n; o++) if (grow[o]) rvZone[o] = 1;
+  }
+
+  const inside = new Uint8Array(n);
+  for (let o = 0; o < n; o++) inside[o] = lvZone[o] || rvZone[o] ? 1 : 0;
+
+  // 2. Constrained LV↔RV sulcus fillet (3 passes): smoothly bridges only the exterior V-notch / overhang
+  //    between LV and RV (anterior & inferior interventricular grooves and apical RV insertion).
+  const strideZ = nx * ny;
+  const fill = new Uint8Array(n);
+  for (let pass = 0; pass < 3; pass++) {
+    fill.fill(0);
+    for (let k = 1; k < nz - 1; k++)
+      for (let j = 1; j < ny - 1; j++)
+        for (let i = 1; i < nx - 1; i++) {
+          const o = k * strideZ + j * nx + i;
+          if (inside[o] || !isExteriorFillable(ids[o] as Structure)) continue;
+          let nLv = 0;
+          let nRv = 0;
+          for (let dk = -1; dk <= 1; dk++) {
+            const ok = o + dk * strideZ;
+            for (let dj = -1; dj <= 1; dj++) {
+              const oj = ok + dj * nx;
+              for (let di = -1; di <= 1; di++) {
+                if (di === 0 && dj === 0 && dk === 0) continue;
+                const nb = oj + di;
+                if (lvZone[nb]) nLv++;
+                if (rvZone[nb]) nRv++;
+              }
+            }
+          }
+          if (nLv >= 1 && nRv >= 1 && nLv + nRv >= 4) fill[o] = 1;
+        }
+    for (let o = 0; o < n; o++) {
+      if (fill[o]) {
+        inside[o] = 1;
+        lvZone[o] = 1;
+        rvZone[o] = 1;
+      }
+    }
+  }
+
+  // 3. One pass of concave-only exterior morphological closing (>= 14 of 26 neighbors inside)
+  //    smooths any residual step along the apical RV-to-LV junction without inflating convex walls.
+  fill.fill(0);
+  for (let k = 1; k < nz - 1; k++)
+    for (let j = 1; j < ny - 1; j++)
+      for (let i = 1; i < nx - 1; i++) {
+        const o = k * strideZ + j * nx + i;
+        if (inside[o] || !isExteriorFillable(ids[o] as Structure)) continue;
+        let cnt = 0;
+        for (let dk = -1; dk <= 1; dk++) {
+          const ok = o + dk * strideZ;
+          for (let dj = -1; dj <= 1; dj++) {
+            const oj = ok + dj * nx;
+            for (let di = -1; di <= 1; di++) {
+              if (di === 0 && dj === 0 && dk === 0) continue;
+              if (inside[oj + di]) cnt++;
+            }
+          }
+        }
+        if (cnt >= 14) fill[o] = 1;
+      }
+  for (let o = 0; o < n; o++) if (fill[o]) inside[o] = 1;
+
+  return inside;
 }
 
 function surfaceNet(
@@ -364,32 +477,37 @@ function surfaceNet(
   smoothing: number,
   segs: Uint8Array | null = null,
 ): MeshGroup {
-  const inside = new Uint8Array(nx * ny * nz);
-  for (let o = 0; o < ids.length; o++)
-    inside[o] = g.has(ids[o] as Structure, tissues[o] as Tissue) ? 1 : 0;
-  if (g.thicken) {
-    // grow the wall into the structures it lines, one cell per pass, from the cells already inside
-    const grow = new Uint8Array(inside.length);
-    for (let pass = 0; pass < g.thicken.cells; pass++) {
-      grow.fill(0);
-      for (let k = 1; k < nz - 1; k++)
-        for (let j = 1; j < ny - 1; j++)
-          for (let i = 1; i < nx - 1; i++) {
-            const o = (k * ny + j) * nx + i;
-            if (inside[o] || !g.thicken.into(ids[o] as Structure)) continue;
-            if (
-              inside[o - 1] ||
-              inside[o + 1] ||
-              inside[o - nx] ||
-              inside[o + nx] ||
-              inside[o - nx * ny] ||
-              inside[o + nx * ny]
-            )
-              grow[o] = 1;
+  const inside =
+    g.id === 'lv-myocardium'
+      ? buildUnifiedVentricleMask(ids, nx, ny, nz)
+      : (() => {
+          const mask = new Uint8Array(nx * ny * nz);
+          for (let o = 0; o < ids.length; o++)
+            mask[o] = g.has(ids[o] as Structure, tissues[o] as Tissue) ? 1 : 0;
+          if (g.thicken) {
+            const grow = new Uint8Array(mask.length);
+            for (let pass = 0; pass < g.thicken.cells; pass++) {
+              grow.fill(0);
+              for (let k = 1; k < nz - 1; k++)
+                for (let j = 1; j < ny - 1; j++)
+                  for (let i = 1; i < nx - 1; i++) {
+                    const o = (k * ny + j) * nx + i;
+                    if (mask[o] || !g.thicken.into(ids[o] as Structure)) continue;
+                    if (
+                      mask[o - 1] ||
+                      mask[o + 1] ||
+                      mask[o - nx] ||
+                      mask[o + nx] ||
+                      mask[o - nx * ny] ||
+                      mask[o + nx * ny]
+                    )
+                      grow[o] = 1;
+                  }
+              for (let o = 0; o < mask.length; o++) if (grow[o]) mask[o] = 1;
+            }
           }
-      for (let o = 0; o < inside.length; o++) if (grow[o]) inside[o] = 1;
-    }
-  }
+          return mask;
+        })();
   const at = (i: number, j: number, k: number): number => inside[(k * ny + j) * nx + i] ?? 0;
   const cellVertex = new Int32Array((nx - 1) * (ny - 1) * (nz - 1)).fill(-1);
   const pos: number[] = [];

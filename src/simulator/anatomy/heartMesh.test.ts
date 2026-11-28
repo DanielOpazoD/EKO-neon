@@ -23,7 +23,6 @@ describe('3D navigator heart meshes, AO, physiological groups & coronaries', () 
 
     for (const id of [
       'lv-myocardium',
-      'rv-myocardium',
       'left-atrium',
       'right-atrium',
       'aortic-root',
@@ -42,16 +41,19 @@ describe('3D navigator heart meshes, AO, physiological groups & coronaries', () 
       }
     }
 
-    // Distinct physiological color coding: arterial aorta vs venous cavae & PA, LA vs RA, LV vs RV
+    // Unified biventricular myocardium: no detached separate rv-myocardium overhang shell
+    assert.equal(byId.has('rv-myocardium'), false);
+
+    // Distinct physiological color coding: arterial aorta vs venous cavae & PA, LA vs RA
     assert.notEqual(byId.get('aortic-root')!.color, byId.get('pulmonary-artery')!.color);
     assert.notEqual(byId.get('aortic-root')!.color, byId.get('venae-cavae')!.color);
     assert.notEqual(byId.get('left-atrium')!.color, byId.get('right-atrium')!.color);
-    assert.notEqual(byId.get('lv-myocardium')!.color, byId.get('rv-myocardium')!.color);
 
-    // Myocardium carries sulcus groove proximity for epicardial fat & crease shading
+    // Unified ventricles still tag LV walls with AHA 17 segments and leave RV vertices as 0
     const lv = byId.get('lv-myocardium')!;
-    assert.ok(lv.groove && lv.groove.length * 3 === lv.positions.length);
-    assert.ok(lv.groove.some((v) => v > 0.2), 'expected non-zero sulcus groove vertices on LV');
+    assert.ok(lv.segments && lv.segments.length * 3 === lv.positions.length);
+    assert.ok(lv.segments.some((c) => c > 0), 'expected LV AHA segments > 0');
+    assert.ok(lv.segments.some((c) => c === 0), 'expected RV vertices tagged as segment 0');
 
     // Inferior trim keeps IVC and descending aorta cleanly tucked to the cardiac silhouette
     for (const vesselId of ['venae-cavae', 'thoracic-aorta']) {

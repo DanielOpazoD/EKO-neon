@@ -68,30 +68,55 @@ export function buildSkin(t: ThoraxModel): THREE.Mesh {
   g.setIndex(idx);
   g.computeVertexNormals();
 
-  const mat = new THREE.MeshPhysicalMaterial({
-    color: 0xcab3a0,
-    roughness: 0.68,
-    metalness: 0,
-    sheen: 0.35,
-    sheenRoughness: 0.65,
-    sheenColor: new THREE.Color(0xe6d3c3),
-    transparent: true,
-    opacity: 0.16,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(g, mat);
-  mesh.renderOrder = 2;
+  // Fresnel silhouette skin: completely crystal-clear facing the camera over the heart (zero haze/veil),
+  // softly visible along the torso flanks, shoulders, and neck contour.
+  const skinUniforms = {
+    uSkinCenterAlpha: { value: 0.0 },
+    uSkinRimAlpha: { value: 0.36 },
+  };
+  const applyFresnelSkin = (m: THREE.MeshStandardMaterial) => {
+    m.customProgramCacheKey = () => 'fresnel-torso-skin';
+    m.onBeforeCompile = (shader) => {
+      shader.uniforms['uSkinCenterAlpha'] = skinUniforms.uSkinCenterAlpha;
+      shader.uniforms['uSkinRimAlpha'] = skinUniforms.uSkinRimAlpha;
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>\nuniform float uSkinCenterAlpha;\nuniform float uSkinRimAlpha;`,
+        )
+        .replace(
+          '#include <alphamap_fragment>',
+          `#include <alphamap_fragment>
+          float skinNdotV = abs(dot(normalize(vNormal), normalize(vViewPosition)));
+          float skinRim = pow(1.0 - skinNdotV, 2.35);
+          diffuseColor.a = mix(uSkinCenterAlpha, uSkinRimAlpha, skinRim);`,
+        );
+    };
+  };
 
-  // Softly translucent neck & shoulder silhouettes sharing the same subtle veil (no opaque mannequin cut)
-  const collarMat = new THREE.MeshPhysicalMaterial({
-    color: 0xbda695,
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xc2ab9a,
     roughness: 0.72,
     metalness: 0,
     transparent: true,
-    opacity: 0.14,
+    opacity: 1,
+    side: THREE.DoubleSide,
     depthWrite: false,
   });
+  applyFresnelSkin(mat);
+  const mesh = new THREE.Mesh(g, mat);
+  mesh.renderOrder = 2;
+  mesh.userData['skinUniforms'] = skinUniforms;
+
+  const collarMat = new THREE.MeshStandardMaterial({
+    color: 0xb69f8f,
+    roughness: 0.75,
+    metalness: 0,
+    transparent: true,
+    opacity: 1,
+    depthWrite: false,
+  });
+  applyFresnelSkin(collarMat);
   const neck = new THREE.Mesh(new THREE.CylinderGeometry(4.6, 5.8, 7.5, 28, 1, true), collarMat);
   neck.position.set(0, 15.8, -t.bDepth * 0.56);
   neck.userData['skinAccessory'] = true;
@@ -106,14 +131,14 @@ export function buildSkin(t: ThoraxModel): THREE.Mesh {
   return mesh;
 }
 
-/** Syncs skin and shoulder/neck opacity cleanly between anatomy-visible and exam modes. */
-export function updateSkinOpacity(skin: THREE.Mesh, opacity: number): void {
-  const mat = skin.material as THREE.MeshPhysicalMaterial;
-  mat.opacity = opacity;
-  for (const child of skin.children) {
-    if (child.userData['skinAccessory']) {
-      ((child as THREE.Mesh).material as THREE.MeshPhysicalMaterial).opacity = opacity * 0.72;
-    }
+/** Syncs Fresnel skin center & contour opacity cleanly between anatomy-visible and exam modes. */
+export function updateSkinOpacity(skin: THREE.Mesh, centerOpacity: number, rimOpacity?: number): void {
+  const u = skin.userData['skinUniforms'] as
+    | { uSkinCenterAlpha: { value: number }; uSkinRimAlpha: { value: number } }
+    | undefined;
+  if (u) {
+    u.uSkinCenterAlpha.value = centerOpacity;
+    u.uSkinRimAlpha.value = rimOpacity ?? Math.min(0.75, centerOpacity + 0.36);
   }
 }
 
