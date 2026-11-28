@@ -451,24 +451,12 @@ float cordAlignment(float axisDotBeam) {
   return sqrt(max(0.0, 1.0 - axisDotBeam * axisDotBeam));
 }
 // src/simulator/renderer/acoustic/acoustics.ts: interfaceEcho
-float interfaceEcho(float absSdf, float nd, float dr, float rough) {
+float interfaceEcho(float absSdf, float nd, float dr) {
   float c = clamp(nd, 0.0, 1.0);
   float w = max(c, SPECULAR_WINDOW_MIN) * max(1e-6, dr);
-  if (absSdf >= w || absSdf < 0.0) {
-    return 0.0;
-  }
-  float tent = (1.0 - absSdf / w) * SPECULAR_TENT_NORM;
-  float r = clamp(rough, 0.0, 1.0) - 0.5;
+  float tent = absSdf >= 0.0 ? max(0.0, 1.0 - absSdf / w) * SPECULAR_TENT_NORM : 0.0;
   float c2 = c * c;
-  float mirror = c2 * c2 * (1.0 + SPECULAR_MIRROR_MOD * r);
-  float skirt = c * sqrt(c) * (1.0 + SPECULAR_SKIRT_MOD * r);
-  return tent * ((1.0 - SPECULAR_SKIRT_SHARE) * mirror + SPECULAR_SKIRT_SHARE * skirt);
-}
-// src/simulator/renderer/acoustic/acoustics.ts: interfaceTailSource
-float interfaceTailSource(float specular, float extraReflect) {
-  float sp = max(0.0, specular - SPEC_TAIL_THRESHOLD) * SPEC_TAIL_GAIN;
-  float ca = max(0.0, (extraReflect - CALCIUM_ATTEN_THRESHOLD) / (1.0 - CALCIUM_ATTEN_THRESHOLD)) * CALC_TAIL_GAIN;
-  return sp + min(CALC_TAIL_GAIN, ca);
+  return tent * ((1.0 - SPECULAR_SKIRT_SHARE) * c2 * c2 + SPECULAR_SKIRT_SHARE * c * sqrt(c));
 }
 // src/simulator/renderer/acoustic/psf.ts: sliceHalfWidthCm
 float sliceHalfWidthCm(float rCm) {

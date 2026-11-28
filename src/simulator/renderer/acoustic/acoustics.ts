@@ -75,12 +75,6 @@ export const SPECULAR_WINDOW_MIN = 0.15;
 export const SPECULAR_TENT_NORM = 1.62;
 /** Share of the wavelength-scale Beckmann quasi-specular diffuse skirt (|n·d|^1.5) vs coherent mirror lobe (|n·d|^4). */
 export const SPECULAR_SKIRT_SHARE = 0.22;
-/** Sub-millimetre (~1.2 mm) material-anchored facet roughness frequency (cycles/cm) and lattice offset. */
-export const SPECULAR_ROUGH_FREQ = 8.5;
-export const SPECULAR_ROUGH_OFFSET: readonly [number, number, number] = [19.7, 41.3, 7.9];
-/** Facet modulation depth of the coherent mirror lobe (±13 %) and of the oblique quasi-specular skirt (±42.5 %). */
-export const SPECULAR_MIRROR_MOD = 0.26;
-export const SPECULAR_SKIRT_MOD = 0.85;
 /**
  * Short-range axial micro-reverberation (layer ringdown / comet-tail) behind hyper-reflective interfaces
  * (pericardium, dense valvular calcium, fibrous root): threshold on central specular amplitude, gains, and decay.
@@ -92,22 +86,18 @@ export const SPEC_TAIL_DECAY_CM = 0.085;
 
 /**
  * Two-regime Kirchhoff/Beckmann interface echo at signed distance magnitude `absSdf` (cm), incidence cosine `nd`
- * (|n·d| ∈ [0, 1]), radial step `dr` (cm) and material-anchored facet roughness `rough` ∈ [0, 1]:
+ * (|n·d| ∈ [0, 1]) and radial step `dr` (cm):
  *  - partition-of-unity linear tent `1 − absSdf / w` eliminates sub-sample 2:1 Moiré banding on curved borders;
  *  - coherent mirror lobe (|n·d|⁴) gives crisp normal-incidence highlights (pericardium, anterior/posterior aorta);
  *  - quasi-specular Beckmann skirt (|n·d|^1.5) preserves continuous organic endocardial/leaflet borders at 35°–75°
  *    incidence while vanishing at 90° (`nd = 0`) so true parallel-wall lateral dropout stays intact.
  */
-export function interfaceEcho(absSdf: number, nd: number, dr: number, rough: number): number {
+export function interfaceEcho(absSdf: number, nd: number, dr: number): number {
   const c = Math.max(0, Math.min(1, nd));
   const w = Math.max(c, SPECULAR_WINDOW_MIN) * Math.max(1e-6, dr);
-  if (absSdf >= w || absSdf < 0) return 0;
-  const tent = (1 - absSdf / w) * SPECULAR_TENT_NORM;
-  const r = Math.max(0, Math.min(1, rough)) - 0.5;
+  const tent = absSdf >= 0 ? Math.max(0, 1 - absSdf / w) * SPECULAR_TENT_NORM : 0;
   const c2 = c * c;
-  const mirror = c2 * c2 * (1 + SPECULAR_MIRROR_MOD * r);
-  const skirt = c * Math.sqrt(c) * (1 + SPECULAR_SKIRT_MOD * r);
-  return tent * ((1 - SPECULAR_SKIRT_SHARE) * mirror + SPECULAR_SKIRT_SHARE * skirt);
+  return tent * ((1 - SPECULAR_SKIRT_SHARE) * c2 * c2 + SPECULAR_SKIRT_SHARE * c * Math.sqrt(c));
 }
 
 /** Source amplitude of short-range axial micro-reverberation behind strong specular or calcified reflectors. */
@@ -523,10 +513,6 @@ export const ACOUSTIC_GLSL_CONSTANTS: Readonly<
   SPECULAR_WINDOW_MIN,
   SPECULAR_TENT_NORM,
   SPECULAR_SKIRT_SHARE,
-  SPECULAR_ROUGH_FREQ,
-  SPECULAR_ROUGH_OFFSET,
-  SPECULAR_MIRROR_MOD,
-  SPECULAR_SKIRT_MOD,
   SPEC_TAIL_THRESHOLD,
   SPEC_TAIL_GAIN,
   CALC_TAIL_GAIN,

@@ -243,17 +243,17 @@ float sriAt(int si, int li, float strength) {
   float normMean = normW > 1e-6 ? (wn0 * (ee + ww) + wn1 * (ss + nn) + wn2 * (se + nw) + wn3 * (ne + sw)) / normW : cc;
 
   if (hasCoarse) {
-    float cwe  = g0 * exp(-(ee2 - cc) * (ee2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cw_w = g0 * exp(-(ww2 - cc) * (ww2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cws  = g1 * exp(-(ss2 - cc) * (ss2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cwn  = g1 * exp(-(nn2 - cc) * (nn2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cwse = g2 * exp(-(se2 - cc) * (se2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cwnw = g2 * exp(-(nw2 - cc) * (nw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cwne = g3 * exp(-(ne2 - cc) * (ne2 - cc) * SRI_INV_2_COARSE_SIGMA2);
-    float cwsw = g3 * exp(-(sw2 - cc) * (sw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    we  = g0 * exp(-(ee2 - cc) * (ee2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    w_w = g0 * exp(-(ww2 - cc) * (ww2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    ws  = g1 * exp(-(ss2 - cc) * (ss2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    wn  = g1 * exp(-(nn2 - cc) * (nn2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    wse = g2 * exp(-(se2 - cc) * (se2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    wnw = g2 * exp(-(nw2 - cc) * (nw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    wne = g3 * exp(-(ne2 - cc) * (ne2 - cc) * SRI_INV_2_COARSE_SIGMA2);
+    wsw = g3 * exp(-(sw2 - cc) * (sw2 - cc) * SRI_INV_2_COARSE_SIGMA2);
 
-    float tangW2 = cwe + cw_w + cws + cwn + cwse + cwnw + cwne + cwsw + SRI_CENTER_WEIGHT;
-    float tangMean2 = (cwe * ee2 + cw_w * ww2 + cws * ss2 + cwn * nn2 + cwse * se2 + cwnw * nw2 + cwne * ne2 + cwsw * sw2 + SRI_CENTER_WEIGHT * cc) / tangW2;
+    float tangW2 = we + w_w + ws + wn + wse + wnw + wne + wsw + SRI_CENTER_WEIGHT;
+    float tangMean2 = (we * ee2 + w_w * ww2 + ws * ss2 + wn * nn2 + wse * se2 + wnw * nw2 + wne * ne2 + wsw * sw2 + SRI_CENTER_WEIGHT * cc) / tangW2;
     tangMean = (1.0 - SRI_COARSE_SHARE) * tangMean + SRI_COARSE_SHARE * tangMean2;
 
     float loC = cc - 0.28, hiC = cc + 0.28;

@@ -225,7 +225,7 @@ test('two-regime Kirchhoff/Beckmann interfaceEcho eliminates sub-sample Moiré a
     let sum = 0;
     for (let k = -3; k <= 3; k++) {
       const sdf = Math.abs((k - frac) * nd * dr);
-      sum += interfaceEcho(sdf, nd, dr, 0.5);
+      sum += interfaceEcho(sdf, nd, dr);
     }
     return sum;
   };
@@ -236,12 +236,12 @@ test('two-regime Kirchhoff/Beckmann interfaceEcho eliminates sub-sample Moiré a
       `expected sub-sample coherent sum invariance, got ${sumAtPhase(frac, 0.85)} vs ${baseSum}`,
     );
   }
-  assert.ok(Math.abs(interfaceEcho(0, 1, dr, 0.5) - SPECULAR_TENT_NORM) < 1e-9);
+  assert.ok(Math.abs(interfaceEcho(0, 1, dr) - SPECULAR_TENT_NORM) < 1e-9);
 
   // 2) At 60° oblique incidence (nd = 0.5), Beckmann diffuse skirt lifts border echo above pure |n·d|^4 while nd = 0 drops to 0
   const pureFourth = SPECULAR_TENT_NORM * Math.pow(0.5, 4);
-  assert.ok(interfaceEcho(0, 0.5, dr, 0.5) > pureFourth * 1.8);
-  assert.equal(interfaceEcho(0, 0, dr, 0.5), 0);
+  assert.ok(interfaceEcho(0, 0.5, dr) > pureFourth * 1.8);
+  assert.equal(interfaceEcho(0, 0, dr), 0);
 
   // 3) Axial micro-reverberation tail source activates only on strong specular / calcific reflectors
   assert.equal(interfaceTailSource(0.2, 0.1), 0);

@@ -73,8 +73,6 @@ import {
   SCATTER_FREQ_RATIO,
   SPECULAR_GAIN,
   SPECULAR_HARMONIC,
-  SPECULAR_ROUGH_FREQ,
-  SPECULAR_ROUGH_OFFSET,
   SPEC_TAIL_DECAY_CM,
   interfaceEcho,
   interfaceTailSource,
@@ -102,7 +100,6 @@ const [PIB_X, PIB_Y, PIB_Z] = PHASOR_IM_B;
 const [HET_X, HET_Y, HET_Z] = HETERO_OFFSET;
 const [GR_X, GR_Y, GR_Z] = GRAIN_OFFSET;
 const [CAL_X, CAL_Y, CAL_Z] = CALCIUM_OFFSET;
-const [SRO_X, SRO_Y, SRO_Z] = SPECULAR_ROUGH_OFFSET;
 const [CRB_X, CRB_Y] = CLUTTER_RE_B;
 const [CIA_X, CIA_Y, CIA_Z] = CLUTTER_IM_A;
 const [CIB_X, CIB_Y, CIB_Z] = CLUTTER_IM_B;
@@ -553,16 +550,10 @@ export class ProceduralSliceRenderer implements RendererBackend {
       if (props.specular > 0) {
         const sScale = props.specular * SPECULAR_GAIN * (harm ? SPECULAR_HARMONIC : 1);
         const absSdf = Math.abs(q.sdf);
-        const rough = latticeNoise3(
-          q.mx * SPECULAR_ROUGH_FREQ + SRO_X,
-          q.my * SPECULAR_ROUGH_FREQ + SRO_Y,
-          q.mz * SPECULAR_ROUGH_FREQ + SRO_Z,
-          latB,
-        );
-        const sp0 = sScale * interfaceEcho(absSdf, nd, dr, rough);
+        const sp0 = sScale * interfaceEcho(absSdf, nd, dr);
         if (sc > 0) {
-          const spP = sScale * interfaceEcho(absSdf, ndP, dr, rough);
-          const spM = sScale * interfaceEcho(absSdf, ndM, dr, rough);
+          const spP = sScale * interfaceEcho(absSdf, ndP, dr);
+          const spM = sScale * interfaceEcho(absSdf, ndM, dr);
           specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
         } else {
           specular = sp0;
@@ -573,12 +564,10 @@ export class ProceduralSliceRenderer implements RendererBackend {
     };
     let tail0 = 0,
       tail1 = 0,
-      tail2 = 0,
-      tail3 = 0;
+      tail2 = 0;
     const td1 = Math.exp(-dr / SPEC_TAIL_DECAY_CM),
       td2 = td1 * td1,
-      td3 = td2 * td1,
-      td4 = td2 * td2;
+      td3 = td2 * td1;
     for (let si = 0; si < samples; si++) {
       const r = (si + 0.5) * dr;
       const idx = base + si;
@@ -604,7 +593,6 @@ export class ProceduralSliceRenderer implements RendererBackend {
         tr[idx] = transmission;
         ti[idx] = Tissue.None;
         if (sg) sg[idx] = 0;
-        tail3 = tail2;
         tail2 = tail1;
         tail1 = tail0;
         tail0 = 0;
@@ -722,14 +710,13 @@ export class ProceduralSliceRenderer implements RendererBackend {
       sigma *= fg;
       specular *= fg;
       if (!line) {
-        const tail = tail0 * td1 + tail1 * td2 + tail2 * td3 + tail3 * td4;
+        const tail = tail0 * td1 + tail1 * td2 + tail2 * td3;
         if (tail > 0) {
           const tScaled = tail * fg;
           sigma += 0.65 * tScaled;
           specular += 0.35 * tScaled;
         }
         const extraQ = Math.round(Math.max(0, Math.min(1, s.extraReflect)) * 255) / 255;
-        tail3 = tail2;
         tail2 = tail1;
         tail1 = tail0;
         tail0 = interfaceTailSource(specCentral, extraQ);

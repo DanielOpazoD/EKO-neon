@@ -69,11 +69,10 @@ void acoustic(int tissue, int structure, float sdf, float extra, float nd, float
     float dr = DEPTH / SAMPLES;
     float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
     float absSdf = abs(sdf);
-    float rough = lat(m * SPECULAR_ROUGH_FREQ + SPECULAR_ROUGH_OFFSET, 1);
-    float sp0 = sScale * interfaceEcho(absSdf, nd, dr, rough);
+    float sp0 = sScale * interfaceEcho(absSdf, nd, dr);
     if (sc > 0.0) {
-      float spP = sScale * interfaceEcho(absSdf, ndP, dr, rough);
-      float spM = sScale * interfaceEcho(absSdf, ndM, dr, rough);
+      float spP = sScale * interfaceEcho(absSdf, ndP, dr);
+      float spM = sScale * interfaceEcho(absSdf, ndM, dr);
       specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
     } else {
       specular = sp0;
@@ -258,11 +257,10 @@ void acousticSide(int tissue, int structure, float sdf, float extra, float nd, f
     float dr = DEPTH / SAMPLES;
     float sScale = props.y * SPECULAR_GAIN * (HARM > 0.5 ? SPECULAR_HARMONIC : 1.0);
     float absSdf = abs(sdf);
-    float rough = lat(m * SPECULAR_ROUGH_FREQ + SPECULAR_ROUGH_OFFSET, 1);
-    float sp0 = sScale * interfaceEcho(absSdf, nd, dr, rough);
+    float sp0 = sScale * interfaceEcho(absSdf, nd, dr);
     if (sc > 0.0) {
-      float spP = sScale * interfaceEcho(absSdf, ndP, dr, rough);
-      float spM = sScale * interfaceEcho(absSdf, ndM, dr, rough);
+      float spP = sScale * interfaceEcho(absSdf, ndP, dr);
+      float spM = sScale * interfaceEcho(absSdf, ndM, dr);
       specular = 0.5 * sp0 + 0.25 * spP + 0.25 * spM;
     } else {
       specular = sp0;
@@ -389,6 +387,13 @@ float chestWallClutter(int li, float r) {
   // decision 296: texture comes from the incoherent phasors and receive PSF, not coarse image-plane spots
   cm += CLUTTER_HAZE;
   return cm * CLUTTER;
+}
+
+// src/simulator/renderer/acoustic/acoustics.ts: interfaceTailSource
+float interfaceTailSource(float specular, float extraReflect) {
+  float sp = max(0.0, specular - SPEC_TAIL_THRESHOLD) * SPEC_TAIL_GAIN;
+  float ca = max(0.0, (extraReflect - CALCIUM_ATTEN_THRESHOLD) / (1.0 - CALCIUM_ATTEN_THRESHOLD)) * CALC_TAIL_GAIN;
+  return sp + min(CALC_TAIL_GAIN, ca);
 }
 
 void main() {
@@ -545,14 +550,13 @@ void main() {
   sigma *= fg;
   specular *= fg;
   // short-range axial micro-reverberation (layer ringdown / comet-tail) behind strong specular & calcific reflectors
-  float tail = 0.0;
-  for (int k = 1; k <= 4; k++) {
+  // (outside-body and lung samples already hold 0 in uPassC.x and uPassB.z, avoiding uPassA fetches)
+  float td1 = exp(-dr / SPEC_TAIL_DECAY_CM), td = td1, tail = 0.0;
+  for (int k = 1; k <= 3; k++) {
     int sk = si - k;
     if (sk < 0) break;
-    vec4 ap = texelFetch(uPassA, ivec2(sk, li), 0);
-    if (ap.w < 0.5 || ap.z > 0.5) continue;
-    float ts = interfaceTailSource(texelFetch(uPassC, ivec2(sk, li), 0).x, texelFetch(uPassB, ivec2(sk, li), 0).z);
-    if (ts > 0.0) tail += ts * exp(-float(k) * dr / SPEC_TAIL_DECAY_CM);
+    tail += interfaceTailSource(texelFetch(uPassC, ivec2(sk, li), 0).x, texelFetch(uPassB, ivec2(sk, li), 0).z) * td;
+    td *= td1;
   }
   if (tail > 0.0) {
     float tScaled = tail * fg;
